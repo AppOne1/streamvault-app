@@ -1,0 +1,143 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --font-sans: 'Vazirmatn', 'Sahel', 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    overscroll-behavior-y: none;
+  }
+
+  input, textarea, select, button {
+    font-family: inherit;
+  }
+}
+
+/* 3D Modern Minimalist Utilities */
+.card-3d {
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.06), 0 8px 10px -6px rgba(0, 0, 0, 0.04), inset 0 1px 1px 0 rgba(255, 255, 255, 0.8);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.dark .card-3d {
+  box-shadow: 0 12px 30px -8px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.3), inset 0 1px 0 0 rgba(255, 255, 255, 0.08);
+}
+.card-3d:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 35px -8px rgba(0, 0, 0, 0.09), 0 8px 16px -6px rgba(0, 0, 0, 0.05);
+}
+.dark .card-3d:hover {
+  box-shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.7), inset 0 1px 0 0 rgba(255, 255, 255, 0.12);
+}
+
+/* 3D Tactile Buttons */
+.btn-3d-primary {
+  box-shadow: 0 4px 0 0 #4338ca, 0 8px 16px -2px rgba(79, 70, 229, 0.4);
+  transition: all 0.15s ease-out;
+}
+.btn-3d-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 5px 0 0 #4338ca, 0 12px 20px -2px rgba(79, 70, 229, 0.5);
+}
+.btn-3d-primary:active {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 0 #4338ca, 0 4px 8px -2px rgba(79, 70, 229, 0.3);
+}
+
+.btn-3d-emerald {
+  box-shadow: 0 4px 0 0 #047857, 0 8px 16px -2px rgba(16, 185, 129, 0.4);
+  transition: all 0.15s ease-out;
+}
+.btn-3d-emerald:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 5px 0 0 #047857, 0 12px 20px -2px rgba(16, 185, 129, 0.5);
+}
+.btn-3d-emerald:active {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 0 #047857, 0 4px 8px -2px rgba(16, 185, 129, 0.3);
+}
+
+.btn-3d-secondary {
+  box-shadow: 0 3px 0 0 rgba(148, 163, 184, 0.3), 0 4px 8px rgba(0, 0, 0, 0.04);
+  transition: all 0.15s ease-out;
+}
+.dark .btn-3d-secondary {
+  box-shadow: 0 3px 0 0 rgba(30, 41, 59, 0.9), 0 4px 8px rgba(0, 0, 0, 0.3);
+}
+.btn-3d-secondary:active {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 0 rgba(148, 163, 184, 0.2);
+}
+
+/* 3D Spherical Dots */
+.dot-3d-green {
+  background: radial-gradient(circle at 35% 35%, #86efac, #16a34a 65%, #14532d 100%);
+  box-shadow: 0 2px 6px rgba(22, 163, 74, 0.5), inset 0 1px 1px rgba(255, 255, 255, 0.6);
+}
+.dot-3d-red {
+  background: radial-gradient(circle at 35% 35%, #fca5a5, #dc2626 65%, #7f1d1d 100%);
+  box-shadow: 0 2px 6px rgba(220, 38, 38, 0.5), inset 0 1px 1px rgba(255, 255, 255, 0.6);
+}
+.dot-3d-amber {
+  background: radial-gradient(circle at 35% 35%, #fde047, #d97706 65%, #78350f 100%);
+  box-shadow: 0 2px 6px rgba(217, 119, 6, 0.5), inset 0 1px 1px rgba(255, 255, 255, 0.6);
+}
+.dot-3d-indigo {
+  background: radial-gradient(circle at 35% 35%, #a5b4fc, #4f46e5 65%, #312e81 100%);
+  box-shadow: 0 2px 6px rgba(79, 70, 229, 0.5), inset 0 1px 1px rgba(255, 255, 255, 0.6);
+}
+
+/* 3D Depth Text */
+.text-3d {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.dark .text-3d {
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+}
+
+/* 3D Neomorphic Input Field */
+.input-3d {
+  box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.04), 0 1px 2px 0 rgba(255, 255, 255, 0.6);
+}
+.dark .input-3d {
+  box-shadow: inset 0 2px 5px 0 rgba(0, 0, 0, 0.5), inset 0 0 1px 1px rgba(255, 255, 255, 0.05);
+}
+
+/* Custom crisp dark/light scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.3);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.5);
+}
+
+/* Audio Visualizer Bar Animation */
+@keyframes soundwave {
+  0%, 100% { height: 15%; }
+  50% { height: 95%; }
+}
+.animate-soundwave {
+  animation: soundwave 1.2s ease-in-out infinite;
+}
+
+/* Shimmer animation for download progress */
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+.animate-shimmer {
+  animation: shimmer 2s infinite linear;
+}

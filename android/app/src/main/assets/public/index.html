@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      /* Stub Vite HMR WebSocket in cloud proxy/iframe environment */
+      (function() {
+        if (typeof window === 'undefined') return;
+        var OrigWS = window.WebSocket;
+        if (!OrigWS) return;
+        function MockViteWS(url, protocols) {
+          var isVite = (protocols && (protocols === 'vite-hmr' || protocols === 'vite-ping')) ||
+                       (typeof url === 'string' && (url.indexOf('token=') !== -1 || url.indexOf('vite') !== -1 || url.indexOf('/@vite') !== -1));
+          if (isVite) {
+            var target = new EventTarget();
+            target.url = String(url);
+            target.protocol = String(protocols || '');
+            target.readyState = 1; // WebSocket.OPEN
+            target.OPEN = 1;
+            target.CONNECTING = 0;
+            target.CLOSING = 2;
+            target.CLOSED = 3;
+            target.binaryType = 'blob';
+            target.bufferedAmount = 0;
+            target.extensions = '';
+            target.send = function() {};
+            target.close = function() {
+              target.readyState = 3;
+            };
+            ['open', 'close', 'error', 'message'].forEach(function(evt) {
+              var handlerKey = 'on' + evt;
+              var handler = null;
+              Object.defineProperty(target, handlerKey, {
+                get: function() { return handler; },
+                set: function(fn) {
+                  if (handler) target.removeEventListener(evt, handler);
+                  handler = fn;
+                  if (fn) target.addEventListener(evt, fn);
+                }
+              });
+            });
+            setTimeout(function() {
+              target.dispatchEvent(new Event('open'));
+            }, 10);
+            return target;
+          }
+          return new OrigWS(url, protocols);
+        }
+        MockViteWS.CONNECTING = 0;
+        MockViteWS.OPEN = 1;
+        MockViteWS.CLOSING = 2;
+        MockViteWS.CLOSED = 3;
+        MockViteWS.prototype = OrigWS.prototype;
+        window.WebSocket = MockViteWS;
+      })();
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <title>StreamVault - Media Downloader</title>
+    <meta name="description" content="High-performance cross-platform video and audio downloader with multi-resolution 4K/WEBM/MP4 streams, 320kbps audio extraction, and offline player." />
+    <meta property="og:title" content="StreamVault - Media Downloader" />
+    <meta property="og:description" content="High-performance cross-platform video and audio downloader with multi-resolution 4K/WEBM/MP4 streams, 320kbps audio extraction, and offline player." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    
+    <!-- PWA & Mobile Meta Tags -->
+    <meta name="theme-color" content="#4f46e5" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="وان‌اکسپرس" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+
+    <!-- Typography: Sahel Font + Vazirmatn + Plus Jakarta Sans Fallbacks -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Vazirmatn:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/rastikerdar/sahel-font@v3.4.0/dist/font-face.css" />
+    <!-- Suppress harmless Vite HMR WebSocket errors in cloud proxy/iframe -->
+    <script>
+      window.addEventListener('error', function(e) {
+        if (e && e.message && (e.message.indexOf('WebSocket') !== -1 || e.message.indexOf('@vite/client') !== -1)) {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+        }
+      }, true);
+      window.addEventListener('unhandledrejection', function(e) {
+        var msg = e && e.reason ? (e.reason.message || String(e.reason)) : '';
+        if (msg.indexOf('WebSocket') !== -1 || msg.indexOf('@vite/client') !== -1) {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+        }
+      }, true);
+    </script>
+    <!-- Immediate Theme & Direction Init -->
+    <script>
+      try {
+        const rawSettings = localStorage.getItem('streamvault_settings_v2');
+        if (rawSettings) {
+          const parsed = JSON.parse(rawSettings);
+          if (parsed.theme === 'dark' || (!parsed.theme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.documentElement.classList.add('dark');
+          } else if (parsed.theme === 'light') {
+            document.documentElement.classList.remove('dark');
+          }
+          if (parsed.language === 'fa') {
+            document.documentElement.setAttribute('dir', 'rtl');
+            document.documentElement.setAttribute('lang', 'fa');
+          }
+        } else {
+          document.documentElement.classList.add('dark');
+          document.documentElement.setAttribute('dir', 'rtl');
+        }
+      } catch (e) {}
+    </script>
+    <script type="module" crossorigin src="/assets/index-BGoH48S9.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-T0tBLoVl.css">
+  <link rel="manifest" href="/manifest.webmanifest"></head>
+  <body class="bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 antialiased selection:bg-indigo-500 selection:text-white">
+    <div id="root"></div>
+  </body>
+</html>
+

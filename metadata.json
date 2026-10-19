@@ -1,0 +1,8 @@
+{
+  "name": "StreamVault - Media Downloader",
+  "description": "High-performance cross-platform video and audio downloader with multi-resolution 4K/WEBM/MP4 streams, 320kbps audio extraction, and offline player.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

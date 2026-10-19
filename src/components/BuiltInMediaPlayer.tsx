@@ -1,0 +1,704 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { DownloadTask, Language } from '../types';
+import { getTranslation } from '../i18n/translations';
+import { PlatformIcon } from './PlatformIcon';
+import { getMediaBlobFromIDB, getOfflineMedia } from '../services/storageService';
+import { extractYouTubeVideoId, getSafeThumbnail, isWebpageUrl } from '../services/platformDetector';
+import { downloadEngine } from '../services/downloadEngine';
+import {
+  Play,
+  Pause,
+  Volume2,
+  VolumeX,
+  Maximize,
+  Minimize2,
+  X,
+  RotateCcw,
+  Sparkles,
+  Music,
+  Download,
+  Tv,
+  HardDrive,
+  Film,
+  ExternalLink,
+  Loader2,
+  Check,
+  Timer,
+  RotateCw
+} from 'lucide-react';
+
+interface BuiltInMediaPlayerProps {
+  language: Language;
+  task: DownloadTask | null;
+  onClose: () => void;
+  onSaveToDisk: (task: DownloadTask) => void;
+}
+
+export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
+  language,
+  task,
+  onClose,
+  onSaveToDisk
+}) => {
+  const t = getTranslation(language);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const playerContainerRef = useRef<HTMLDivElement | null>(null);
+
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [currentTime, setCurrentTime] = useState<number>(0);
+  const [duration, setDuration] = useState<number>(0);
+  const [volume, setVolume] = useState<number>(0.9);
+  const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
+  const [isLooping, setIsLooping] = useState<boolean>(true);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [activeMediaUrl, setActiveMediaUrl] = useState<string | null>(null);
+  const [sleepTimer, setSleepTimer] = useState<number | null>(null);
+  const [showSleepMenu, setShowSleepMenu] = useState<boolean>(false);
+
+  // Detect YouTube ID for authentic real video playback
+  const ytVideoId = task?.videoId || (task?.originalUrl ? extractYouTubeVideoId(task.originalUrl) : null);
+  const [activeEngine, setActiveEngine] = useState<'server1' | 'server2'>('server1');
+  
+  // Default to real stream embed when available, or local file
+  const [playerMode, setPlayerMode] = useState<'stream' | 'file'>('file');
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [saveStatusText, setSaveStatusText] = useState<string | null>(null);
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
+
+  // Sleep timer auto-pause
+  useEffect(() => {
+    if (!sleepTimer) return;
+    const timeout = setTimeout(() => {
+      const mediaEl = task?.format.type === 'video' ? videoRef.current : audioRef.current;
+      if (mediaEl) {
+        mediaEl.pause();
+        setIsPlaying(false);
+      }
+      setSleepTimer(null);
+    }, sleepTimer * 60 * 1000);
+
+    return () => clearTimeout(timeout);
+  }, [sleepTimer, task?.format.type]);
+
+  const handleSaveClick = async () => {
+    if (isSaving || !task) return;
+    setIsSaving(true);
+    setSaveStatusText(language === 'fa' ? 'در حال آماده‌سازی...' : 'Preparing...');
+    try {
+      const success = await downloadEngine.saveFileToDisk(task, (msg) => {
+        setSaveStatusText(msg);
+      });
+      if (success) {
+        setSaveStatusText(language === 'fa' ? 'ذخیره شد! ✓' : 'Saved! ✓');
+        setTimeout(() => {
+          setIsSaving(false);
+          setSaveStatusText(null);
+        }, 3000);
+      } else {
+        setIsSaving(false);
+        setSaveStatusText(null);
+      }
+    } catch {
+      setIsSaving(false);
+      setSaveStatusText(null);
+    }
+  };
+
+  // Load / resolve playable Blob URL from memory or IndexedDB offline_media store
+  useEffect(() => {
+    if (!task) return;
+
+    let isMounted = true;
+    const resolveBlob = async () => {
+      // 1. In-memory mediaBlob (must have real data > 1KB)
+      if (task.mediaBlob && task.mediaBlob.size > 1024) {
+        const url = URL.createObjectURL(task.mediaBlob);
+        task.blobUrl = url;
+        if (isMounted) {
+          setActiveMediaUrl(url);
+          setPlayerMode('file');
+        }
+        return;
+      }
+
+      // 2. In-memory blobUrl (only if valid)
+      if (task.blobUrl && (!task.mediaBlob || task.mediaBlob.size > 1024)) {
+        setActiveMediaUrl(task.blobUrl);
+        setPlayerMode('file');
+        return;
+      }
+
+      // 3. Try fetching from IndexedDB offline_media ObjectStore
+      const offlineRecord = await getOfflineMedia(task.id);
+      if (offlineRecord && offlineRecord.mediaBlob && offlineRecord.mediaBlob.size > 1024 && isMounted) {
+        const url = URL.createObjectURL(offlineRecord.mediaBlob);
+        task.blobUrl = url;
+        task.mediaBlob = offlineRecord.mediaBlob;
+        setActiveMediaUrl(url);
+        setPlayerMode('file');
+        return;
+      }
+
+      // 4. Try legacy IDB store
+      const blobFromDB = await getMediaBlobFromIDB(task.id);
+      if (blobFromDB && blobFromDB.size > 1024 && isMounted) {
+        const url = URL.createObjectURL(blobFromDB);
+        task.blobUrl = url;
+        task.mediaBlob = blobFromDB;
+        setActiveMediaUrl(url);
+        setPlayerMode('file');
+        return;
+      }
+
+      // 5. Try direct stream URL (only if genuine media stream, not web page HTML)
+      if (task.directUrl && isMounted) {
+        if (!isWebpageUrl(task.directUrl)) {
+          setActiveMediaUrl(task.directUrl);
+          setPlayerMode('file');
+          return;
+        }
+      }
+
+      // 6. If no non-empty offline file exists yet, default to YouTube stream mode
+      if (isMounted) {
+        if (ytVideoId) {
+          setPlayerMode('stream');
+        } else {
+          setPlayerMode('file');
+        }
+      }
+    };
+
+    resolveBlob();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [task, ytVideoId]);
+
+  if (!task) return null;
+
+  const isVideo = task.format.type === 'video';
+
+  const handleMediaError = () => {
+    console.warn('Playback notice: media element error, attempting alternative stream...');
+    if (ytVideoId) {
+      setPlayerMode('stream');
+      setPlaybackError(null);
+    } else {
+      setPlaybackError(
+        language === 'fa'
+          ? 'خطا در پخش فایل محلی. لطفاً از دکمه «ذخیره در دستگاه» استفاده فرمایید.'
+          : 'Playback notice. Please save file to device or retry.'
+      );
+    }
+  };
+
+  const togglePlay = () => {
+    const mediaEl = isVideo ? videoRef.current : audioRef.current;
+    if (!mediaEl) return;
+
+    if (isPlaying) {
+      mediaEl.pause();
+      setIsPlaying(false);
+    } else {
+      mediaEl.play()
+        .then(() => setIsPlaying(true))
+        .catch((err) => {
+          console.warn('Playback error caught:', err?.message);
+          setIsPlaying(false);
+        });
+    }
+  };
+
+  const handleTimeUpdate = () => {
+    const mediaEl = isVideo ? videoRef.current : audioRef.current;
+    if (mediaEl) {
+      setCurrentTime(mediaEl.currentTime);
+      if (mediaEl.duration && !isNaN(mediaEl.duration)) {
+        setDuration(mediaEl.duration);
+      }
+    }
+  };
+
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newTime = parseFloat(e.target.value);
+    const mediaEl = isVideo ? videoRef.current : audioRef.current;
+    if (mediaEl) {
+      mediaEl.currentTime = newTime;
+      setCurrentTime(newTime);
+    }
+  };
+
+  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newVol = parseFloat(e.target.value);
+    setVolume(newVol);
+    setIsMuted(newVol === 0);
+    const mediaEl = isVideo ? videoRef.current : audioRef.current;
+    if (mediaEl) mediaEl.volume = newVol;
+  };
+
+  const toggleMute = () => {
+    const mediaEl = isVideo ? videoRef.current : audioRef.current;
+    if (!mediaEl) return;
+    if (isMuted) {
+      mediaEl.muted = false;
+      setIsMuted(false);
+    } else {
+      mediaEl.muted = true;
+      setIsMuted(true);
+    }
+  };
+
+  const cycleSpeed = () => {
+    const speeds = [0.75, 1, 1.25, 1.5, 2];
+    const nextIdx = (speeds.indexOf(playbackSpeed) + 1) % speeds.length;
+    const nextSpeed = speeds[nextIdx];
+    setPlaybackSpeed(nextSpeed);
+    const mediaEl = isVideo ? videoRef.current : audioRef.current;
+    if (mediaEl) mediaEl.playbackRate = nextSpeed;
+  };
+
+  const togglePiP = async () => {
+    if (!videoRef.current) return;
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      } else if (document.pictureInPictureEnabled) {
+        await videoRef.current.requestPictureInPicture();
+      }
+    } catch (err) {
+      console.warn('PiP error:', err);
+    }
+  };
+
+  const toggleFullscreen = async () => {
+    if (!playerContainerRef.current) return;
+    try {
+      if (!document.fullscreenElement) {
+        await playerContainerRef.current.requestFullscreen();
+        setIsFullscreen(true);
+        // Attempt landscape lock if supported by mobile screen orientation API
+        if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any).lock) {
+          (screen.orientation as any).lock('any').catch(() => {});
+        }
+      } else {
+        await document.exitFullscreen();
+        setIsFullscreen(false);
+        if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any).unlock) {
+          (screen.orientation as any).unlock();
+        }
+      }
+    } catch (err) {
+      console.warn('Fullscreen toggle:', err);
+    }
+  };
+
+  const skipSeconds = (delta: number) => {
+    const mediaEl = isVideo ? videoRef.current : audioRef.current;
+    if (!mediaEl) return;
+    mediaEl.currentTime = Math.max(0, Math.min(mediaEl.duration || Infinity, mediaEl.currentTime + delta));
+  };
+
+  const toggleOrientation = async () => {
+    try {
+      if (typeof screen !== 'undefined' && 'orientation' in screen) {
+        const currentType = (screen.orientation as any).type || '';
+        if (currentType.includes('portrait')) {
+          if ((screen.orientation as any).lock) await (screen.orientation as any).lock('landscape');
+        } else {
+          if ((screen.orientation as any).lock) await (screen.orientation as any).lock('portrait');
+        }
+      }
+    } catch {
+      // Fallback
+    }
+  };
+
+  const formatSecs = (seconds: number) => {
+    if (isNaN(seconds) || seconds < 0) return '00:00';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/85 backdrop-blur-lg animate-fade-in">
+      <div
+        ref={playerContainerRef}
+        className="relative w-full max-w-4xl rounded-2xl bg-slate-950 border border-slate-800 text-white shadow-2xl overflow-hidden flex flex-col my-auto"
+      >
+        {/* Top Header Bar */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between px-4 py-3 bg-slate-900/90 border-b border-slate-800 gap-2 shrink-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <PlatformIcon platform={task.platform} size={22} />
+            <div className="truncate">
+              <h3 className="font-bold text-sm sm:text-base text-white truncate">
+                {task.title}
+              </h3>
+              <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
+                <span className="text-indigo-400 font-bold">{task.format.qualityLabel}</span>
+                <span>•</span>
+                <span>{task.durationFormatted || 'HD'}</span>
+                <span>•</span>
+                <span>{task.format.format.toUpperCase()}</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+            {/* Stream Mode vs Local File Mode Switcher (for YouTube / Video) */}
+            {ytVideoId && isVideo && (
+              <div className="flex items-center p-0.5 rounded-lg bg-slate-800 text-xs font-semibold">
+                <button
+                  onClick={() => setPlayerMode('stream')}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all ${
+                    playerMode === 'stream'
+                      ? 'bg-indigo-600 text-white shadow-xs'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="پخش ویدیوی اصلی و کامل"
+                >
+                  <Tv className="w-3.5 h-3.5" />
+                  <span className="text-[11px]">{language === 'fa' ? 'ویدیوی اصلی' : 'Real Stream'}</span>
+                </button>
+                <button
+                  onClick={() => setPlayerMode('file')}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all ${
+                    playerMode === 'file'
+                      ? 'bg-indigo-600 text-white shadow-xs'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="پخش فایل محلی"
+                >
+                  <HardDrive className="w-3.5 h-3.5" />
+                  <span className="text-[11px]">{language === 'fa' ? 'فایل آفلاین' : 'Offline'}</span>
+                </button>
+              </div>
+            )}
+
+            {/* Direct Save to Device Button */}
+            <button
+              onClick={handleSaveClick}
+              disabled={isSaving}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                isSaving
+                  ? 'bg-amber-600 text-white cursor-wait opacity-90'
+                  : saveStatusText?.includes('✓')
+                  ? 'bg-emerald-700 text-white'
+                  : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm shadow-emerald-600/30 active:scale-95'
+              }`}
+              title={t.saveToDisk}
+            >
+              {isSaving ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+              ) : saveStatusText?.includes('✓') ? (
+                <Check className="w-3.5 h-3.5 shrink-0" />
+              ) : (
+                <Download className="w-3.5 h-3.5 shrink-0" />
+              )}
+              <span className="truncate max-w-[150px]">
+                {saveStatusText || (language === 'fa' ? 'ذخیره در دستگاه' : 'Save File')}
+              </span>
+            </button>
+
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+              title={t.closePlayer}
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Media Screen Area */}
+        <div className="relative w-full aspect-video bg-black flex items-center justify-center overflow-hidden">
+          {isVideo ? (
+            <div className="relative w-full h-full flex items-center justify-center bg-black">
+              {playerMode === 'stream' && ytVideoId ? (
+                <iframe
+                  src={`https://www.youtube-nocookie.com/embed/${ytVideoId}?autoplay=1&playsinline=1&rel=0`}
+                  title={task.title}
+                  className="w-full h-full border-0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowFullScreen
+                />
+              ) : activeMediaUrl && !isWebpageUrl(activeMediaUrl) ? (
+                <video
+                  ref={videoRef}
+                  src={activeMediaUrl}
+                  loop={isLooping}
+                  onTimeUpdate={handleTimeUpdate}
+                  onLoadedMetadata={handleTimeUpdate}
+                  onEnded={() => setIsPlaying(false)}
+                  onError={handleMediaError}
+                  onClick={togglePlay}
+                  className="w-full h-full object-contain cursor-pointer"
+                  playsInline
+                  controls
+                  autoPlay
+                />
+              ) : playbackError ? (
+                <div className="p-6 text-center text-slate-300 flex flex-col items-center justify-center h-full max-w-md mx-auto">
+                  <div className="w-12 h-12 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center mb-3">
+                    <Film className="w-6 h-6" />
+                  </div>
+                  <h4 className="text-sm font-bold text-white mb-1.5">{playbackError}</h4>
+                  <div className="flex flex-wrap items-center justify-center gap-2 mt-3">
+                    {ytVideoId && (
+                      <button
+                        onClick={() => {
+                          setPlaybackError(null);
+                          setPlayerMode('stream');
+                        }}
+                        className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-all shadow-sm"
+                      >
+                        {language === 'fa' ? 'پخش با پلیر رسمی' : 'Switch to Stream'}
+                      </button>
+                    )}
+                    <button
+                      onClick={handleSaveClick}
+                      className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-all shadow-sm"
+                    >
+                      {language === 'fa' ? 'ذخیره در حافظه دستگاه' : 'Save to Device'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-8 text-center text-slate-400 flex flex-col items-center justify-center h-full">
+                  <Film className="w-12 h-12 text-indigo-400 mb-3 animate-pulse" />
+                  <div className="text-sm font-extrabold text-white mb-1">
+                    {language === 'fa' ? 'فایل در حال بارگذاری است...' : 'Media file is loading...'}
+                  </div>
+                  <p className="text-xs text-slate-500 max-w-xs mb-3">
+                    {language === 'fa' ? 'در صورت بروز اختلال شبکه، می‌توانید از پخش آنلاین یا ذخیره مستقیم استفاده کنید.' : 'You can switch to stream or save to device.'}
+                  </p>
+                  {ytVideoId && (
+                    <button
+                      onClick={() => setPlayerMode('stream')}
+                      className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold"
+                    >
+                      {language === 'fa' ? 'پخش آنلاین ویدیو' : 'Play Live Stream'}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="relative w-full h-full flex flex-col items-center justify-center p-6 bg-slate-900">
+              {(task.thumbnail || ytVideoId) && (
+                <img
+                  src={getSafeThumbnail(task.thumbnail, ytVideoId || undefined)}
+                  alt={task.title}
+                  className="absolute inset-0 w-full h-full object-cover opacity-30 blur-xs"
+                />
+              )}
+              <div className="relative z-10 w-20 h-20 rounded-3xl bg-indigo-600/60 flex items-center justify-center text-white mb-3 shadow-lg">
+                <Music className="w-10 h-10" />
+              </div>
+              {activeMediaUrl && !isWebpageUrl(activeMediaUrl) ? (
+                <audio
+                  ref={audioRef}
+                  src={activeMediaUrl}
+                  loop={isLooping}
+                  onTimeUpdate={handleTimeUpdate}
+                  onLoadedMetadata={handleTimeUpdate}
+                  onEnded={() => setIsPlaying(false)}
+                  onError={handleMediaError}
+                  controls
+                  autoPlay
+                  className="relative z-10 w-full max-w-md"
+                />
+              ) : (
+                <div className="relative z-10 text-center text-xs text-slate-300">
+                  <p className="mb-2">{language === 'fa' ? 'فایل صوتی آماده ذخیره در حافظه گوشی است' : 'Audio file is ready to save'}</p>
+                  <button
+                    onClick={handleSaveClick}
+                    className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold"
+                  >
+                    {language === 'fa' ? 'ذخیره در گوشی' : 'Save to Device'}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Player Status Bar */}
+        <div className="px-4 py-2 bg-slate-900/90 border-t border-slate-800 flex items-center justify-between text-xs">
+          <div className="flex items-center gap-2 text-slate-300">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-extrabold">
+              <Check className="w-3.5 h-3.5" />
+              <span>{language === 'fa' ? 'پخش مستقیم آفلاین' : 'Direct Playback (Zero-VPN)'}</span>
+            </span>
+          </div>
+
+          <span className="text-[11px] text-slate-400 font-mono">
+            {task.fileName}
+          </span>
+        </div>
+
+        {/* Custom Media Controls Chrome */}
+        <div className="p-4 bg-slate-900/95 border-t border-slate-800 space-y-2">
+            {/* Progress / Scrubber Bar */}
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-mono text-slate-400 min-w-[40px] text-right">
+                {formatSecs(currentTime)}
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={duration || (task.durationSeconds || 100)}
+                value={currentTime}
+                onChange={handleSeek}
+                className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+              />
+              <span className="text-xs font-mono text-slate-400 min-w-[40px]">
+                {task.durationFormatted || formatSecs(duration)}
+              </span>
+            </div>
+
+            {/* Playback Buttons Row */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={togglePlay}
+                  className="w-9 h-9 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center active:scale-95 transition-all"
+                  title={isPlaying ? t.pause : t.resume}
+                >
+                  {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
+                </button>
+
+                <button
+                  onClick={() => skipSeconds(-10)}
+                  className="px-2 py-1 rounded-lg text-xs font-mono font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
+                  title={language === 'fa' ? '۱۰ ثانیه عقب' : 'Skip -10s'}
+                >
+                  -10s
+                </button>
+
+                <button
+                  onClick={() => skipSeconds(10)}
+                  className="px-2 py-1 rounded-lg text-xs font-mono font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
+                  title={language === 'fa' ? '۱۰ ثانیه جلو' : 'Skip +10s'}
+                >
+                  +10s
+                </button>
+
+                <button
+                  onClick={() => setIsLooping(!isLooping)}
+                  className={`p-2 rounded-xl transition-colors ${
+                    isLooping ? 'text-indigo-400 bg-indigo-950/60' : 'text-slate-400 hover:text-white'
+                  }`}
+                  title={t.loop}
+                >
+                  <RotateCcw className="w-4 h-4" />
+                </button>
+
+                <button
+                  onClick={cycleSpeed}
+                  className="px-2 py-1 rounded-lg text-xs font-mono font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
+                  title={t.playbackSpeed}
+                >
+                  {playbackSpeed}x
+                </button>
+
+                {/* Sleep Timer */}
+                <div className="relative">
+                  <button
+                    onClick={() => setShowSleepMenu(!showSleepMenu)}
+                    className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-bold transition-colors ${
+                      sleepTimer ? 'bg-indigo-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                    }`}
+                    title={language === 'fa' ? 'تایمر خواب' : 'Sleep Timer'}
+                  >
+                    <Timer className="w-3.5 h-3.5" />
+                    <span>{sleepTimer ? `${sleepTimer}m` : (language === 'fa' ? 'تایمر خواب' : 'Timer')}</span>
+                  </button>
+
+                  {showSleepMenu && (
+                    <div className="absolute bottom-full left-0 mb-2 p-1.5 rounded-xl bg-slate-900 border border-slate-800 shadow-xl flex flex-col gap-1 z-50 min-w-[100px]">
+                      {[
+                        { val: null, label: language === 'fa' ? 'خاموش' : 'Off' },
+                        { val: 15, label: '15 دقیقه' },
+                        { val: 30, label: '30 دقیقه' },
+                        { val: 45, label: '45 دقیقه' },
+                        { val: 60, label: '60 دقیقه' }
+                      ].map((item, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => {
+                            setSleepTimer(item.val);
+                            setShowSleepMenu(false);
+                          }}
+                          className={`px-3 py-1 text-xs text-left rounded-lg transition-colors ${
+                            sleepTimer === item.val ? 'bg-indigo-600 text-white font-bold' : 'text-slate-300 hover:bg-slate-800'
+                          }`}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Volume & Screen Controls */}
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={toggleMute}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-white transition-colors"
+                  >
+                    {isMuted || volume === 0 ? (
+                      <VolumeX className="w-4 h-4 text-rose-400" />
+                    ) : (
+                      <Volume2 className="w-4 h-4" />
+                    )}
+                  </button>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={isMuted ? 0 : volume}
+                    onChange={handleVolumeChange}
+                    className="w-14 sm:w-20 h-1 bg-slate-700 rounded appearance-none cursor-pointer accent-indigo-500"
+                  />
+                </div>
+
+                <button
+                  onClick={toggleOrientation}
+                  className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                  title={language === 'fa' ? 'تغییر جهت نمایش (افقی / عمودی)' : 'Rotate Screen'}
+                >
+                  <RotateCw className="w-4 h-4" />
+                </button>
+
+                {isVideo && (
+                  <button
+                    onClick={togglePiP}
+                    className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors hidden sm:block"
+                    title={t.pipMode}
+                  >
+                    <Minimize2 className="w-4 h-4" />
+                  </button>
+                )}
+
+                <button
+                  onClick={toggleFullscreen}
+                  className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                  title={t.fullscreen}
+                >
+                  <Maximize className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          </div>
+      </div>
+    </div>
+  );
+};

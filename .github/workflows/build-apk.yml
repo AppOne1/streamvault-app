@@ -1,0 +1,157 @@
+name: Build Offline Android APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-android-apk:
+    name: Build Signed Offline APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: ☕ Setup Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 📦 Install Node Dependencies
+        run: |
+          npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+
+      - name: 🔨 Build Vite Frontend (dist)
+        run: |
+          npm run build
+
+      - name: 📱 Sync Capacitor Android Assets (100% Offline Bundle)
+        run: |
+          # Copy dist directory into android/app/src/main/assets/public
+          npx cap sync android
+
+      - name: 🔑 Prepare or Generate Signing Keystore
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          KEY_PASS="${KEYSTORE_PASSWORD:-streamvault123}"
+          ALIAS="${KEY_ALIAS:-streamvault}"
+          ALIAS_PASS="${KEY_PASSWORD:-streamvault123}"
+
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "Using custom keystore from GitHub Secrets..."
+            echo "$KEYSTORE_BASE64" | base64 --decode > release.keystore
+          else
+            echo "Generating dedicated persistent keystore for Cafe Bazaar / Myket..."
+            keytool -genkeypair \
+              -v \
+              -keystore release.keystore \
+              -alias "$ALIAS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "$KEY_PASS" \
+              -keypass "$ALIAS_PASS" \
+              -dname "CN=StreamVault, OU=AppOne, O=StreamVault, L=Tehran, ST=Tehran, C=IR"
+          fi
+
+          echo "KEYSTORE_PASS=$KEY_PASS" >> $GITHUB_ENV
+          echo "KEYSTORE_ALIAS=$ALIAS" >> $GITHUB_ENV
+          echo "KEYSTORE_ALIAS_PASS=$ALIAS_PASS" >> $GITHUB_ENV
+
+      - name: 🏗️ Build Android Release APK with Gradle
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --stacktrace
+
+      - name: ✍️ Sign & Align APK with apksigner
+        run: |
+          BUILD_TOOLS_DIR=$(find $ANDROID_HOME/build-tools -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          echo "Using Android Build Tools at: $BUILD_TOOLS_DIR"
+
+          RAW_APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$RAW_APK" ]; then
+            echo "Error: Release APK not found!"
+            exit 1
+          fi
+
+          echo "Found raw APK: $RAW_APK"
+
+          # Align APK
+          $BUILD_TOOLS_DIR/zipalign -v -p 4 "$RAW_APK" aligned.apk
+
+          # Sign APK with v2/v3 signature
+          $BUILD_TOOLS_DIR/apksigner sign \
+            --ks release.keystore \
+            --ks-key-alias "$KEYSTORE_ALIAS" \
+            --ks-pass "pass:$KEYSTORE_PASS" \
+            --key-pass "pass:$KEYSTORE_ALIAS_PASS" \
+            --out StreamVault-v1.0-release-signed.apk \
+            aligned.apk
+
+          # Verify signature
+          $BUILD_TOOLS_DIR/apksigner verify --verbose StreamVault-v1.0-release-signed.apk
+
+          echo "✅ Signed Release APK generated successfully!"
+          ls -lh StreamVault-v1.0-release-signed.apk
+
+      - name: 🔐 Prepare Keystore Backup with Info
+        run: |
+          cat << 'EOF' > keystore-info.txt
+          ==================================================
+          StreamVault Android Release Keystore Credentials
+          ==================================================
+          Keystore File: release.keystore
+          Alias: streamvault
+          Store Password: streamvault123
+          Key Password: streamvault123
+
+          How to use in GitHub Secrets for future updates:
+          1. Run this command on your computer to encode the file to Base64:
+             Linux/macOS:
+               base64 -w 0 release.keystore > keystore-base64.txt
+             Windows (PowerShell):
+               [Convert]::ToBase64String([IO.File]::ReadAllBytes("release.keystore")) | Out-File -Encoding ASCII keystore-base64.txt
+
+          2. In your GitHub repository, go to:
+             Settings -> Secrets and variables -> Actions -> New repository secret
+
+          3. Add the following secrets:
+             ANDROID_KEYSTORE_BASE64: (paste content of keystore-base64.txt)
+             ANDROID_KEYSTORE_PASSWORD: streamvault123
+             ANDROID_KEY_ALIAS: streamvault
+             ANDROID_KEY_PASSWORD: streamvault123
+          ==================================================
+          EOF
+
+      - name: 📤 Upload Keystore Artifact to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: StreamVault-Release-Keystore
+          path: |
+            release.keystore
+            keystore-info.txt
+          retention-days: 30
+
+      - name: 📤 Upload Signed APK Artifact to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: StreamVault-v1.0-Offline-APK
+          path: StreamVault-v1.0-release-signed.apk
+          retention-days: 30
