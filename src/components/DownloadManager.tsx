@@ -2,20 +2,22 @@ import React, { useState } from 'react';
 import { DownloadTask, Language, TaskStatus } from '../types';
 import { PlatformIcon } from './PlatformIcon';
 import { getTranslation } from '../i18n/translations';
-import { getSafeThumbnail } from '../services/platformDetector';
+import { extractUrlFromText, getSafeThumbnail, SAMPLE_URLS } from '../services/platformDetector';
 import {
   Play,
   Pause,
   RotateCcw,
   Trash2,
-  Save,
   CheckCircle2,
   Clock,
   Gauge,
   XCircle,
   PauseCircle,
   PlayCircle,
-  Download
+  Download,
+  Layers,
+  ListPlus,
+  HardDrive
 } from 'lucide-react';
 
 interface DownloadManagerProps {
@@ -31,6 +33,7 @@ interface DownloadManagerProps {
   onPauseAll: () => void;
   onResumeAll: () => void;
   onClearCompleted: () => void;
+  onStartBatchDownload?: (urls: string[], qualityPreset: '1080p' | '720p' | 'mp3') => void;
 }
 
 export const DownloadManager: React.FC<DownloadManagerProps> = ({
@@ -45,10 +48,15 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
   onSaveToDisk,
   onPauseAll,
   onResumeAll,
-  onClearCompleted
+  onClearCompleted,
+  onStartBatchDownload
 }) => {
   const t = getTranslation(language);
+  const isFa = language === 'fa';
   const [filter, setFilter] = useState<'all' | 'active' | 'completed' | 'paused'>('all');
+  const [isBatchModalOpen, setIsBatchModalOpen] = useState<boolean>(false);
+  const [batchText, setBatchText] = useState<string>('');
+  const [batchPreset, setBatchPreset] = useState<'1080p' | '720p' | 'mp3'>('1080p');
 
   const filteredTasks = tasks.filter((task) => {
     if (filter === 'active') return task.status === 'downloading' || task.status === 'queued';
@@ -57,29 +65,73 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
     return true;
   });
 
-  const activeCount = tasks.filter(t => t.status === 'downloading' || t.status === 'queued').length;
-  const completedCount = tasks.filter(t => t.status === 'completed').length;
-  const pausedCount = tasks.filter(t => t.status === 'paused').length;
+  const activeCount = tasks.filter((t) => t.status === 'downloading' || t.status === 'queued').length;
+  const queuedCount = tasks.filter((t) => t.status === 'queued').length;
+  const completedCount = tasks.filter((t) => t.status === 'completed').length;
+  const pausedCount = tasks.filter((t) => t.status === 'paused').length;
+
+  // Aggregate Batch Queue Metrics (Overall %, Total Speed, Total Queue Size)
+  const totalQueueBytes = tasks.reduce((sum, item) => sum + (item.totalBytes || 0), 0);
+  const totalDownloadedBytes = tasks.reduce((sum, item) => sum + (item.downloadedBytes || 0), 0);
+  const overallQueuePercent =
+    tasks.length === 0
+      ? 0
+      : totalQueueBytes > 0
+      ? Math.min(100, Math.round((totalDownloadedBytes / totalQueueBytes) * 100))
+      : Math.round(tasks.reduce((sum, item) => sum + item.progressPercent, 0) / tasks.length);
+
+  const combinedSpeedBytes = tasks
+    .filter((t) => t.status === 'downloading')
+    .reduce((sum, item) => sum + (item.speedBytesPerSec || 0), 0);
+
+  const formatMb = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  const combinedSpeedFormatted =
+    combinedSpeedBytes > 0 ? `${(combinedSpeedBytes / (1024 * 1024)).toFixed(1)} MB/s` : '0.0 MB/s';
+
+  const handleBatchSubmit = () => {
+    const lines = batchText
+      .split(/[\r\n]+/)
+      .map((line) => extractUrlFromText(line) || line.trim())
+      .filter((u) => /^https?:\/\//i.test(u));
+
+    if (lines.length === 0 || !onStartBatchDownload) return;
+    onStartBatchDownload(lines, batchPreset);
+    setBatchText('');
+    setIsBatchModalOpen(false);
+  };
 
   return (
-    <section className="w-full max-w-5xl mx-auto px-4 py-6">
+    <section className="w-full max-w-5xl mx-auto px-3 sm:px-4 py-4 sm:py-6 space-y-5">
       {/* Header & Filter Toolbar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <h2 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white">
+          <h2 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white drop-shadow-sm text-3d">
             {t.downloadsHeader}
           </h2>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-            {tasks.length} total tasks • {activeCount} active
+            {isFa
+              ? `مدیریت صف دانلود نوبتی و دسته‌جمعی • ${tasks.length} فایل در صف (${activeCount} فعال)`
+              : `Advanced Batch Queue Manager • ${tasks.length} tasks (${activeCount} active)`}
           </p>
         </div>
 
         {/* Global Toolbar Controls */}
         <div className="flex flex-wrap items-center gap-2">
+          {onStartBatchDownload && (
+            <button
+              type="button"
+              onClick={() => setIsBatchModalOpen(!isBatchModalOpen)}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-black text-white bg-gradient-to-r from-indigo-600 to-violet-600 btn-3d-primary transition-all"
+            >
+              <ListPlus className="w-4 h-4" />
+              <span>{isFa ? '+ افزودن دسته‌جمعی به صف' : '+ Batch Add Links'}</span>
+            </button>
+          )}
+
           {activeCount > 0 && (
             <button
               onClick={onPauseAll}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-colors"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 btn-3d-secondary transition-colors"
             >
               <PauseCircle className="w-3.5 h-3.5 text-amber-500" />
               <span>{t.pauseAll}</span>
@@ -89,7 +141,7 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
           {pausedCount > 0 && (
             <button
               onClick={onResumeAll}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-colors"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 btn-3d-secondary transition-colors"
             >
               <PlayCircle className="w-3.5 h-3.5 text-indigo-500" />
               <span>{t.resumeAll}</span>
@@ -99,7 +151,7 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
           {completedCount > 0 && (
             <button
               onClick={onClearCompleted}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-colors"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 btn-3d-secondary transition-colors"
             >
               <Trash2 className="w-3.5 h-3.5 text-rose-500" />
               <span>{t.clearCompleted}</span>
@@ -108,13 +160,142 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
         </div>
       </div>
 
+      {/* Batch Queue Multi-Link Drawer */}
+      {isBatchModalOpen && onStartBatchDownload && (
+        <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-indigo-500/40 card-3d space-y-3 animate-fade-in">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className="p-2 rounded-xl bg-indigo-500/15 text-indigo-500">
+                <Layers className="w-4 h-4" />
+              </div>
+              <div>
+                <h4 className="text-xs sm:text-sm font-black text-slate-900 dark:text-white">
+                  {isFa ? 'افزودن چندین لینک به صف دانلود نوبتی' : 'Add Multiple Links to Sequential Queue'}
+                </h4>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {isFa
+                    ? 'لینک‌ها را در خطوط جداگانه وارد کنید تا به نوبت دانلود شوند'
+                    : 'Enter one URL per line for managed sequential downloading'}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() =>
+                setBatchText(
+                  SAMPLE_URLS.slice(0, 3)
+                    .map((s) => s.url)
+                    .join('\n')
+                )
+              }
+              className="px-2.5 py-1 rounded-xl text-[10px] font-black bg-slate-100 dark:bg-slate-800 text-indigo-600 dark:text-indigo-300"
+            >
+              {isFa ? '+ درج ۳ لینک نمونه' : '+ Load 3 Samples'}
+            </button>
+          </div>
+
+          <textarea
+            rows={3}
+            dir="ltr"
+            value={batchText}
+            onChange={(e) => setBatchText(e.target.value)}
+            placeholder="https://www.youtube.com/watch?v=...\nhttps://www.tiktok.com/@user/video/..."
+            className="w-full p-3 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 input-3d"
+          />
+
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5">
+              {[
+                { id: '1080p', label: '1080p Full HD' },
+                { id: '720p', label: '720p HD' },
+                { id: 'mp3', label: 'MP3 320kbps' }
+              ].map((q) => (
+                <button
+                  key={q.id}
+                  type="button"
+                  onClick={() => setBatchPreset(q.id as any)}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-black transition-all ${
+                    batchPreset === q.id
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  {q.label}
+                </button>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              onClick={handleBatchSubmit}
+              disabled={!batchText.trim()}
+              className="px-4 py-2 rounded-xl text-xs font-black text-white bg-gradient-to-r from-indigo-600 to-violet-600 btn-3d-primary disabled:opacity-50"
+            >
+              {isFa ? 'شروع صف دانلود دسته‌جمعی' : 'Start Batch Queue'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Batch Queue Live Summary Dashboard (Overall %, Speed & Total Volume) */}
+      {tasks.length > 0 && (
+        <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 card-3d space-y-3">
+          <div className="grid grid-cols-3 gap-2.5 text-center">
+            <div className="p-2.5 rounded-2xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200/70 dark:border-slate-800">
+              <span className="block text-[10px] font-bold text-slate-400">
+                {isFa ? 'پیشرفت کل صف' : 'Queue Progress'}
+              </span>
+              <span className="text-sm sm:text-base font-black text-indigo-600 dark:text-indigo-400 font-mono">
+                {overallQueuePercent}%
+              </span>
+            </div>
+
+            <div className="p-2.5 rounded-2xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200/70 dark:border-slate-800">
+              <span className="block text-[10px] font-bold text-slate-400">
+                {isFa ? 'سرعت لحظه‌ای صف' : 'Queue Speed'}
+              </span>
+              <span className="text-sm sm:text-base font-black text-emerald-600 dark:text-emerald-400 font-mono">
+                {combinedSpeedFormatted}
+              </span>
+            </div>
+
+            <div className="p-2.5 rounded-2xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200/70 dark:border-slate-800">
+              <span className="block text-[10px] font-bold text-slate-400">
+                {isFa ? 'حجم کل صف دانلود' : 'Total Queue Volume'}
+              </span>
+              <span className="text-xs sm:text-sm font-black text-slate-800 dark:text-slate-200 font-mono">
+                {formatMb(totalDownloadedBytes)} / {formatMb(totalQueueBytes)}
+              </span>
+            </div>
+          </div>
+
+          <div className="w-full h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden input-3d">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-indigo-600 via-violet-500 to-emerald-500 transition-all duration-300"
+              style={{ width: `${overallQueuePercent}%` }}
+            />
+          </div>
+
+          {queuedCount > 0 && (
+            <div className="text-[11px] font-bold text-indigo-600 dark:text-indigo-300 flex items-center gap-1.5">
+              <Clock className="w-3.5 h-3.5 animate-pulse" />
+              <span>
+                {isFa
+                  ? `${queuedCount} فایل در نوبت صف قرار دارد و بلافاصله پس از اتمام دانلود فعلی به صورت خودکار شروع می‌شود.`
+                  : `${queuedCount} task(s) waiting in queue — will start automatically in sequence.`}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Filter Tabs */}
-      <div className="flex items-center gap-2 mb-5 overflow-x-auto pb-1">
+      <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
         {[
           { id: 'all', label: t.filterAll, count: tasks.length },
           { id: 'active', label: t.filterActive, count: activeCount },
           { id: 'completed', label: t.filterCompleted, count: completedCount },
-          { id: 'paused', label: t.filterPaused, count: pausedCount },
+          { id: 'paused', label: t.filterPaused, count: pausedCount }
         ].map((tab) => (
           <button
             key={tab.id}
@@ -141,7 +322,7 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
 
       {/* Empty State */}
       {filteredTasks.length === 0 && (
-        <div className="p-12 text-center rounded-2xl border-2 border-dashed border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/30">
+        <div className="p-12 text-center rounded-3xl border-2 border-dashed border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/30 card-3d">
           <div className="w-12 h-12 mx-auto rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 mb-3">
             <Clock className="w-6 h-6" />
           </div>
@@ -154,11 +335,12 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
         </div>
       )}
 
-      {/* Task Cards List */}
+      {/* Task Cards List (Numbered ۱، ۲، ۳...) */}
       <div className="space-y-3">
-        {filteredTasks.map((task) => (
+        {filteredTasks.map((task, idx) => (
           <TaskCard
             key={task.id}
+            index={idx + 1}
             task={task}
             language={language}
             onPause={onPauseTask}
@@ -176,6 +358,7 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
 };
 
 interface TaskCardProps {
+  index: number;
   task: DownloadTask;
   language: Language;
   onPause: (task: DownloadTask) => void;
@@ -188,6 +371,7 @@ interface TaskCardProps {
 }
 
 const TaskCard: React.FC<TaskCardProps> = ({
+  index,
   task,
   language,
   onPause,
@@ -200,7 +384,6 @@ const TaskCard: React.FC<TaskCardProps> = ({
 }) => {
   const t = getTranslation(language);
 
-  // Status badge styling
   const renderStatusBadge = (status: TaskStatus) => {
     switch (status) {
       case 'downloading':
@@ -208,6 +391,13 @@ const TaskCard: React.FC<TaskCardProps> = ({
           <span className="flex items-center gap-1 text-[11px] font-bold text-indigo-600 dark:text-indigo-400">
             <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-ping" />
             <span>{t.statusDownloading}</span>
+          </span>
+        );
+      case 'queued':
+        return (
+          <span className="flex items-center gap-1 text-[11px] font-bold text-amber-600 dark:text-amber-400">
+            <Clock className="w-3.5 h-3.5" />
+            <span>{language === 'fa' ? 'در نوبت صف' : 'Queued'}</span>
           </span>
         );
       case 'completed':
@@ -269,9 +459,16 @@ const TaskCard: React.FC<TaskCardProps> = ({
         {/* Task Details & Metrics */}
         <div className="flex-1 min-w-0 w-full">
           <div className="flex items-start justify-between gap-2 mb-1">
-            <h4 className="font-extrabold text-sm sm:text-base text-slate-900 dark:text-white truncate">
-              {task.title}
-            </h4>
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="w-6 h-6 rounded-xl bg-indigo-600 text-white font-black text-xs flex items-center justify-center shrink-0 shadow-xs">
+                {language === 'fa'
+                  ? String(index).replace(/\d/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[Number(d)])
+                  : index}
+              </span>
+              <h4 className="font-extrabold text-sm sm:text-base text-slate-900 dark:text-white truncate">
+                {task.title}
+              </h4>
+            </div>
             {renderStatusBadge(task.status)}
           </div>
 
@@ -315,7 +512,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
           </div>
 
           <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
-            <span>{task.fileName}</span>
+            <span className="truncate max-w-[220px] sm:max-w-md">{task.fileName}</span>
             <span className={`font-bold ${task.status === 'error' ? 'text-rose-500' : 'text-slate-700 dark:text-slate-300'}`}>
               {task.status === 'error' ? (language === 'fa' ? 'خطا در دریافت' : 'Error') : `${task.progressPercent}%`}
             </span>
@@ -345,7 +542,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
             </button>
           )}
 
-          {task.status === 'paused' && (
+          {(task.status === 'paused' || task.status === 'queued') && (
             <button
               onClick={() => onResume(task)}
               className="p-2.5 rounded-2xl text-indigo-600 dark:text-indigo-400 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 btn-3d-secondary transition-colors"

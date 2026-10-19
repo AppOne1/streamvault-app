@@ -12,24 +12,18 @@ import {
   PlaySquare,
   Trash2,
   CheckCircle2,
-  Shield,
   HardDrive,
   Cpu,
   Copy,
   Check,
   RefreshCw,
   Crown,
-  Sparkles,
   Mail,
-  Smartphone,
-  Layers,
   Info,
-  BookOpen,
   ShieldCheck,
-  AlertTriangle,
   Share2,
   Send,
-  Bluetooth
+  Radar
 } from 'lucide-react';
 
 interface SettingsViewProps {
@@ -38,8 +32,8 @@ interface SettingsViewProps {
   onUpdateSettings: (newSettings: AppSettings) => void;
   onClearAllAppData: () => void;
   onOpenUpgradeModal: () => void;
-  onOpenInstallGuide?: () => void;
   onOpenShare?: () => void;
+  onOpenPermissionsModal?: () => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
@@ -48,8 +42,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onUpdateSettings,
   onClearAllAppData,
   onOpenUpgradeModal,
-  onOpenInstallGuide,
-  onOpenShare
+  onOpenShare,
+  onOpenPermissionsModal
 }) => {
   const t = getTranslation(language);
   const [clearedNotice, setClearedNotice] = useState(false);
@@ -94,10 +88,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   return (
-    <section className="w-full max-w-3xl mx-auto px-4 py-6">
+    <section className="w-full max-w-3xl mx-auto px-3 sm:px-4 pt-3 pb-28 sm:pb-12 overflow-y-auto">
       <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
-          <h2 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white tracking-tight">
+          <h2 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white tracking-tight drop-shadow-sm text-3d">
             {t.settingsHeader}
           </h2>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
@@ -117,7 +111,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <span>
               {quota.isPro
                 ? (language === 'fa' ? 'اشتراک VIP Pro (نامحدود)' : 'VIP Pro (Unlimited)')
-                : (language === 'fa' ? `سهمیه امروز: ${quota.remainingToday} از ۳ فیلم` : `Daily: ${quota.remainingToday}/3 left`)}
+                : (language === 'fa'
+                    ? `سهمیه امروز: ${quota.remainingToday} از ${quota.maxDaily} دانلود`
+                    : `Daily: ${quota.remainingToday}/${quota.maxDaily} left`)}
             </span>
           </button>
         </div>
@@ -131,10 +127,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       )}
 
       <div className="space-y-4">
-        {/* 1. Unique Device Identification Card */}
+        {/* 1. Unique Device Identification Card (Clean & Minimal - only Device ID + Copy Button) */}
         <div className="p-5 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 card-3d relative overflow-hidden group">
           <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/5 rounded-full blur-2xl pointer-events-none" />
-          
+
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-3">
               <div className="p-2.5 rounded-2xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 shadow-xs card-3d">
@@ -165,28 +161,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </button>
           </div>
 
-          {/* Device ID Display & Specs */}
+          {/* Device ID Display */}
           <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800 font-mono text-xs text-indigo-600 dark:text-indigo-400 font-bold tracking-wider text-center select-all input-3d">
             {deviceProfile.deviceId}
-          </div>
-
-          <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] text-slate-500 dark:text-slate-400">
-            <div className="p-2 rounded-xl bg-slate-50/50 dark:bg-slate-800/40 border border-slate-100 dark:border-slate-800 text-center card-3d">
-              <span className="block text-[10px] text-slate-400">سیستم‌عامل</span>
-              <span className="font-bold text-slate-700 dark:text-slate-200">{deviceProfile.os}</span>
-            </div>
-            <div className="p-2 rounded-xl bg-slate-50/50 dark:bg-slate-800/40 border border-slate-100 dark:border-slate-800 text-center card-3d">
-              <span className="block text-[10px] text-slate-400">مرورگر</span>
-              <span className="font-bold text-slate-700 dark:text-slate-200">{deviceProfile.browser}</span>
-            </div>
-            <div className="p-2 rounded-xl bg-slate-50/50 dark:bg-slate-800/40 border border-slate-100 dark:border-slate-800 text-center card-3d">
-              <span className="block text-[10px] text-slate-400">رزولوشن</span>
-              <span className="font-bold text-slate-700 dark:text-slate-200">{deviceProfile.screenResolution}</span>
-            </div>
-            <div className="p-2 rounded-xl bg-slate-50/50 dark:bg-slate-800/40 border border-slate-100 dark:border-slate-800 text-center card-3d">
-              <span className="block text-[10px] text-slate-400">وضعیت سهمیه</span>
-              <span className="font-bold text-amber-500">{quota.isPro ? 'VIP Pro' : `${quota.remainingToday}/3`}</span>
-            </div>
           </div>
         </div>
 
@@ -239,7 +216,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
 
             <span className="px-2.5 py-1 rounded-xl text-[10px] font-black bg-indigo-600 text-white uppercase tracking-wider shadow-xs">
-              AppOne Express
+              OneDownload
             </span>
           </div>
 
@@ -255,7 +232,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </a>
             </div>
 
-
             {onOpenShare && (
               <div className="pt-2 border-t border-slate-800">
                 <button
@@ -269,15 +245,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
             )}
 
-            {onOpenInstallGuide && (
+            {onOpenPermissionsModal && (
               <div className="pt-2 border-t border-slate-800">
                 <button
                   type="button"
-                  onClick={onOpenInstallGuide}
-                  className="w-full py-2.5 px-3 rounded-2xl bg-indigo-600/40 hover:bg-indigo-600/60 border border-indigo-400/50 text-indigo-100 font-extrabold text-xs flex items-center justify-center gap-2 transition-all active:scale-95 shadow-sm"
+                  onClick={onOpenPermissionsModal}
+                  className="w-full py-2.5 px-3 rounded-2xl bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-400/40 text-emerald-100 font-extrabold text-xs flex items-center justify-center gap-2 transition-all active:scale-95 shadow-sm"
                 >
-                  <Smartphone className="w-4 h-4 text-indigo-300" />
-                  <span>{language === 'fa' ? 'راهنمای نصب برنامه روی گوشی و رفع خطای نصب (اندروید / آیفون)' : 'Install on Mobile & Fix Errors Guide (Android / iOS)'}</span>
+                  <ShieldCheck className="w-4 h-4 text-emerald-300 shrink-0" />
+                  <span>
+                    {language === 'fa'
+                      ? 'مشاهده بیانیه حریم خصوصی و دسترسی‌های نرم‌افزار'
+                      : 'View Software Privacy & Permissions Statement'}
+                  </span>
                 </button>
               </div>
             )}
@@ -314,7 +294,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         )}
 
-        {/* 4. Language Selection Card */}
+        {/* 5. Smart Auto-Clipboard Sniffer Toggle (Kept exclusively in Settings) */}
+        <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 flex items-center justify-between shadow-xs card-3d">
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600">
+              <Radar className="w-5 h-5" />
+            </div>
+            <div>
+              <h4 className="font-bold text-sm text-slate-900 dark:text-white">
+                {language === 'fa' ? 'رصد خودکار کلیپ‌بورد (Auto-Paste)' : 'Auto-Paste Clipboard Sniffer'}
+              </h4>
+              <p className="text-xs text-slate-400">
+                {language === 'fa'
+                  ? 'تشخیص هوشمند لینک کپی‌شده به محض ورود به برنامه و نمایش خودکار پیش‌نمایش'
+                  : 'Automatically detect copied media URLs on app focus and trigger preview'}
+              </p>
+            </div>
+          </div>
+
+          <label className="relative inline-flex items-center cursor-pointer shrink-0">
+            <input
+              type="checkbox"
+              checked={settings.autoSniffClipboard !== false}
+              onChange={(e) => onUpdateSettings({ ...settings, autoSniffClipboard: e.target.checked })}
+              className="sr-only peer"
+            />
+            <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer dark:bg-slate-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600" />
+          </label>
+        </div>
+
+        {/* 6. Language Selection Card */}
         <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 flex items-center justify-between shadow-xs">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600">
@@ -354,7 +363,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
-        {/* 5. Theme Card */}
+        {/* 7. Theme Card */}
         <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 flex items-center justify-between shadow-xs">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600">
@@ -394,7 +403,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
-        {/* 6. Auto-Play Toggle */}
+        {/* 8. Auto-Play Toggle */}
         <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 flex items-center justify-between shadow-xs">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600">
@@ -421,7 +430,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </label>
         </div>
 
-        {/* 7. Auto-Save to Device Storage Toggle */}
+        {/* 9. Auto-Save to Device Storage Toggle */}
         <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 flex items-center justify-between shadow-xs">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600">
@@ -448,7 +457,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </label>
         </div>
 
-        {/* 8. Parallel Thread Concurrency */}
+        {/* 10. Parallel Thread Concurrency */}
         <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 space-y-2 shadow-xs">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -480,7 +489,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           />
         </div>
 
-        {/* 9. Wipe Data Card */}
+        {/* 11. Wipe Data Card */}
         <div className="p-4 rounded-2xl bg-rose-50/50 dark:bg-rose-950/20 border border-rose-200/80 dark:border-rose-900/40 flex items-center justify-between shadow-xs">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-xl bg-rose-100 dark:bg-rose-900/50 text-rose-600">

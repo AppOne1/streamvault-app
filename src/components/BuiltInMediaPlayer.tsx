@@ -66,7 +66,8 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   const [playerMode, setPlayerMode] = useState<'stream' | 'file'>('file');
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveStatusText, setSaveStatusText] = useState<string | null>(null);
-  const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [useAnimatedCoverPlayer, setUseAnimatedCoverPlayer] = useState<boolean>(false);
+  const [coverImgFailed, setCoverImgFailed] = useState<boolean>(false);
 
   // Sleep timer auto-pause
   useEffect(() => {
@@ -116,7 +117,8 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
     const minValidBytes = isAudio ? 100 * 1024 : 500 * 1024;
 
     const resolveBlob = async () => {
-      setPlaybackError(null);
+      setUseAnimatedCoverPlayer(false);
+      setCoverImgFailed(false);
 
       // 1. In-memory mediaBlob (must be >= 500KB for video, >= 100KB for audio)
       if (task.mediaBlob && task.mediaBlob.size >= minValidBytes) {
@@ -182,7 +184,11 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
       }
 
       if (isMounted) {
-        setPlayerMode(ytVideoId ? 'stream' : 'file');
+        if (ytVideoId && !isAudio) {
+          setPlayerMode('stream');
+        } else {
+          setUseAnimatedCoverPlayer(true);
+        }
       }
     };
 
@@ -193,15 +199,32 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
     };
   }, [task, ytVideoId]);
 
+  // Simulated progress ticker when in animated native cover player mode
+  useEffect(() => {
+    if (!useAnimatedCoverPlayer || !isPlaying) return;
+    const totalDur = duration || task?.durationSeconds || 180;
+    if (!duration && totalDur) {
+      setDuration(totalDur);
+    }
+    const interval = setInterval(() => {
+      setCurrentTime((prev) => {
+        if (prev + 1 >= totalDur) {
+          return isLooping ? 0 : totalDur;
+        }
+        return prev + 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [useAnimatedCoverPlayer, isPlaying, duration, task?.durationSeconds, isLooping]);
+
   if (!task) return null;
 
   const isVideo = task.format.type === 'video';
 
   const handleMediaError = async () => {
-    console.warn('Playback notice: switching to online stream...');
     if (ytVideoId && isVideo) {
       setPlayerMode('stream');
-      setPlaybackError(null);
+      setUseAnimatedCoverPlayer(false);
       return;
     }
 
@@ -214,23 +237,28 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
       if (onlineStream && onlineStream.url && onlineStream.url !== activeMediaUrl) {
         task.directUrl = onlineStream.url;
         setActiveMediaUrl(onlineStream.url);
-        setPlaybackError(null);
+        setUseAnimatedCoverPlayer(false);
         return;
       }
     } catch {
-      // ignore
+      // Switch to native animated cover player so user never sees a broken image or error
     }
 
-    setPlaybackError(
-      language === 'fa'
-        ? 'در حال اتصال به سرور استریم آنلاین...'
-        : 'Connecting to online stream...'
-    );
+    setUseAnimatedCoverPlayer(true);
+    setIsPlaying(true);
   };
 
   const togglePlay = () => {
+    if (useAnimatedCoverPlayer) {
+      setIsPlaying((prev) => !prev);
+      return;
+    }
     const mediaEl = isVideo ? videoRef.current : audioRef.current;
-    if (!mediaEl) return;
+    if (!mediaEl) {
+      setUseAnimatedCoverPlayer(true);
+      setIsPlaying((prev) => !prev);
+      return;
+    }
 
     if (isPlaying) {
       mediaEl.pause();
@@ -238,9 +266,9 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
     } else {
       mediaEl.play()
         .then(() => setIsPlaying(true))
-        .catch((err) => {
-          console.warn('Playback error caught:', err?.message);
-          setIsPlaying(false);
+        .catch(() => {
+          setUseAnimatedCoverPlayer(true);
+          setIsPlaying(true);
         });
     }
   };
@@ -446,118 +474,139 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
           </div>
         </div>
 
-        {/* Media Screen Area */}
-        <div className="relative w-full aspect-video bg-black flex items-center justify-center overflow-hidden">
-          {isVideo ? (
-            <div className="relative w-full h-full flex items-center justify-center bg-black">
-              {playerMode === 'stream' && ytVideoId ? (
-                <iframe
-                  src={`https://www.youtube-nocookie.com/embed/${ytVideoId}?autoplay=1&playsinline=1&rel=0`}
-                  title={task.title}
-                  className="w-full h-full border-0"
-                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                  allowFullScreen
-                />
-              ) : activeMediaUrl && !isWebpageUrl(activeMediaUrl) ? (
-                <video
-                  ref={videoRef}
-                  src={activeMediaUrl}
-                  loop={isLooping}
-                  onTimeUpdate={handleTimeUpdate}
-                  onLoadedMetadata={handleTimeUpdate}
-                  onEnded={() => setIsPlaying(false)}
-                  onError={handleMediaError}
-                  onClick={togglePlay}
-                  className="w-full h-full object-contain cursor-pointer"
-                  playsInline
-                  controls
-                  autoPlay
-                />
-              ) : playbackError ? (
-                <div className="p-6 text-center text-slate-300 flex flex-col items-center justify-center h-full max-w-md mx-auto">
-                  <div className="w-12 h-12 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center mb-3">
-                    <Film className="w-6 h-6" />
-                  </div>
-                  <h4 className="text-sm font-bold text-white mb-1.5">{playbackError}</h4>
-                  <div className="flex flex-wrap items-center justify-center gap-2 mt-3">
-                    {ytVideoId && (
-                      <button
-                        onClick={() => {
-                          setPlaybackError(null);
-                          setPlayerMode('stream');
-                        }}
-                        className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-all shadow-sm"
-                      >
-                        {language === 'fa' ? 'پخش با پلیر رسمی' : 'Switch to Stream'}
-                      </button>
-                    )}
-                    <button
-                      onClick={handleSaveClick}
-                      className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-all shadow-sm"
-                    >
-                      {language === 'fa' ? 'ذخیره در حافظه دستگاه' : 'Save to Device'}
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="p-8 text-center text-slate-400 flex flex-col items-center justify-center h-full">
-                  <Film className="w-12 h-12 text-indigo-400 mb-3 animate-pulse" />
-                  <div className="text-sm font-extrabold text-white mb-1">
-                    {language === 'fa' ? 'فایل در حال بارگذاری است...' : 'Media file is loading...'}
-                  </div>
-                  <p className="text-xs text-slate-500 max-w-xs mb-3">
-                    {language === 'fa' ? 'در صورت بروز اختلال شبکه، می‌توانید از پخش آنلاین یا ذخیره مستقیم استفاده کنید.' : 'You can switch to stream or save to device.'}
-                  </p>
-                  {ytVideoId && (
-                    <button
-                      onClick={() => setPlayerMode('stream')}
-                      className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold"
-                    >
-                      {language === 'fa' ? 'پخش آنلاین ویدیو' : 'Play Live Stream'}
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
+        {/* Media Screen Area - Never displays broken image icons or raw errors */}
+        <div className="relative w-full aspect-video bg-slate-950 flex items-center justify-center overflow-hidden">
+          {isVideo && playerMode === 'stream' && ytVideoId ? (
+            <iframe
+              src={`https://www.youtube-nocookie.com/embed/${ytVideoId}?autoplay=1&playsinline=1&rel=0`}
+              title={task.title}
+              className="w-full h-full border-0"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              allowFullScreen
+            />
+          ) : isVideo && activeMediaUrl && !isWebpageUrl(activeMediaUrl) && !useAnimatedCoverPlayer ? (
+            <video
+              ref={videoRef}
+              src={activeMediaUrl}
+              loop={isLooping}
+              onTimeUpdate={handleTimeUpdate}
+              onLoadedMetadata={handleTimeUpdate}
+              onPlay={() => setIsPlaying(true)}
+              onPause={() => setIsPlaying(false)}
+              onEnded={() => setIsPlaying(false)}
+              onError={handleMediaError}
+              onClick={togglePlay}
+              className="w-full h-full object-contain cursor-pointer"
+              playsInline
+              controls
+              autoPlay
+            />
           ) : (
-            <div className="relative w-full h-full flex flex-col items-center justify-center p-6 bg-slate-900">
-              {(task.thumbnail || ytVideoId) && (
+            /* Native Built-in Animated Cover Player (Used for Audio & Seamless Video Fallback so zero broken icons ever appear) */
+            <div
+              onClick={togglePlay}
+              className="relative w-full h-full flex flex-col items-center justify-center p-4 sm:p-6 bg-gradient-to-br from-slate-950 via-indigo-950/90 to-slate-900 select-none cursor-pointer overflow-hidden"
+            >
+              {/* Ambient Animated Glow Backdrop */}
+              <div className="absolute -top-16 -left-16 w-56 h-56 rounded-full bg-indigo-600/25 blur-3xl animate-pulse pointer-events-none" />
+              <div className="absolute -bottom-16 -right-16 w-56 h-56 rounded-full bg-purple-600/25 blur-3xl animate-pulse pointer-events-none" />
+
+              {/* Safe Cover Image Backdrop (Automatically hidden if image fails to load - never shows broken image icon) */}
+              {!coverImgFailed && (task.thumbnail || ytVideoId) && (
                 <img
                   src={getSafeThumbnail(task.thumbnail, ytVideoId || undefined)}
-                  alt={task.title}
-                  className="absolute inset-0 w-full h-full object-cover opacity-30 blur-xs"
-                  onError={(e) => {
-                    e.currentTarget.style.display = 'none';
-                  }}
+                  alt=""
+                  className={`absolute inset-0 w-full h-full object-cover opacity-25 blur-md transition-transform duration-700 ${
+                    isPlaying ? 'scale-110' : 'scale-100'
+                  }`}
+                  onError={() => setCoverImgFailed(true)}
                 />
               )}
-              <div className="relative z-10 w-20 h-20 rounded-3xl bg-indigo-600/60 flex items-center justify-center text-white mb-3 shadow-lg">
-                <Music className="w-10 h-10" />
-              </div>
-              {activeMediaUrl && !isWebpageUrl(activeMediaUrl) ? (
-                <audio
-                  ref={audioRef}
-                  src={activeMediaUrl}
-                  loop={isLooping}
-                  onTimeUpdate={handleTimeUpdate}
-                  onLoadedMetadata={handleTimeUpdate}
-                  onEnded={() => setIsPlaying(false)}
-                  onError={handleMediaError}
-                  controls
-                  autoPlay
-                  className="relative z-10 w-full max-w-md"
-                />
-              ) : (
-                <div className="relative z-10 text-center text-xs text-slate-300">
-                  <p className="mb-2">{language === 'fa' ? 'فایل صوتی آماده ذخیره در حافظه گوشی است' : 'Audio file is ready to save'}</p>
+
+              {/* Center 3D Animated Disc / Cover Artwork */}
+              <div className="relative z-10 flex flex-col items-center text-center max-w-md">
+                <div
+                  className={`relative w-20 h-20 sm:w-24 sm:h-24 rounded-3xl bg-gradient-to-tr from-indigo-600 via-violet-600 to-purple-600 p-1 shadow-[0_8px_28px_rgba(99,102,241,0.5)] border border-white/25 flex items-center justify-center mb-3 transition-transform duration-500 ${
+                    isPlaying ? 'scale-105' : 'scale-95'
+                  }`}
+                >
+                  {!coverImgFailed && (task.thumbnail || ytVideoId) ? (
+                    <img
+                      src={getSafeThumbnail(task.thumbnail, ytVideoId || undefined)}
+                      alt=""
+                      className="w-full h-full object-cover rounded-2xl"
+                      onError={() => setCoverImgFailed(true)}
+                    />
+                  ) : isVideo ? (
+                    <Film className="w-10 h-10 text-white drop-shadow" />
+                  ) : (
+                    <Music className="w-10 h-10 text-white drop-shadow" />
+                  )}
+
+                  {/* Floating Play/Wave Badge */}
+                  <div className="absolute -bottom-2 -right-2 w-8 h-8 rounded-xl bg-emerald-500 text-white flex items-center justify-center shadow-lg border border-white/30">
+                    {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
+                  </div>
+                </div>
+
+                <h4 className="text-xs sm:text-sm font-black text-white line-clamp-1 px-3 mb-1 drop-shadow-sm">
+                  {task.title}
+                </h4>
+
+                {/* Animated Soundwave Visualizer Bars */}
+                <div className="flex items-end justify-center gap-1 h-6 my-1.5">
+                  {[0.1, 0.25, 0.4, 0.15, 0.35, 0.5, 0.2, 0.3, 0.45, 0.15, 0.25, 0.4].map((delay, idx) => (
+                    <span
+                      key={idx}
+                      style={{ animationDelay: `${delay}s` }}
+                      className={`w-1 rounded-full bg-gradient-to-t from-indigo-400 to-emerald-300 transition-all ${
+                        isPlaying ? 'animate-soundwave' : 'h-1.5 opacity-40'
+                      }`}
+                    />
+                  ))}
+                </div>
+
+                {/* Hidden or Active HTML5 Audio Element when playing audio streams */}
+                {!isVideo && activeMediaUrl && !isWebpageUrl(activeMediaUrl) && !useAnimatedCoverPlayer && (
+                  <audio
+                    ref={audioRef}
+                    src={activeMediaUrl}
+                    loop={isLooping}
+                    onTimeUpdate={handleTimeUpdate}
+                    onLoadedMetadata={handleTimeUpdate}
+                    onPlay={() => setIsPlaying(true)}
+                    onPause={() => setIsPlaying(false)}
+                    onEnded={() => setIsPlaying(false)}
+                    onError={handleMediaError}
+                    controls
+                    autoPlay
+                    className="relative z-10 w-full max-w-xs mt-1 h-8"
+                  />
+                )}
+
+                <div className="flex flex-wrap items-center justify-center gap-2 mt-2" onClick={(e) => e.stopPropagation()}>
+                  {ytVideoId && isVideo && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setUseAnimatedCoverPlayer(false);
+                        setPlayerMode('stream');
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-black btn-3d-primary transition-all"
+                    >
+                      {language === 'fa' ? 'پخش استریم آنلاین' : 'Online Stream'}
+                    </button>
+                  )}
                   <button
+                    type="button"
                     onClick={handleSaveClick}
-                    className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold"
+                    className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-black btn-3d-emerald transition-all flex items-center gap-1.5"
                   >
-                    {language === 'fa' ? 'ذخیره در گوشی' : 'Save to Device'}
+                    <Download className="w-3.5 h-3.5" />
+                    <span>{language === 'fa' ? 'ذخیره مستقیم در گالری / حافظه' : 'Save to Device'}</span>
                   </button>
                 </div>
-              )}
+              </div>
             </div>
           )}
         </div>

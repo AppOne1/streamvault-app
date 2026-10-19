@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">StreamVault</string>
-    <string name="title_activity_main">StreamVault</string>
-    <string name="package_name">com.streamvault.downloader</string>
-    <string name="custom_url_scheme">com.streamvault.downloader</string>
+    <string name="app_name">وان دانلود (OneDownload)</string>
+    <string name="title_activity_main">وان دانلود (OneDownload)</string>
+    <string name="package_name">ir.appone.onedownload</string>
+    <string name="custom_url_scheme">ir.appone.onedownload</string>
 </resources>

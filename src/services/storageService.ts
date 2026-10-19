@@ -222,6 +222,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
   autoPlayAfterDownload: false,
   autoSaveToDevice: true, // Automatically triggers native file download to phone/system Downloads folder
+  autoSniffClipboard: true, // Smart clipboard auto-sniffer controlled from Settings
   downloadPathHint: 'Downloads/OneDownload',
   chunkConcurrency: 4
 };
@@ -239,21 +240,22 @@ export function loadSettingsFromStorage(): AppSettings {
 export function saveSettingsToStorage(settings: AppSettings): void {
   try {
     localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(settings));
+    localStorage.setItem('onedownload_auto_sniff_enabled_v1', String(settings.autoSniffClipboard));
   } catch (err) {
     console.error('Failed to save settings:', err);
   }
 }
 
 export const DEFAULT_SESSION: UserSession = {
-  isLoggedIn: true,
+  isLoggedIn: false,
   user: {
-    id: 'user-vip-appone',
-    name: 'کاربر ویژه وان دانلود (گروه AppOne علوی)',
-    email: 'vip@appone.ir',
+    id: 'guest-onedownload',
+    name: 'کاربر مهمان (وان دانلود)',
+    email: 'guest@appone.ir',
     avatarUrl: '',
-    plan: 'VIP Pro',
-    quotaUsedMb: 120,
-    quotaMaxMb: 50000
+    plan: 'Free',
+    quotaUsedMb: 0,
+    quotaMaxMb: 1024
   }
 };
 
@@ -266,7 +268,7 @@ export function loadSessionFromStorage(): UserSession {
       !parsed.user ||
       parsed.user.email === 'user@streamvault.app' ||
       parsed.user.name?.includes('استریم‌ولت') ||
-      parsed.user.id === 'guest'
+      parsed.user.id === 'user-vip-appone'
     ) {
       saveSessionToStorage(DEFAULT_SESSION);
       return DEFAULT_SESSION;

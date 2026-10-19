@@ -48,12 +48,12 @@ export const CORS_PROXIES = [
   (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
 ];
 
-// Verified multi-megabyte HD fallback streams (used for sample/trending clips or when external resolvers rate-limit)
+// Verified multi-megabyte HD fallback streams with CORS & real audio tracks
 const VERIFIED_HD_VIDEO_STREAMS = [
-  'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4', // ~2.5 MB MP4 HD
-  'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4', // ~2.3 MB MP4 HD
-  'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoy.mp4', // ~2.7 MB MP4 HD
-  'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/WeAreGoingOnBullrun.mp4' // ~13 MB MP4 HD
+  'https://cdn.jsdelivr.net/gh/mediaelement/mediaelement-files@master/big_buck_bunny.mp4', // ~5.5 MB MP4 HD with AAC Audio & CORS *
+  'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4', // ~1.13 MB MP4 HD with Audio & CORS *
+  'https://upload.wikimedia.org/wikipedia/commons/transcoded/f/f3/Big_Buck_Bunny_first_23_seconds_1080p.ogv/Big_Buck_Bunny_first_23_seconds_1080p.ogv.480p.vp9.webm', // ~2.77 MB HD with Audio & CORS *
+  'https://upload.wikimedia.org/wikipedia/commons/transcoded/a/a7/How_to_make_video.webm/How_to_make_video.webm.480p.vp9.webm' // ~2.63 MB HD with Audio & CORS *
 ];
 
 const VERIFIED_HQ_AUDIO_STREAMS = [

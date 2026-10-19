@@ -14,9 +14,9 @@ export default defineConfig(() => {
         includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.svg'],
         manifest: {
           id: '/',
-          name: 'وان‌اکسپرس - دانلودر هوشمند',
-          short_name: 'وان‌اکسپرس',
-          description: 'سامانه پرسرعت دانلود ویدیو و صوت با کیفیت اصلی - گروه نرم‌افزاری AppOne علوی',
+          name: 'وان دانلود (OneDownload) - دانلودر فوق‌سریع ویدیو و موزیک',
+          short_name: 'وان دانلود',
+          description: 'دانلودر فوق‌سریع ویدیو و موزیک با کیفیت اصلی و پخش آفلاین - گروه AppOne علوی',
           theme_color: '#4f46e5',
           background_color: '#090d16',
           display: 'standalone',

@@ -101,6 +101,8 @@ export interface AppSettings {
   theme: ThemeMode;
   autoPlayAfterDownload: boolean;
   autoSaveToDevice: boolean;
+  autoSniffClipboard: boolean;
   downloadPathHint: string;
   chunkConcurrency: number;
 }
+
