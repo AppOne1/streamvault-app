@@ -16,17 +16,16 @@ jobs:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🟢 Setup Node.js
+      - name: 🟢 Setup Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: 'npm'
+          node-version: 22
 
-      - name: ☕ Setup Java 17 (Temurin)
+      - name: ☕ Setup Java 21 (Temurin)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
       - name: 📦 Install Node Dependencies
         run: |
@@ -38,6 +37,10 @@ jobs:
 
       - name: 📱 Sync Capacitor Android Assets (100% Offline Bundle)
         run: |
+          if [ ! -d "android" ]; then
+            echo "Android directory not found. Adding Android platform..."
+            npx cap add android
+          fi
           # Copy dist directory into android/app/src/main/assets/public
           npx cap sync android
 
