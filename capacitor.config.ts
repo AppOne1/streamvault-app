@@ -1,8 +1,8 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.streamvault.downloader',
-  appName: 'StreamVault',
+  appId: 'ir.appone.onedownload',
+  appName: 'OneDownload',
   webDir: 'dist',
   server: {
     androidScheme: 'https'

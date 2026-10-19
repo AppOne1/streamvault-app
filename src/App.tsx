@@ -36,6 +36,7 @@ import { ProUpgradeModal } from './components/ProUpgradeModal';
 import { IOSInstallGuide } from './components/IOSInstallGuide';
 import { OfflineBanner } from './components/OfflineBanner';
 import { ShareAppModal } from './components/ShareAppModal';
+import { TrendingShowcase } from './components/TrendingShowcase';
 import { canDownload, consumeDownloadQuota, getDailyQuota, QuotaInfo } from './services/quotaService';
 import { Download, Film, HardDrive, Settings, Sparkles, AlertCircle, Loader2, CheckCircle, Crown } from 'lucide-react';
 
@@ -292,6 +293,12 @@ export default function App() {
     );
   };
 
+  const handleToggleVault = (taskId: string) => {
+    setTasks((prev) =>
+      prev.map((t) => (t.id === taskId ? { ...t, isVaulted: !t.isVaulted } : t))
+    );
+  };
+
   const handleClearAllAppData = async () => {
     tasks.forEach((t) => downloadEngine.cancelTask(t));
     await clearAllIDBBlobs();
@@ -306,7 +313,7 @@ export default function App() {
   const completedLibraryCount = tasks.filter((t) => t.status === 'completed').length;
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors">
+    <div className="min-h-screen w-full max-w-[100vw] overflow-x-hidden flex flex-col bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors">
       {/* Header Bar */}
       <Header
         language={settings.language}
@@ -322,8 +329,8 @@ export default function App() {
         onOpenShare={() => setIsShareModalOpen(true)}
       />
 
-      {/* Main Content Area */}
-      <main className="flex-1 pb-24 sm:pb-12">
+      {/* Main Content Area (Proper top & bottom padding so headers never hide under sticky header or 3D bottom dock) */}
+      <main className="flex-1 w-full max-w-[100vw] overflow-x-hidden pt-2 sm:pt-4 pb-28 sm:pb-12">
         {/* Navigation Tabs (Desktop & Tablet view only - hidden on mobile) */}
         <div className="hidden sm:block max-w-4xl mx-auto px-4 pt-4 sm:pt-6">
           <div className="flex items-center justify-center sm:justify-start gap-1.5 p-1.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 card-3d">
@@ -403,7 +410,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Tab 1: URL Downloader */}
+        {/* Tab 1: URL Downloader + Trending Clips & Music Showcase */}
         {activeTab === 'downloader' && (
           <div className="animate-fade-in">
             <UrlInputSection
@@ -415,9 +422,16 @@ export default function App() {
               sharedLinkNotice={sharedLinkNotice}
             />
 
+            {/* Trending Clips & Music Showcase (User Retention Feature) */}
+            <TrendingShowcase
+              language={settings.language}
+              onPlayItem={handlePlayMedia}
+              onDownloadItem={handleStartDownload}
+            />
+
             {/* Quick overview of latest download tasks directly under input */}
             {tasks.length > 0 && (
-              <div className="max-w-4xl mx-auto px-4 mt-8">
+              <div className="max-w-4xl mx-auto px-3 sm:px-4 mt-6">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-bold text-slate-700 dark:text-slate-300">
                     {t.downloadsHeader}
@@ -509,6 +523,7 @@ export default function App() {
               onSaveToDisk={handleSaveToDisk}
               onDeleteTask={handleDeleteTask}
               onToggleStar={handleToggleStar}
+              onToggleVault={handleToggleVault}
             />
           </div>
         )}
@@ -529,57 +544,61 @@ export default function App() {
         )}
       </main>
 
-      {/* Mobile App Bottom Navigation Bar (Shown ONLY on mobile, hidden on PC) */}
-      <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-t border-slate-200/90 dark:border-slate-800/90 px-3 py-2 flex items-center justify-around card-3d">
+      {/* Mobile App 3D Floating Glass Dock (Bottom Navigation) */}
+      <nav className="sm:hidden fixed bottom-2.5 left-2.5 right-2.5 z-40 rounded-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border border-slate-200/90 dark:border-slate-800/90 px-2 py-1.5 flex items-center justify-around dock-3d">
         <button
+          type="button"
           onClick={() => setActiveTab('downloader')}
-          className={`flex flex-col items-center gap-1 p-1.5 rounded-xl text-[10px] font-black transition-all ${
+          className={`flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-xl text-[10px] font-black transition-all duration-150 ${
             activeTab === 'downloader'
-              ? 'text-indigo-600 dark:text-indigo-400 scale-105'
-              : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-200'
+              ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white border-t border-white/25 shadow-[0_3px_0_rgb(76,29,149)] -translate-y-0.5'
+              : 'text-slate-500 dark:text-slate-400 active:translate-y-[2px]'
           }`}
         >
-          <Sparkles className="w-5 h-5" />
-          <span>{t.tabDownloader}</span>
+          <Sparkles className="w-4 h-4" />
+          <span className="truncate max-w-[68px]">{t.tabDownloader}</span>
         </button>
 
         <button
+          type="button"
           onClick={() => setActiveTab('downloads')}
-          className={`relative flex flex-col items-center gap-1 p-1.5 rounded-xl text-[10px] font-black transition-all ${
+          className={`relative flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-xl text-[10px] font-black transition-all duration-150 ${
             activeTab === 'downloads'
-              ? 'text-indigo-600 dark:text-indigo-400 scale-105'
-              : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-200'
+              ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white border-t border-white/25 shadow-[0_3px_0_rgb(76,29,149)] -translate-y-0.5'
+              : 'text-slate-500 dark:text-slate-400 active:translate-y-[2px]'
           }`}
         >
-          <Download className="w-5 h-5" />
-          <span>{t.tabDownloads}</span>
+          <Download className="w-4 h-4" />
+          <span className="truncate max-w-[68px]">{t.tabDownloads}</span>
           {activeDownloadsCount > 0 && (
-            <span className="absolute top-1 right-2 w-2.5 h-2.5 rounded-full dot-3d-indigo animate-ping" />
+            <span className="absolute top-1 right-1.5 w-2.5 h-2.5 rounded-full dot-3d-amber animate-ping" />
           )}
         </button>
 
         <button
+          type="button"
           onClick={() => setActiveTab('library')}
-          className={`flex flex-col items-center gap-1 p-1.5 rounded-xl text-[10px] font-black transition-all ${
+          className={`flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-xl text-[10px] font-black transition-all duration-150 ${
             activeTab === 'library'
-              ? 'text-indigo-600 dark:text-indigo-400 scale-105'
-              : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-200'
+              ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white border-t border-white/25 shadow-[0_3px_0_rgb(76,29,149)] -translate-y-0.5'
+              : 'text-slate-500 dark:text-slate-400 active:translate-y-[2px]'
           }`}
         >
-          <Film className="w-5 h-5" />
-          <span>{t.tabLibrary}</span>
+          <Film className="w-4 h-4" />
+          <span className="truncate max-w-[78px]">{settings.language === 'fa' ? 'پوشه دانلودها' : 'Library'}</span>
         </button>
 
         <button
+          type="button"
           onClick={() => setActiveTab('settings')}
-          className={`flex flex-col items-center gap-1 p-1.5 rounded-xl text-[10px] font-black transition-all ${
+          className={`flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-xl text-[10px] font-black transition-all duration-150 ${
             activeTab === 'settings'
-              ? 'text-indigo-600 dark:text-indigo-400 scale-105'
-              : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-200'
+              ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white border-t border-white/25 shadow-[0_3px_0_rgb(76,29,149)] -translate-y-0.5'
+              : 'text-slate-500 dark:text-slate-400 active:translate-y-[2px]'
           }`}
         >
-          <Settings className="w-5 h-5" />
-          <span>{t.tabSettings}</span>
+          <Settings className="w-4 h-4" />
+          <span className="truncate max-w-[68px]">{t.tabSettings}</span>
         </button>
       </nav>
 

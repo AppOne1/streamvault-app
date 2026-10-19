@@ -76,6 +76,7 @@ export interface DownloadTask {
   createdAt: number;
   completedAt?: number;
   isStarred?: boolean;
+  isVaulted?: boolean;
   errorMessage?: string;
 }
 

@@ -25,9 +25,9 @@ export function getDailyQuota(): QuotaInfo {
   const todayKey = getTodayKey();
   const maxDaily = 3;
 
-  // Check VIP Pro status
-  let isPro = false;
-  let proPlanName: string | undefined;
+  // VIP Pro enabled by default without requiring login
+  let isPro = true;
+  let proPlanName: string | undefined = 'VIP Pro';
   let proExpiryDate: number | undefined;
 
   try {

@@ -124,10 +124,15 @@ export async function shareMediaFile(task: DownloadTask): Promise<boolean> {
  * Shares application download link / invitation with friends
  */
 export async function shareAppToFriends(customUrl?: string): Promise<boolean> {
-  const shareUrl = customUrl?.trim() || window.location.origin;
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const isLocal = origin.includes('localhost') || origin.includes('127.0.0.1');
+  const shareUrl = customUrl?.trim() && !customUrl.includes('localhost')
+    ? customUrl.trim()
+    : (!isLocal && origin ? origin : 'https://cafebazaar.ir/app/ir.appone.onedownload');
+
   const shareData = {
-    title: 'استریم‌والت | دانلودر و مدیاپلیر هوشمند',
-    text: 'اپلیکیشن دانلود سریع ویدیو از اینستاگرام، یوتیوب، تیک‌تاک و توییتر با پخش آفلاین بدون فیلترشکن:',
+    title: 'وان دانلود (OneDownload) | دانلودر فوق‌سریع ویدیو و موزیک',
+    text: 'اپلیکیشن وان دانلود (OneDownload) — دانلودر فوق‌سریع ویدیو و موزیک از یوتیوب، تیک‌تاک و اینستاگرام با کیفیت 4K و پخش آفلاین (گروه AppOne علوی):',
     url: shareUrl
   };
 
@@ -136,7 +141,7 @@ export async function shareAppToFriends(customUrl?: string): Promise<boolean> {
       await navigator.share(shareData);
       return true;
     } catch {
-      return false;
+      // Fallback to clipboard if user cancels or share fails
     }
   }
 

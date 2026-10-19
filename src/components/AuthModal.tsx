@@ -126,9 +126,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       isLoggedIn: true,
       user: {
         id: `user-${Date.now()}`,
-        name: name.trim() || 'کاربر آپ‌وان اکسپرس',
-        email: email.trim() || `${phone}@appone.local`,
-        plan: 'Free',
+        name: name.trim() || 'کاربر ویژه وان دانلود (گروه AppOne علوی)',
+        email: email.trim() || 'vip@appone.ir',
+        plan: 'VIP Pro',
         quotaUsedMb: 0,
         quotaMaxMb: 50000
       }
@@ -162,8 +162,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     );
 
     // Create session (either matched account or instant login)
-    const displayName = matched ? matched.name : (identifier.split('@')[0] || 'کاربر فعال');
-    const displayEmail = matched ? matched.email : (identifier.includes('@') ? identifier : `${identifier}@appone.local`);
+    const displayName = matched ? matched.name : (identifier.split('@')[0] || 'کاربر ویژه وان دانلود (گروه AppOne علوی)');
+    const displayEmail = matched ? matched.email : (identifier.includes('@') ? identifier : 'vip@appone.ir');
 
     const newSession: UserSession = {
       isLoggedIn: true,
@@ -260,7 +260,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 {mode === 'forgot' && (language === 'fa' ? 'بازیابی و فراموشی رمز عبور' : 'Reset Password')}
               </h3>
               <p className="text-[11px] text-slate-400">
-                {language === 'fa' ? 'سامانه وان‌اکسپرس (گروه AppOne علوی)' : 'OneExpress Media Engine (AppOne Group)'}
+                {language === 'fa' ? 'کاربر ویژه وان دانلود (گروه AppOne علوی)' : 'OneDownload VIP (AppOne Alavi Group)'}
               </p>
             </div>
           </div>

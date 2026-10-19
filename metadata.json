@@ -1,6 +1,6 @@
 {
-  "name": "StreamVault - Media Downloader",
-  "description": "High-performance cross-platform video and audio downloader with multi-resolution 4K/WEBM/MP4 streams, 320kbps audio extraction, and offline player.",
+  "name": "OneDownload (وان دانلود) - دانلودر فوق‌سریع ویدیو و موزیک",
+  "description": "دانلودر فوق‌سریع ویدیو و موزیک از یوتیوب، تیک‌تاک و اینستاگرام با کیفیت 4K، استخراج صدا و پخش آفلاین • گروه AppOne علوی",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

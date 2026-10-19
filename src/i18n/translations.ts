@@ -2,9 +2,9 @@ import { Language } from '../types';
 
 export const translations = {
   en: {
-    appName: 'OneExpress',
-    appSubtitle: 'Ultra Fast Video Engine • AppOne Group',
-    tagline: 'High-speed media downloader & offline player with 4K stream extraction',
+    appName: 'OneDownload',
+    appSubtitle: 'Ultra-Fast Video & Music Downloader',
+    tagline: 'Ultra-fast video & music downloader with 4K stream extraction & offline player',
     
     // Navigation & Tabs
     tabDownloader: 'Downloader',
@@ -100,7 +100,7 @@ export const translations = {
     totalStorageUsed: 'Local Storage Used',
 
     // Player
-    mediaPlayer: 'StreamVault Player',
+    mediaPlayer: 'OneDownload Player',
     audioVisualizer: 'Audio Visualizer',
     nowPlaying: 'Now Playing',
     pipMode: 'Picture in Picture',
@@ -113,7 +113,7 @@ export const translations = {
 
     // PWA & Connectivity
     installApp: 'Install App',
-    installPWAHeader: 'Install StreamVault PWA',
+    installPWAHeader: 'Install OneDownload App',
     installPWADesc: 'Install onto your home screen for instantaneous loading, native share target menu, and full offline playback.',
     offlineNotice: 'Offline Mode: Browsing local library and cached media.',
     iosInstallGuideTitle: 'Install on iPhone & iPad',
@@ -124,19 +124,19 @@ export const translations = {
     // Auth & Profile
     signIn: 'Sign In',
     signUp: 'Sign Up',
-    guestUser: 'Guest Session',
+    guestUser: 'VIP User',
     signOut: 'Sign Out',
     accountProfile: 'User Account',
     proPlan: 'VIP Pro',
     freePlan: 'Free Tier',
     storageQuota: 'Cloud Vault Quota',
     unlimitedSpeed: 'Unlimited 4K Streams Enabled',
-    authModalTitle: 'Access Your StreamVault',
+    authModalTitle: 'OneDownload VIP Account',
     authModalDesc: 'Sign in to sync your download history, unlock 4K 60FPS extraction, and access cloud storage.',
     emailLabel: 'Email Address',
     passwordLabel: 'Password',
     nameLabel: 'Full Name',
-    continueGuest: 'Continue as Guest',
+    continueGuest: 'Continue as VIP Guest',
     noAccount: "Don't have an account?",
     alreadyAccount: 'Already have an account?',
     demoAuthNotice: 'Session is safely stored in local browser storage.',
@@ -158,9 +158,9 @@ export const translations = {
   },
 
   fa: {
-    appName: 'وان‌اکسپرس',
-    appSubtitle: 'موتور دانلود ویدیو و صدا • گروه AppOne علوی',
-    tagline: 'دانلود فوق‌سریع انواع ویدیو و آهنگ با کیفیت اصلی و پخش آفلاین',
+    appName: 'وان دانلود (OneDownload)',
+    appSubtitle: 'دانلودر فوق‌سریع ویدیو و موزیک',
+    tagline: 'دانلود فوق‌سریع ویدیو و موزیک با کیفیت اصلی و پخش آفلاین',
 
     // Navigation & Tabs
     tabDownloader: 'دانلودر',
@@ -269,7 +269,7 @@ export const translations = {
 
     // PWA & Connectivity
     installApp: 'نصب برنامه',
-    installPWAHeader: 'نصب اپلیکیشن وب استریم‌ولت',
+    installPWAHeader: 'نصب اپلیکیشن وان دانلود',
     installPWADesc: 'برنامه را روی صفحه اصلی دستگاه خود نصب کنید تا از سرعت بالاتر، اشتراک مستقیم و پخش آفلاین بهره‌مند شوید.',
     offlineNotice: 'حالت آفلاین: مشاهده فایل‌های محلی و حافظه موقت.',
     iosInstallGuideTitle: 'راهنمای نصب در آیفون و آیپد',
@@ -280,14 +280,14 @@ export const translations = {
     // Auth & Profile
     signIn: 'ورود به حساب',
     signUp: 'ثبت‌نام',
-    guestUser: 'کاربر مهمان',
+    guestUser: 'کاربر ویژه وان دانلود',
     signOut: 'خروج از حساب',
     accountProfile: 'پروفایل کاربری',
     proPlan: 'طرح ویژه (VIP Pro)',
     freePlan: 'طرح پایه',
     storageQuota: 'فضای ذخیره‌سازی ابری',
     unlimitedSpeed: 'سرعت نامحدود 4K فعال است',
-    authModalTitle: 'ورود به سامانه استریم‌ولت',
+    authModalTitle: 'ورود به سامانه وان دانلود',
     authModalDesc: 'برای همگام‌سازی تاریخچه دانلودها و دسترسی به فایل‌ها وارد شوید.',
     emailLabel: 'نشانی ایمیل',
     passwordLabel: 'رمز عبور',

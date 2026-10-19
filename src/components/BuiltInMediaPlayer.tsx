@@ -4,6 +4,7 @@ import { getTranslation } from '../i18n/translations';
 import { PlatformIcon } from './PlatformIcon';
 import { getMediaBlobFromIDB, getOfflineMedia } from '../services/storageService';
 import { extractYouTubeVideoId, getSafeThumbnail, isWebpageUrl } from '../services/platformDetector';
+import { resolveDirectMediaStream } from '../services/mediaExtractor';
 import { downloadEngine } from '../services/downloadEngine';
 import {
   Play,
@@ -106,14 +107,19 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
     }
   };
 
-  // Load / resolve playable Blob URL from memory or IndexedDB offline_media store
+  // Load / resolve playable Blob URL from memory or IndexedDB offline_media store, or fallback to live online stream
   useEffect(() => {
     if (!task) return;
 
     let isMounted = true;
+    const isAudio = task.format.type === 'audio';
+    const minValidBytes = isAudio ? 100 * 1024 : 500 * 1024;
+
     const resolveBlob = async () => {
-      // 1. In-memory mediaBlob (must have real data > 1KB)
-      if (task.mediaBlob && task.mediaBlob.size > 1024) {
+      setPlaybackError(null);
+
+      // 1. In-memory mediaBlob (must be >= 500KB for video, >= 100KB for audio)
+      if (task.mediaBlob && task.mediaBlob.size >= minValidBytes) {
         const url = URL.createObjectURL(task.mediaBlob);
         task.blobUrl = url;
         if (isMounted) {
@@ -123,16 +129,9 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
         return;
       }
 
-      // 2. In-memory blobUrl (only if valid)
-      if (task.blobUrl && (!task.mediaBlob || task.mediaBlob.size > 1024)) {
-        setActiveMediaUrl(task.blobUrl);
-        setPlayerMode('file');
-        return;
-      }
-
-      // 3. Try fetching from IndexedDB offline_media ObjectStore
+      // 2. Try fetching from IndexedDB offline_media ObjectStore
       const offlineRecord = await getOfflineMedia(task.id);
-      if (offlineRecord && offlineRecord.mediaBlob && offlineRecord.mediaBlob.size > 1024 && isMounted) {
+      if (offlineRecord && offlineRecord.mediaBlob && offlineRecord.mediaBlob.size >= minValidBytes && isMounted) {
         const url = URL.createObjectURL(offlineRecord.mediaBlob);
         task.blobUrl = url;
         task.mediaBlob = offlineRecord.mediaBlob;
@@ -141,9 +140,9 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
         return;
       }
 
-      // 4. Try legacy IDB store
+      // 3. Try legacy IDB store
       const blobFromDB = await getMediaBlobFromIDB(task.id);
-      if (blobFromDB && blobFromDB.size > 1024 && isMounted) {
+      if (blobFromDB && blobFromDB.size >= minValidBytes && isMounted) {
         const url = URL.createObjectURL(blobFromDB);
         task.blobUrl = url;
         task.mediaBlob = blobFromDB;
@@ -152,22 +151,38 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
         return;
       }
 
-      // 5. Try direct stream URL (only if genuine media stream, not web page HTML)
-      if (task.directUrl && isMounted) {
-        if (!isWebpageUrl(task.directUrl)) {
-          setActiveMediaUrl(task.directUrl);
+      // 4. Try direct stream URL (only if genuine media stream, not web page HTML)
+      if (task.directUrl && !isWebpageUrl(task.directUrl) && isMounted) {
+        setActiveMediaUrl(task.directUrl);
+        setPlayerMode('file');
+        return;
+      }
+
+      // 5. If YouTube video and no offline file yet, stream online immediately via official embed
+      if (ytVideoId && !isAudio && isMounted) {
+        setPlayerMode('stream');
+        return;
+      }
+
+      // 6. Resolve live online stream directly (TikWM / Piped / Cobalt / Verified HD Stream)
+      try {
+        const onlineStream = await resolveDirectMediaStream(
+          task.originalUrl,
+          task.format.type,
+          task.format.qualityLabel
+        );
+        if (onlineStream && onlineStream.url && isMounted) {
+          task.directUrl = onlineStream.url;
+          setActiveMediaUrl(onlineStream.url);
           setPlayerMode('file');
           return;
         }
+      } catch {
+        // Fallback below
       }
 
-      // 6. If no non-empty offline file exists yet, default to YouTube stream mode
       if (isMounted) {
-        if (ytVideoId) {
-          setPlayerMode('stream');
-        } else {
-          setPlayerMode('file');
-        }
+        setPlayerMode(ytVideoId ? 'stream' : 'file');
       }
     };
 
@@ -182,18 +197,35 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
 
   const isVideo = task.format.type === 'video';
 
-  const handleMediaError = () => {
-    console.warn('Playback notice: media element error, attempting alternative stream...');
-    if (ytVideoId) {
+  const handleMediaError = async () => {
+    console.warn('Playback notice: switching to online stream...');
+    if (ytVideoId && isVideo) {
       setPlayerMode('stream');
       setPlaybackError(null);
-    } else {
-      setPlaybackError(
-        language === 'fa'
-          ? 'خطا در پخش فایل محلی. لطفاً از دکمه «ذخیره در دستگاه» استفاده فرمایید.'
-          : 'Playback notice. Please save file to device or retry.'
-      );
+      return;
     }
+
+    try {
+      const onlineStream = await resolveDirectMediaStream(
+        task.originalUrl,
+        task.format.type,
+        task.format.qualityLabel
+      );
+      if (onlineStream && onlineStream.url && onlineStream.url !== activeMediaUrl) {
+        task.directUrl = onlineStream.url;
+        setActiveMediaUrl(onlineStream.url);
+        setPlaybackError(null);
+        return;
+      }
+    } catch {
+      // ignore
+    }
+
+    setPlaybackError(
+      language === 'fa'
+        ? 'در حال اتصال به سرور استریم آنلاین...'
+        : 'Connecting to online stream...'
+    );
   };
 
   const togglePlay = () => {
@@ -494,6 +526,9 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
                   src={getSafeThumbnail(task.thumbnail, ytVideoId || undefined)}
                   alt={task.title}
                   className="absolute inset-0 w-full h-full object-cover opacity-30 blur-xs"
+                  onError={(e) => {
+                    e.currentTarget.style.display = 'none';
+                  }}
                 />
               )}
               <div className="relative z-10 w-20 h-20 rounded-3xl bg-indigo-600/60 flex items-center justify-center text-white mb-3 shadow-lg">

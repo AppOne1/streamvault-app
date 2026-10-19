@@ -222,7 +222,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
   autoPlayAfterDownload: false,
   autoSaveToDevice: true, // Automatically triggers native file download to phone/system Downloads folder
-  downloadPathHint: 'Downloads/StreamVault',
+  downloadPathHint: 'Downloads/OneDownload',
   chunkConcurrency: 4
 };
 
@@ -247,12 +247,12 @@ export function saveSettingsToStorage(settings: AppSettings): void {
 export const DEFAULT_SESSION: UserSession = {
   isLoggedIn: true,
   user: {
-    id: 'user-guest-pro',
-    name: 'کاربر استریم‌ولت (VIP)',
-    email: 'user@streamvault.app',
-    avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100&auto=format&fit=crop&q=80',
+    id: 'user-vip-appone',
+    name: 'کاربر ویژه وان دانلود (گروه AppOne علوی)',
+    email: 'vip@appone.ir',
+    avatarUrl: '',
     plan: 'VIP Pro',
-    quotaUsedMb: 680,
+    quotaUsedMb: 120,
     quotaMaxMb: 50000
   }
 };
@@ -261,7 +261,17 @@ export function loadSessionFromStorage(): UserSession {
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.SESSION);
     if (!raw) return DEFAULT_SESSION;
-    return JSON.parse(raw);
+    const parsed: UserSession = JSON.parse(raw);
+    if (
+      !parsed.user ||
+      parsed.user.email === 'user@streamvault.app' ||
+      parsed.user.name?.includes('استریم‌ولت') ||
+      parsed.user.id === 'guest'
+    ) {
+      saveSessionToStorage(DEFAULT_SESSION);
+      return DEFAULT_SESSION;
+    }
+    return parsed;
   } catch {
     return DEFAULT_SESSION;
   }

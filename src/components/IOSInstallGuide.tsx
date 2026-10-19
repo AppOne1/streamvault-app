@@ -42,11 +42,10 @@ export const IOSInstallGuide: React.FC<IOSInstallGuideProps> = ({
 
   if (!isOpen) return null;
 
-  // Clean, real application URL without broken proxy hacks
   const appUrl =
-    typeof window !== 'undefined'
+    typeof window !== 'undefined' && !window.location.host.includes('localhost')
       ? `${window.location.protocol}//${window.location.host}${window.location.pathname}`
-      : 'http://localhost:3000';
+      : 'https://cafebazaar.ir/app/ir.appone.onedownload';
 
   const handleCopyLink = async () => {
     try {
@@ -458,8 +457,8 @@ export const IOSInstallGuide: React.FC<IOSInstallGuideProps> = ({
               </span>
               <p className="text-slate-600 dark:text-slate-300 text-[11px] leading-relaxed">
                 {language === 'fa'
-                  ? 'خیر! وان‌اکسپرس نسل جدید وب‌اپلیکیشن مستقل (PWA) است که به هیچ فایل APK سنگین یا دسترسی‌های مشکوک گوشی نیازی ندارد. با افزودن به صفحه اصلی یا دانلود میانبر، عیناً مثل یک اپلیکیشن بومی با آیکون و سرعت کامل کار می‌کند.'
-                  : 'No APK is required. StreamVault is a high-performance PWA that runs in standalone mode directly on your phone.'}
+                  ? 'وان دانلود هم به صورت نسخه نصبی اندروید (APK) و هم وب‌اپلیکیشن مستقل (PWA) قابل نصب روی صفحه اصلی گوشی شماست.'
+                  : 'OneDownload runs as both a native Android APK and a high-performance standalone PWA directly on your phone.'}
               </p>
             </div>
           </div>

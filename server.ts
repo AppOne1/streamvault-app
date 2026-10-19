@@ -60,6 +60,35 @@ async function startServer() {
         return res.status(400).json({ error: 'URL is required' });
       }
 
+      const isTikTok = /(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/i.test(url);
+      if (isTikTok) {
+        try {
+          const tikRes = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1`, {
+            headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
+          });
+          if (tikRes.ok) {
+            const tikJson = await tikRes.json();
+            if (tikJson && tikJson.code === 0 && tikJson.data) {
+              const d = tikJson.data;
+              return res.json({
+                success: true,
+                platform: 'TikTok',
+                title: d.title || `TikTok Video (@${d.author?.unique_id || 'creator'})`,
+                duration: d.duration || 30,
+                max_height: 1080,
+                heights: [720, 1080],
+                est: { '720': d.size || 4500000, '1080': d.hd_size || d.size || 6500000 },
+                thumbnail: d.cover ? `/api/media/thumbnail?url=${encodeURIComponent(d.cover)}` : '',
+                direct_video_url: d.id ? `https://www.tikwm.com/video/media/play/${d.id}.mp4` : d.play,
+                direct_audio_url: d.music
+              });
+            }
+          }
+        } catch (tikErr) {
+          console.warn('TikWM probe fallback:', tikErr);
+        }
+      }
+
       const isYouTube = /(?:youtube\.com|youtu\.be)/i.test(url);
       const ytMatch = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/))([\w-]{11})/i);
       const ytId = ytMatch ? ytMatch[1] : null;
@@ -117,6 +146,36 @@ async function startServer() {
       const { url, height, audio } = req.body;
       if (!url) {
         return res.status(400).json({ error: 'URL is required' });
+      }
+
+      // Engine 1 for TikTok: TikWM Direct No-Watermark API
+      const isTikTok = /(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/i.test(url);
+      if (isTikTok) {
+        try {
+          const tikRes = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1`, {
+            headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
+          });
+          if (tikRes.ok) {
+            const tikJson = await tikRes.json();
+            if (tikJson && tikJson.code === 0 && tikJson.data) {
+              const d = tikJson.data;
+              const directMediaUrl = audio
+                ? (d.music || `https://www.tikwm.com/video/media/play/${d.id}.mp4`)
+                : (d.id ? `https://www.tikwm.com/video/media/play/${d.id}.mp4` : (d.hdplay || d.play));
+              if (directMediaUrl) {
+                return res.json({
+                  status: 'done',
+                  direct_url: directMediaUrl,
+                  title: d.title,
+                  file_size: d.size || d.hd_size || 4200000,
+                  thumbnail: d.cover
+                });
+              }
+            }
+          }
+        } catch (tikErr) {
+          console.warn('TikWM start fallback:', tikErr);
+        }
       }
 
       const isYouTube = /(?:youtube\.com|youtu\.be)/i.test(url);
