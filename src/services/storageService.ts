@@ -1,15 +1,17 @@
-import { AppSettings, DownloadTask, UserSession } from '../types';
+import { AppSettings, DownloadTask, Language, UserSession } from '../types';
 
 const STORAGE_KEYS = {
-  TASKS: 'streamvault_tasks_v2',
-  SETTINGS: 'streamvault_settings_v2',
-  SESSION: 'streamvault_session_v2'
+  TASKS: 'onedownload_tasks_v2',
+  SETTINGS: 'onedownload_settings_v2',
+  SESSION: 'onedownload_session_v2',
+  OD_USER_SESSION: 'od_user_session'
 };
 
-const DB_NAME = 'StreamVaultOfflineDB';
+const DB_NAME = 'OneDownloadOfflineDB';
 const DB_VERSION = 2;
 export const OFFLINE_MEDIA_STORE = 'offline_media';
 const LEGACY_BLOB_STORE = 'media_blobs';
+const IDB_SESSION_RECORD_KEY = '__od_user_session_record__';
 
 export interface OfflineMediaRecord {
   id: string; // taskId or unique ID
@@ -246,12 +248,32 @@ export function saveSettingsToStorage(settings: AppSettings): void {
   }
 }
 
+export const GUEST_DEFAULT_NAMES = [
+  'کاربر وان دانلود',
+  'کاربر مهمان (وان دانلود)',
+  'زائر (وان داونلود)',
+  'مستخدم وان داونلود',
+  'Guest User (OneDownload)',
+  'OneDownload User'
+];
+
+export function isDefaultGuestName(name?: string): boolean {
+  if (!name || !name.trim()) return true;
+  return GUEST_DEFAULT_NAMES.includes(name.trim());
+}
+
+export function getLocalizedGuestName(language: Language): string {
+  if (language === 'ar') return 'زائر (وان داونلود)';
+  if (language === 'en') return 'Guest User (OneDownload)';
+  return 'کاربر مهمان (وان دانلود)';
+}
+
 export const DEFAULT_SESSION: UserSession = {
   isLoggedIn: false,
   user: {
     id: 'guest-onedownload',
     name: 'کاربر مهمان (وان دانلود)',
-    email: 'guest@appone.ir',
+    email: '',
     avatarUrl: '',
     plan: 'Free',
     quotaUsedMb: 0,
@@ -261,17 +283,33 @@ export const DEFAULT_SESSION: UserSession = {
 
 export function loadSessionFromStorage(): UserSession {
   try {
-    const raw = localStorage.getItem(STORAGE_KEYS.SESSION);
-    if (!raw) return DEFAULT_SESSION;
+    const raw =
+      localStorage.getItem(STORAGE_KEYS.OD_USER_SESSION) ||
+      localStorage.getItem(STORAGE_KEYS.SESSION);
+    const currentSettings = loadSettingsFromStorage();
+    const localizedDefaultName = getLocalizedGuestName(currentSettings.language);
+    if (!raw) {
+      return {
+        ...DEFAULT_SESSION,
+        user: { ...DEFAULT_SESSION.user, name: localizedDefaultName }
+      };
+    }
     const parsed: UserSession = JSON.parse(raw);
-    if (
-      !parsed.user ||
-      parsed.user.email === 'user@streamvault.app' ||
-      parsed.user.name?.includes('استریم‌ولت') ||
-      parsed.user.id === 'user-vip-appone'
-    ) {
-      saveSessionToStorage(DEFAULT_SESSION);
-      return DEFAULT_SESSION;
+    if (!parsed.user || parsed.user.id === 'user-vip-appone') {
+      const resetSession = {
+        ...DEFAULT_SESSION,
+        user: { ...DEFAULT_SESSION.user, name: localizedDefaultName }
+      };
+      saveSessionToStorage(resetSession);
+      return resetSession;
+    }
+    if (isDefaultGuestName(parsed.user.name)) {
+      parsed.user.name = localizedDefaultName;
+    }
+    // Ensure od_user_session and session key stay synchronized
+    if (parsed.isLoggedIn) {
+      localStorage.setItem(STORAGE_KEYS.OD_USER_SESSION, JSON.stringify(parsed));
+      localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(parsed));
     }
     return parsed;
   } catch {
@@ -281,8 +319,92 @@ export function loadSessionFromStorage(): UserSession {
 
 export function saveSessionToStorage(session: UserSession): void {
   try {
-    localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(session));
+    const serialized = JSON.stringify(session);
+    localStorage.setItem(STORAGE_KEYS.SESSION, serialized);
+    if (session.isLoggedIn) {
+      localStorage.setItem(STORAGE_KEYS.OD_USER_SESSION, serialized);
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.OD_USER_SESSION);
+    }
+
+    // Mirror session state into IndexedDB for persistent storage across Android WebView / browser restarts
+    getDB()
+      .then((db) => {
+        const tx = db.transaction(LEGACY_BLOB_STORE, 'readwrite');
+        const store = tx.objectStore(LEGACY_BLOB_STORE);
+        if (session.isLoggedIn) {
+          store.put({
+            id: IDB_SESSION_RECORD_KEY,
+            sessionData: session,
+            updatedAt: Date.now()
+          });
+        } else {
+          store.delete(IDB_SESSION_RECORD_KEY);
+        }
+      })
+      .catch(() => {});
   } catch (err) {
     console.error('Failed to save session:', err);
   }
+}
+
+export async function loadSessionFromIDB(): Promise<UserSession | null> {
+  try {
+    const db = await getDB();
+    const tx = db.transaction(LEGACY_BLOB_STORE, 'readonly');
+    const store = tx.objectStore(LEGACY_BLOB_STORE);
+    const request = store.get(IDB_SESSION_RECORD_KEY);
+    return new Promise((resolve) => {
+      request.onsuccess = () => {
+        const res = request.result;
+        if (res && res.sessionData && res.sessionData.isLoggedIn) {
+          resolve(res.sessionData as UserSession);
+        } else {
+          resolve(null);
+        }
+      };
+      request.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Complete Logout & State Reset:
+ * Clears `od_user_session`, `onedownload_session_v2`, `onedownload_tasks_v2`, and all IndexedDB
+ * offline media blobs & session records, returning a 100% clean Guest session.
+ */
+export async function resetUserSessionAndClearAllData(language: Language): Promise<UserSession> {
+  const freshGuestSession: UserSession = {
+    isLoggedIn: false,
+    user: {
+      id: `guest-${Date.now().toString(36)}`,
+      name: getLocalizedGuestName(language),
+      email: '',
+      passwordHash: undefined,
+      avatarUrl: '',
+      country: 'IR',
+      plan: 'Free',
+      quotaUsedMb: 0,
+      quotaMaxMb: 1024
+    }
+  };
+
+  try {
+    localStorage.removeItem(STORAGE_KEYS.OD_USER_SESSION);
+    localStorage.removeItem(STORAGE_KEYS.SESSION);
+    localStorage.removeItem(STORAGE_KEYS.TASKS);
+    localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(freshGuestSession));
+  } catch {
+    // ignore storage errors
+  }
+
+  try {
+    await clearAllOfflineMedia();
+  } catch {
+    // ignore IDB errors
+  }
+
+  return freshGuestSession;
 }

@@ -1,4 +1,4 @@
-name: Build Offline Android APK
+name: Build OneDownload Android APK
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-android-apk:
-    name: Build Signed Offline APK
+    name: Build Signed OneDownload APK
     runs-on: ubuntu-latest
 
     steps:
@@ -52,15 +52,15 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          KEY_PASS="${KEYSTORE_PASSWORD:-streamvault123}"
-          ALIAS="${KEY_ALIAS:-streamvault}"
-          ALIAS_PASS="${KEY_PASSWORD:-streamvault123}"
+          KEY_PASS="${KEYSTORE_PASSWORD:-onedownload123}"
+          ALIAS="${KEY_ALIAS:-onedownload}"
+          ALIAS_PASS="${KEY_PASSWORD:-onedownload123}"
 
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "Using custom keystore from GitHub Secrets..."
             echo "$KEYSTORE_BASE64" | base64 --decode > release.keystore
           else
-            echo "Generating dedicated persistent keystore for Cafe Bazaar / Myket..."
+            echo "Generating dedicated persistent keystore for OneDownload..."
             keytool -genkeypair \
               -v \
               -keystore release.keystore \
@@ -70,7 +70,7 @@ jobs:
               -validity 10000 \
               -storepass "$KEY_PASS" \
               -keypass "$ALIAS_PASS" \
-              -dname "CN=StreamVault, OU=AppOne, O=StreamVault, L=Tehran, ST=Tehran, C=IR"
+              -dname "CN=OneDownload, OU=AppOne, O=OneDownload, L=Tehran, ST=Tehran, C=IR"
           fi
 
           echo "KEYSTORE_PASS=$KEY_PASS" >> $GITHUB_ENV
@@ -105,25 +105,25 @@ jobs:
             --ks-key-alias "$KEYSTORE_ALIAS" \
             --ks-pass "pass:$KEYSTORE_PASS" \
             --key-pass "pass:$KEYSTORE_ALIAS_PASS" \
-            --out StreamVault-v1.0-release-signed.apk \
+            --out OneDownload-v2.5-release-signed.apk \
             aligned.apk
 
           # Verify signature
-          $BUILD_TOOLS_DIR/apksigner verify --verbose StreamVault-v1.0-release-signed.apk
+          $BUILD_TOOLS_DIR/apksigner verify --verbose OneDownload-v2.5-release-signed.apk
 
-          echo "✅ Signed Release APK generated successfully!"
-          ls -lh StreamVault-v1.0-release-signed.apk
+          echo "✅ Signed OneDownload Release APK generated successfully!"
+          ls -lh OneDownload-v2.5-release-signed.apk
 
       - name: 🔐 Prepare Keystore Backup with Info
         run: |
           cat << 'EOF' > keystore-info.txt
           ==================================================
-          StreamVault Android Release Keystore Credentials
+          OneDownload Android Release Keystore Credentials
           ==================================================
           Keystore File: release.keystore
-          Alias: streamvault
-          Store Password: streamvault123
-          Key Password: streamvault123
+          Alias: onedownload
+          Store Password: onedownload123
+          Key Password: onedownload123
 
           How to use in GitHub Secrets for future updates:
           1. Run this command on your computer to encode the file to Base64:
@@ -137,16 +137,16 @@ jobs:
 
           3. Add the following secrets:
              ANDROID_KEYSTORE_BASE64: (paste content of keystore-base64.txt)
-             ANDROID_KEYSTORE_PASSWORD: streamvault123
-             ANDROID_KEY_ALIAS: streamvault
-             ANDROID_KEY_PASSWORD: streamvault123
+             ANDROID_KEYSTORE_PASSWORD: onedownload123
+             ANDROID_KEY_ALIAS: onedownload
+             ANDROID_KEY_PASSWORD: onedownload123
           ==================================================
           EOF
 
       - name: 📤 Upload Keystore Artifact to GitHub
         uses: actions/upload-artifact@v4
         with:
-          name: StreamVault-Release-Keystore
+          name: OneDownload-Release-Keystore
           path: |
             release.keystore
             keystore-info.txt
@@ -155,6 +155,6 @@ jobs:
       - name: 📤 Upload Signed APK Artifact to GitHub
         uses: actions/upload-artifact@v4
         with:
-          name: StreamVault-v1.0-Offline-APK
-          path: StreamVault-v1.0-release-signed.apk
+          name: OneDownload-v2.5-Offline-APK
+          path: OneDownload-v2.5-release-signed.apk
           retention-days: 30

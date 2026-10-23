@@ -1,154 +1,229 @@
 /**
- * Unique Device Identifier and Hardware Profiler Service
- * Generates and stores persistent hardware fingerprint for AppOne Express
+ * Unique Device Identifier, Hardware Profiler & Slogan/Referral + Media Share Service
+ * - Generates and stores persistent Hardware ID (شناسه اختصاصی دستگاه)
+ * - Dynamically generates and shares ONLY the promotional slogan + personal referral code text in FA, AR, or EN
+ * - Shares downloaded video & audio files directly to Telegram, WhatsApp, Eitaa, Rubika, etc.
  */
+
+import { DownloadTask, Language } from '../types';
+import { getOfflineMedia } from './storageService';
+
+const DEVICE_ID_STORAGE_KEY = 'onedownload_unique_device_id_v1';
 
 export interface DeviceProfile {
   deviceId: string;
-  os: string;
-  browser: string;
+  platformName: string;
+  userAgentSummary: string;
   screenResolution: string;
-  platform: string;
-  cores: number;
-  colorDepth: number;
-  createdAt: number;
+  createdAt: string;
 }
 
-const STORAGE_KEY = 'appone_unique_device_id';
-const PROFILE_KEY = 'appone_device_profile';
+/**
+ * Generates a deterministic-looking unique hardware/device identifier
+ * Format: APPONE-DEV-XXXX-XXXX
+ */
+function generateUniqueId(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const segment = (len: number) => {
+    let out = '';
+    const randomValues = new Uint32Array(len);
+    if (typeof window !== 'undefined' && window.crypto && window.crypto.getRandomValues) {
+      window.crypto.getRandomValues(randomValues);
+      for (let i = 0; i < len; i++) {
+        out += chars[randomValues[i] % chars.length];
+      }
+    } else {
+      for (let i = 0; i < len; i++) {
+        out += chars[Math.floor(Math.random() * chars.length)];
+      }
+    }
+    return out;
+  };
+
+  return `APPONE-DEV-${segment(4)}-${segment(4)}`;
+}
 
 export function getOrCreateDeviceId(): string {
-  let id = localStorage.getItem(STORAGE_KEY);
-  if (!id) {
-    const randomHex = () => Math.random().toString(16).substring(2, 6).toUpperCase();
-    id = `APPONE-DEV-${randomHex()}-${randomHex()}-${randomHex()}-${randomHex()}`;
-    localStorage.setItem(STORAGE_KEY, id);
+  try {
+    const existing = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
+    if (existing && existing.startsWith('APPONE-DEV-')) {
+      return existing;
+    }
+    const created = generateUniqueId();
+    localStorage.setItem(DEVICE_ID_STORAGE_KEY, created);
+    return created;
+  } catch {
+    return 'APPONE-DEV-7F9A-4C2E';
   }
-  return id;
 }
 
 export function getDeviceProfile(): DeviceProfile {
-  const cached = localStorage.getItem(PROFILE_KEY);
-  if (cached) {
+  const deviceId = getOrCreateDeviceId();
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+
+  let os = 'Unknown OS';
+  if (/android/i.test(ua)) os = 'Android OS';
+  else if (/iPad|iPhone|iPod/.test(ua)) os = 'iOS / iPhone';
+  else if (/Windows/i.test(ua)) os = 'Windows PC';
+  else if (/Mac/i.test(ua)) os = 'macOS';
+  else if (/Linux/i.test(ua)) os = 'Linux';
+
+  let browser = 'WebView / Browser';
+  if (/Edg\//i.test(ua)) browser = 'Edge';
+  else if (/Chrome\//i.test(ua)) browser = 'Chrome';
+  else if (/Safari\//i.test(ua) && !/Chrome/i.test(ua)) browser = 'Safari';
+  else if (/Firefox\//i.test(ua)) browser = 'Firefox';
+
+  const screenRes =
+    typeof window !== 'undefined' && window.screen
+      ? `${window.screen.width}×${window.screen.height}`
+      : '1920×1080';
+
+  return {
+    deviceId,
+    platformName: `${os} (${browser})`,
+    userAgentSummary: ua.slice(0, 90),
+    screenResolution: screenRes,
+    createdAt: new Date().toLocaleDateString('fa-IR')
+  };
+}
+
+/**
+ * Dynamic promotional slogan & personal referral code message based on selected language (FA / AR / EN).
+ * Never includes any APK file or web link.
+ */
+export function buildAppShareMessage(referralCode?: string, language: Language = 'fa'): string {
+  const code = (referralCode || 'OD-9X4K7M2P').trim();
+
+  if (language === 'ar') {
+    return `🚀 وان داونلود (OneDownload) | أقوى وأسرع برنامج لتحميل الفيديو والموسيقى بجودة 4K وتشغيل بدون نت من يوتيوب، إنستغرام وتيك توك!\n🎁 حمّل التطبيق الآن وادخل كود الإحالة الخاص بي عند التسجيل: ${code}`;
+  }
+
+  if (language === 'en') {
+    return `🚀 OneDownload | Ultra-fast 4K Video & Music Downloader with Offline Playback for YouTube, Instagram & TikTok!\n🎁 Install now and enter my referral code during sign-up: ${code}`;
+  }
+
+  return `🚀 وان دانلود (OneDownload) | دانلودر فوق‌سریع ویدیو و موزیک با کیفیت 4K و پخش آفلاین از یوتیوب، اینستاگرام و تیک‌تاک!\n🎁 همین حالا نصب کن و هنگام ثبت‌نام کد معرف من رو وارد کن: ${code}`;
+}
+
+/**
+ * Shares ONLY the localized promotional slogan + personal referral code text in one unified message.
+ * - Never sends or downloads any APK file.
+ * - Never sends any web URL.
+ */
+export async function shareAppToFriends(
+  referralCode?: string,
+  language: Language = 'fa'
+): Promise<{
+  openedNativeSheet: boolean;
+  copiedToClipboard: boolean;
+  shareMessage: string;
+}> {
+  const shareMessage = buildAppShareMessage(referralCode, language);
+
+  // 1. Web Share API (Called synchronously on user gesture before any await)
+  if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
     try {
-      return JSON.parse(cached);
-    } catch {
-      // Re-generate
+      await navigator.share({
+        text: shareMessage
+      });
+      return {
+        openedNativeSheet: true,
+        copiedToClipboard: false,
+        shareMessage
+      };
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        return {
+          openedNativeSheet: true,
+          copiedToClipboard: false,
+          shareMessage
+        };
+      }
     }
   }
 
-  const userAgent = navigator.userAgent || '';
-  let os = 'Unknown OS';
-  if (/android/i.test(userAgent)) os = 'Android OS';
-  else if (/iphone|ipad|ipod/i.test(userAgent)) os = 'Apple iOS';
-  else if (/windows/i.test(userAgent)) os = 'Windows PC';
-  else if (/macintosh|mac os x/i.test(userAgent)) os = 'macOS';
-  else if (/linux/i.test(userAgent)) os = 'Linux';
+  // 2. Fallback: Copy unified slogan + referral code to clipboard
+  let copiedToClipboard = false;
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(shareMessage);
+      copiedToClipboard = true;
+    } catch {
+      // ignore
+    }
+  }
 
-  let browser = 'Unknown Browser';
-  if (/chrome|crios/i.test(userAgent) && !/edg/i.test(userAgent)) browser = 'Chrome';
-  else if (/safari/i.test(userAgent) && !/chrome/i.test(userAgent)) browser = 'Safari';
-  else if (/firefox|fxios/i.test(userAgent)) browser = 'Firefox';
-  else if (/edg/i.test(userAgent)) browser = 'Edge';
-  else if (/samsungbrowser/i.test(userAgent)) browser = 'Samsung Internet';
-
-  const profile: DeviceProfile = {
-    deviceId: getOrCreateDeviceId(),
-    os,
-    browser,
-    screenResolution: `${window.screen.width} × ${window.screen.height}`,
-    platform: navigator.platform || 'Web/PWA',
-    cores: navigator.hardwareConcurrency || 4,
-    colorDepth: window.screen.colorDepth || 24,
-    createdAt: Date.now()
+  return {
+    openedNativeSheet: false,
+    copiedToClipboard,
+    shareMessage
   };
-
-  localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
-  return profile;
 }
 
-import { DownloadTask } from '../types';
-import { getOfflineMedia } from './storageService';
-
 /**
- * Shares genuine downloaded video/audio file via Native Mobile Share Sheet
- * (Supports Bluetooth, Quick Share / Nearby Share, Telegram, WhatsApp, Zapya, etc.)
+ * Shares an actual downloaded media file (MP4 Video or MP3 Audio) directly from the user's Library
+ * via Native Share Sheet (Bluetooth, Telegram, WhatsApp, Eitaa, Rubika, etc.).
  */
-export async function shareMediaFile(task: DownloadTask): Promise<boolean> {
-  try {
-    let blob = task.mediaBlob;
-    if (!blob && task.id) {
-      const rec = await getOfflineMedia(task.id);
-      if (rec && rec.mediaBlob) {
-        blob = rec.mediaBlob;
+export async function shareDownloadedMediaFile(task: DownloadTask): Promise<{
+  success: boolean;
+  method: 'file_share' | 'text_share' | 'disk_export';
+}> {
+  let blob: Blob | null = task.mediaBlob || null;
+
+  if (!blob) {
+    try {
+      const offlineRecord = await getOfflineMedia(task.id);
+      if (offlineRecord?.mediaBlob) {
+        blob = offlineRecord.mediaBlob;
       }
+    } catch {
+      // ignore
     }
+  }
 
-    const ext = task.format.format || 'mp4';
-    const mime = task.format.type === 'audio' ? 'audio/mpeg' : 'video/mp4';
-    const fileName = task.fileName || `media_${task.id}.${ext}`;
+  const mimeType =
+    task.format.type === 'audio'
+      ? 'audio/mpeg'
+      : 'video/mp4';
 
-    // If browser supports native file sharing (Android Chrome, iOS Safari, PWA)
-    if (blob && typeof navigator !== 'undefined' && navigator.canShare) {
-      const file = new File([blob], fileName, { type: mime });
-      if (navigator.canShare({ files: [file] })) {
+  const cleanFileName =
+    task.fileName ||
+    `${task.title.replace(/[^\w\u0600-\u06FF\s.-]/g, '_').slice(0, 40)}.${
+      task.format.format || (task.format.type === 'audio' ? 'mp3' : 'mp4')
+    }`;
+
+  // 1. Share actual binary media File via Web Share API Level 2
+  if (blob && typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+    try {
+      const mediaFile = new File([blob], cleanFileName, { type: mimeType });
+      if (!navigator.canShare || navigator.canShare({ files: [mediaFile] })) {
         await navigator.share({
-          files: [file],
           title: task.title,
-          text: `ویدیو ذخیره‌شده: ${task.title}`
+          text: `🎬 ${task.title}\n🚀 OneDownload`,
+          files: [mediaFile]
         });
-        return true;
+        return { success: true, method: 'file_share' };
+      }
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        return { success: false, method: 'file_share' };
       }
     }
+  }
 
-    // Fallback: share title & playable link
-    if (typeof navigator !== 'undefined' && navigator.share) {
+  // 2. Fallback: Share media title via Web Share API without any web URL
+  if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+    try {
       await navigator.share({
         title: task.title,
-        text: `ویدیو دانلود شده: ${task.title}`,
-        url: task.directUrl || window.location.href
+        text: `🎬 ${task.title}\n🚀 OneDownload`
       });
-      return true;
-    }
-
-    return false;
-  } catch (err) {
-    if ((err as any)?.name !== 'AbortError') {
-      console.warn('Share media file notice:', err);
-    }
-    return false;
-  }
-}
-
-/**
- * Shares application download link / invitation with friends
- */
-export async function shareAppToFriends(customUrl?: string): Promise<boolean> {
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  const isLocal = origin.includes('localhost') || origin.includes('127.0.0.1');
-  const shareUrl = customUrl?.trim() && !customUrl.includes('localhost')
-    ? customUrl.trim()
-    : (!isLocal && origin ? origin : 'https://cafebazaar.ir/app/ir.appone.onedownload');
-
-  const shareData = {
-    title: 'وان دانلود (OneDownload) | دانلودر فوق‌سریع ویدیو و موزیک',
-    text: 'اپلیکیشن وان دانلود (OneDownload) — دانلودر فوق‌سریع ویدیو و موزیک از یوتیوب، تیک‌تاک و اینستاگرام با کیفیت 4K و پخش آفلاین (گروه AppOne علوی):',
-    url: shareUrl
-  };
-
-  if (typeof navigator !== 'undefined' && navigator.share) {
-    try {
-      await navigator.share(shareData);
-      return true;
+      return { success: true, method: 'text_share' };
     } catch {
-      // Fallback to clipboard if user cancels or share fails
+      // ignore
     }
   }
 
-  try {
-    await navigator.clipboard.writeText(`${shareData.text}\n${shareData.url}`);
-    return true;
-  } catch {
-    return false;
-  }
+  return { success: false, method: 'disk_export' };
 }

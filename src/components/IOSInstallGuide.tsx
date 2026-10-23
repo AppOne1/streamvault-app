@@ -43,9 +43,9 @@ export const IOSInstallGuide: React.FC<IOSInstallGuideProps> = ({
   if (!isOpen) return null;
 
   const appUrl =
-    typeof window !== 'undefined' && !window.location.host.includes('localhost')
+    typeof window !== 'undefined' && window.location.origin
       ? `${window.location.protocol}//${window.location.host}${window.location.pathname}`
-      : 'https://cafebazaar.ir/app/ir.appone.onedownload';
+      : 'https://onedownload.app';
 
   const handleCopyLink = async () => {
     try {

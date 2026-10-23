@@ -1,14 +1,14 @@
 apply plugin: 'com.android.application'
 
 android {
-    namespace = "com.streamvault.downloader"
+    namespace = "ir.appone.onedownload"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.streamvault.downloader"
+        applicationId "ir.appone.onedownload"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode 2
+        versionName "2.5.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

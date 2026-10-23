@@ -3,7 +3,12 @@ import { DownloadTask, Language } from '../types';
 import { getTranslation } from '../i18n/translations';
 import { PlatformIcon } from './PlatformIcon';
 import { getMediaBlobFromIDB, getOfflineMedia } from '../services/storageService';
-import { extractYouTubeVideoId, getSafeThumbnail, isWebpageUrl } from '../services/platformDetector';
+import {
+  extractYouTubeVideoId,
+  getSafeThumbnail,
+  isCapacitorOrNative,
+  isWebpageUrl
+} from '../services/platformDetector';
 import { resolveDirectMediaStream } from '../services/mediaExtractor';
 import { downloadEngine } from '../services/downloadEngine';
 import {
@@ -25,7 +30,9 @@ import {
   Loader2,
   Check,
   Timer,
-  RotateCw
+  RotateCw,
+  ArrowRight,
+  ArrowLeft
 } from 'lucide-react';
 
 interface BuiltInMediaPlayerProps {
@@ -44,11 +51,12 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   const t = getTranslation(language);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
 
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [currentTime, setCurrentTime] = useState<number>(0);
-  const [duration, setDuration] = useState<number>(0);
+  const [duration, setDuration] = useState<number>(task?.durationSeconds || 0);
   const [volume, setVolume] = useState<number>(0.9);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
@@ -61,13 +69,55 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   // Detect YouTube ID for authentic real video playback
   const ytVideoId = task?.videoId || (task?.originalUrl ? extractYouTubeVideoId(task.originalUrl) : null);
   const [activeEngine, setActiveEngine] = useState<'server1' | 'server2'>('server1');
-  
-  // Default to real stream embed when available, or local file
+
+  // Default to real stream embed when YouTube video has no local cached Blob, or local file when cached
   const [playerMode, setPlayerMode] = useState<'stream' | 'file'>('file');
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveStatusText, setSaveStatusText] = useState<string | null>(null);
   const [useAnimatedCoverPlayer, setUseAnimatedCoverPlayer] = useState<boolean>(false);
   const [coverImgFailed, setCoverImgFailed] = useState<boolean>(false);
+
+  // Helper to send commands to YouTube IFrame API (Play, Pause, Seek, Volume, Speed)
+  const sendYtCommand = (func: string, args: any[] = []) => {
+    try {
+      iframeRef.current?.contentWindow?.postMessage(
+        JSON.stringify({ event: 'command', func, args }),
+        '*'
+      );
+    } catch {
+      // ignore postMessage errors
+    }
+  };
+
+  // Listen to YouTube IFrame API telemetry (currentTime, duration, playerState)
+  useEffect(() => {
+    if (!ytVideoId || playerMode !== 'stream') return;
+
+    const handleMessage = (event: MessageEvent) => {
+      if (typeof event.data !== 'string') return;
+      try {
+        const data = JSON.parse(event.data);
+        if (data.event === 'infoDelivery' && data.info) {
+          if (typeof data.info.currentTime === 'number') {
+            setCurrentTime(data.info.currentTime);
+          }
+          if (typeof data.info.duration === 'number' && data.info.duration > 0) {
+            setDuration(data.info.duration);
+          }
+          if (typeof data.info.playerState === 'number') {
+            // 1 = playing, 2 = paused, 0 = ended
+            if (data.info.playerState === 1) setIsPlaying(true);
+            else if (data.info.playerState === 2 || data.info.playerState === 0) setIsPlaying(false);
+          }
+        }
+      } catch {
+        // ignore non-JSON messages
+      }
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [ytVideoId, playerMode]);
 
   // Sleep timer auto-pause
   useEffect(() => {
@@ -108,21 +158,25 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
     }
   };
 
-  // Load / resolve playable Blob URL from memory or IndexedDB offline_media store, or fallback to live online stream
+  // Load / resolve playable Blob URL from memory or IndexedDB offline_media store, or progressive chunked stream
   useEffect(() => {
     if (!task) return;
 
     let isMounted = true;
+    let createdObjectUrl: string | null = null;
     const isAudio = task.format.type === 'audio';
-    const minValidBytes = isAudio ? 100 * 1024 : 500 * 1024;
+    const minValidBytes = isAudio ? 15 * 1024 : 30 * 1024;
+    const heightMatch = task.format.qualityLabel.match(/\d+/);
+    const requestedHeight = heightMatch ? heightMatch[0] : '720';
 
     const resolveBlob = async () => {
       setUseAnimatedCoverPlayer(false);
       setCoverImgFailed(false);
 
-      // 1. In-memory mediaBlob (must be >= 500KB for video, >= 100KB for audio)
+      // 1. Fully downloaded in-memory mediaBlob -> Play immediately via URL.createObjectURL(blob)
       if (task.mediaBlob && task.mediaBlob.size >= minValidBytes) {
         const url = URL.createObjectURL(task.mediaBlob);
+        createdObjectUrl = url;
         task.blobUrl = url;
         if (isMounted) {
           setActiveMediaUrl(url);
@@ -131,10 +185,11 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
         return;
       }
 
-      // 2. Try fetching from IndexedDB offline_media ObjectStore
+      // 2. Try fetching completed Blob from IndexedDB offline_media ObjectStore -> URL.createObjectURL(blob)
       const offlineRecord = await getOfflineMedia(task.id);
       if (offlineRecord && offlineRecord.mediaBlob && offlineRecord.mediaBlob.size >= minValidBytes && isMounted) {
         const url = URL.createObjectURL(offlineRecord.mediaBlob);
+        createdObjectUrl = url;
         task.blobUrl = url;
         task.mediaBlob = offlineRecord.mediaBlob;
         setActiveMediaUrl(url);
@@ -142,10 +197,11 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
         return;
       }
 
-      // 3. Try legacy IDB store
+      // 3. Try legacy IDB store -> URL.createObjectURL(blob)
       const blobFromDB = await getMediaBlobFromIDB(task.id);
       if (blobFromDB && blobFromDB.size >= minValidBytes && isMounted) {
         const url = URL.createObjectURL(blobFromDB);
+        createdObjectUrl = url;
         task.blobUrl = url;
         task.mediaBlob = blobFromDB;
         setActiveMediaUrl(url);
@@ -153,20 +209,42 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
         return;
       }
 
-      // 4. Try direct stream URL (only if genuine media stream, not web page HTML)
+      // 4. For long YouTube videos (or un-downloaded YouTube videos):
+      // Never buffer the entire huge file into memory before starting playback!
+      // Instead, use progressive chunked streaming (/api/media/stream with HTTP Range 206 Partial Content) + real-time YouTube stream player.
+      if (ytVideoId && !isAudio && isMounted) {
+        const progressiveStreamUrl = !isCapacitorOrNative()
+          ? `/api/media/stream?url=${encodeURIComponent(task.originalUrl)}&quality=${requestedHeight}`
+          : task.directUrl && !isWebpageUrl(task.directUrl)
+          ? task.directUrl
+          : '';
+
+        if (progressiveStreamUrl) {
+          setActiveMediaUrl(progressiveStreamUrl);
+        }
+        setPlayerMode('stream');
+        setIsPlaying(true);
+        return;
+      }
+
+      // 5. Try direct stream URL (progressive HTTP Range streaming without loading full file into RAM)
       if (task.directUrl && !isWebpageUrl(task.directUrl) && isMounted) {
         setActiveMediaUrl(task.directUrl);
         setPlayerMode('file');
         return;
       }
 
-      // 5. If YouTube video and no offline file yet, stream online immediately via official embed
-      if (ytVideoId && !isAudio && isMounted) {
-        setPlayerMode('stream');
+      // 6. On Web, use progressive chunked stream endpoint (/api/media/stream) first for instant playback
+      if (!isCapacitorOrNative() && task.originalUrl && isMounted) {
+        const progressiveUrl = `/api/media/stream?url=${encodeURIComponent(
+          task.originalUrl
+        )}&quality=${requestedHeight}&audio=${isAudio ? '1' : '0'}`;
+        setActiveMediaUrl(progressiveUrl);
+        setPlayerMode('file');
         return;
       }
 
-      // 6. Resolve live online stream directly (TikWM / Piped / Cobalt / Verified HD Stream)
+      // 7. Resolve live online stream directly (Aparat / TikWM / Piped / Cobalt / Verified HD Stream)
       try {
         const onlineStream = await resolveDirectMediaStream(
           task.originalUrl,
@@ -196,12 +274,20 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
 
     return () => {
       isMounted = false;
+      if (createdObjectUrl) {
+        try {
+          URL.revokeObjectURL(createdObjectUrl);
+        } catch {
+          // ignore
+        }
+      }
     };
   }, [task, ytVideoId]);
 
-  // Simulated progress ticker when in animated native cover player mode
+  // Simulated progress ticker when in animated native cover player mode or YouTube stream fallback
   useEffect(() => {
-    if (!useAnimatedCoverPlayer || !isPlaying) return;
+    const isYtStreamActive = Boolean(ytVideoId && playerMode === 'stream');
+    if ((!useAnimatedCoverPlayer && !isYtStreamActive) || !isPlaying) return;
     const totalDur = duration || task?.durationSeconds || 180;
     if (!duration && totalDur) {
       setDuration(totalDur);
@@ -215,7 +301,7 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
       });
     }, 1000);
     return () => clearInterval(interval);
-  }, [useAnimatedCoverPlayer, isPlaying, duration, task?.durationSeconds, isLooping]);
+  }, [useAnimatedCoverPlayer, ytVideoId, playerMode, isPlaying, duration, task?.durationSeconds, isLooping]);
 
   if (!task) return null;
 
@@ -249,6 +335,17 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   };
 
   const togglePlay = () => {
+    if (isVideo && playerMode === 'stream' && ytVideoId) {
+      if (isPlaying) {
+        sendYtCommand('pauseVideo');
+        setIsPlaying(false);
+      } else {
+        sendYtCommand('playVideo');
+        setIsPlaying(true);
+      }
+      return;
+    }
+
     if (useAnimatedCoverPlayer) {
       setIsPlaying((prev) => !prev);
       return;
@@ -264,11 +361,17 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
       mediaEl.pause();
       setIsPlaying(false);
     } else {
-      mediaEl.play()
+      mediaEl
+        .play()
         .then(() => setIsPlaying(true))
         .catch(() => {
-          setUseAnimatedCoverPlayer(true);
-          setIsPlaying(true);
+          if (ytVideoId && isVideo) {
+            setPlayerMode('stream');
+            setIsPlaying(true);
+          } else {
+            setUseAnimatedCoverPlayer(true);
+            setIsPlaying(true);
+          }
         });
     }
   };
@@ -285,10 +388,14 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newTime = parseFloat(e.target.value);
+    setCurrentTime(newTime);
+    if (isVideo && playerMode === 'stream' && ytVideoId) {
+      sendYtCommand('seekTo', [newTime, true]);
+      return;
+    }
     const mediaEl = isVideo ? videoRef.current : audioRef.current;
     if (mediaEl) {
       mediaEl.currentTime = newTime;
-      setCurrentTime(newTime);
     }
   };
 
@@ -296,11 +403,27 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
     const newVol = parseFloat(e.target.value);
     setVolume(newVol);
     setIsMuted(newVol === 0);
+    if (isVideo && playerMode === 'stream' && ytVideoId) {
+      sendYtCommand('setVolume', [Math.round(newVol * 100)]);
+      if (newVol === 0) sendYtCommand('mute');
+      else sendYtCommand('unMute');
+      return;
+    }
     const mediaEl = isVideo ? videoRef.current : audioRef.current;
     if (mediaEl) mediaEl.volume = newVol;
   };
 
   const toggleMute = () => {
+    if (isVideo && playerMode === 'stream' && ytVideoId) {
+      if (isMuted) {
+        sendYtCommand('unMute');
+        setIsMuted(false);
+      } else {
+        sendYtCommand('mute');
+        setIsMuted(true);
+      }
+      return;
+    }
     const mediaEl = isVideo ? videoRef.current : audioRef.current;
     if (!mediaEl) return;
     if (isMuted) {
@@ -317,6 +440,10 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
     const nextIdx = (speeds.indexOf(playbackSpeed) + 1) % speeds.length;
     const nextSpeed = speeds[nextIdx];
     setPlaybackSpeed(nextSpeed);
+    if (isVideo && playerMode === 'stream' && ytVideoId) {
+      sendYtCommand('setPlaybackRate', [nextSpeed]);
+      return;
+    }
     const mediaEl = isVideo ? videoRef.current : audioRef.current;
     if (mediaEl) mediaEl.playbackRate = nextSpeed;
   };
@@ -340,7 +467,6 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
       if (!document.fullscreenElement) {
         await playerContainerRef.current.requestFullscreen();
         setIsFullscreen(true);
-        // Attempt landscape lock if supported by mobile screen orientation API
         if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any).lock) {
           (screen.orientation as any).lock('any').catch(() => {});
         }
@@ -357,6 +483,13 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   };
 
   const skipSeconds = (delta: number) => {
+    const maxDur = duration || task.durationSeconds || 3600;
+    const targetTime = Math.max(0, Math.min(maxDur, currentTime + delta));
+    setCurrentTime(targetTime);
+    if (isVideo && playerMode === 'stream' && ytVideoId) {
+      sendYtCommand('seekTo', [targetTime, true]);
+      return;
+    }
     const mediaEl = isVideo ? videoRef.current : audioRef.current;
     if (!mediaEl) return;
     mediaEl.currentTime = Math.max(0, Math.min(mediaEl.duration || Infinity, mediaEl.currentTime + delta));
@@ -439,37 +572,14 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
               </div>
             )}
 
-            {/* Direct Save to Device Button */}
             <button
-              onClick={handleSaveClick}
-              disabled={isSaving}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                isSaving
-                  ? 'bg-amber-600 text-white cursor-wait opacity-90'
-                  : saveStatusText?.includes('✓')
-                  ? 'bg-emerald-700 text-white'
-                  : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm shadow-emerald-600/30 active:scale-95'
-              }`}
-              title={t.saveToDisk}
-            >
-              {isSaving ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-              ) : saveStatusText?.includes('✓') ? (
-                <Check className="w-3.5 h-3.5 shrink-0" />
-              ) : (
-                <Download className="w-3.5 h-3.5 shrink-0" />
-              )}
-              <span className="truncate max-w-[150px]">
-                {saveStatusText || (language === 'fa' ? 'ذخیره در دستگاه' : 'Save File')}
-              </span>
-            </button>
-
-            <button
+              type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-black btn-3d-secondary"
               title={t.closePlayer}
             >
-              <X className="w-5 h-5" />
+              {language === 'fa' ? <ArrowRight className="w-3.5 h-3.5" /> : <ArrowLeft className="w-3.5 h-3.5" />}
+              <span>{language === 'fa' ? 'بازگشت' : 'Back'}</span>
             </button>
           </div>
         </div>
@@ -478,7 +588,22 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
         <div className="relative w-full aspect-video bg-slate-950 flex items-center justify-center overflow-hidden">
           {isVideo && playerMode === 'stream' && ytVideoId ? (
             <iframe
-              src={`https://www.youtube-nocookie.com/embed/${ytVideoId}?autoplay=1&playsinline=1&rel=0`}
+              ref={iframeRef}
+              src={
+                activeEngine === 'server1'
+                  ? `https://www.youtube.com/embed/${ytVideoId}?autoplay=1&playsinline=1&rel=0&modestbranding=1&enablejsapi=1&controls=1`
+                  : `https://www.youtube-nocookie.com/embed/${ytVideoId}?autoplay=1&playsinline=1&rel=0&enablejsapi=1&controls=1`
+              }
+              onLoad={() => {
+                try {
+                  iframeRef.current?.contentWindow?.postMessage(
+                    JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }),
+                    '*'
+                  );
+                } catch {
+                  // ignore
+                }
+              }}
               title={task.title}
               className="w-full h-full border-0"
               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
@@ -488,6 +613,7 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
             <video
               ref={videoRef}
               src={activeMediaUrl}
+              preload="metadata"
               loop={isLooping}
               onTimeUpdate={handleTimeUpdate}
               onLoadedMetadata={handleTimeUpdate}

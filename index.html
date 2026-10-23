@@ -97,7 +97,7 @@
     <!-- Immediate Theme & Direction Init -->
     <script>
       try {
-        const rawSettings = localStorage.getItem('streamvault_settings_v2');
+        const rawSettings = localStorage.getItem('onedownload_settings_v2');
         if (rawSettings) {
           const parsed = JSON.parse(rawSettings);
           if (parsed.theme === 'dark' || (!parsed.theme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {

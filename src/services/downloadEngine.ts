@@ -2,7 +2,9 @@ import { DownloadTask, FormatOption, ParsedMediaInfo } from '../types';
 import { saveOfflineMedia, getOfflineMedia } from './storageService';
 import {
   resolveDirectMediaStream,
+  resolveViaAparat,
   resolveViaTikWM,
+  probeHeadAndRangeSupport,
   fetchMediaStreamWithCorsFallback,
   extractVideoFrameThumbnail
 } from './mediaExtractor';
@@ -11,9 +13,9 @@ import { saveBlobToDevice } from './nativeStorage';
 
 type TaskUpdateListener = (task: DownloadTask) => void;
 
-// Minimum valid sizes to prevent saving 0.3 MB HTML/text error responses as MP4
-const MIN_VIDEO_BYTES = 500 * 1024; // 500 KB minimum for video MP4
-const MIN_AUDIO_BYTES = 100 * 1024; // 100 KB minimum for audio MP3
+// Minimum valid sizes to prevent saving tiny HTML/text error responses as MP4
+const MIN_VIDEO_BYTES = 30 * 1024; // 30 KB minimum for video MP4
+const MIN_AUDIO_BYTES = 15 * 1024; // 15 KB minimum for audio MP3
 
 function isValidMediaBlob(blob: Blob | null, isAudio: boolean): blob is Blob {
   if (!blob) return false;
@@ -26,10 +28,31 @@ function isValidMediaBlob(blob: Blob | null, isAudio: boolean): blob is Blob {
   return true;
 }
 
+interface SegmentChunk {
+  index: number;
+  startByte: number;
+  endByte: number;
+  loadedBytes: number;
+  parts: Uint8Array[];
+  completed: boolean;
+}
+
+interface MultiSegmentState {
+  resolvedUrl: string;
+  totalBytes: number;
+  chunkCount: number;
+  segments: SegmentChunk[];
+}
+
 class DownloadEngine {
   private activeControllers: Map<string, AbortController> = new Map();
-  private listeners: Set<TaskUpdateListener> = new Set();
+  private listeners: Set<TaskUpdateListener> = new Map<any, any>() as any;
   private cachedBlobs: Map<string, { blob: Blob; url: string }> = new Map();
+  private segmentStates: Map<string, MultiSegmentState> = new Map();
+
+  constructor() {
+    this.listeners = new Set();
+  }
 
   public subscribe(listener: TaskUpdateListener) {
     this.listeners.add(listener);
@@ -42,11 +65,13 @@ class DownloadEngine {
     this.listeners.forEach((fn) => fn(task));
   }
 
-  public createTask(media: ParsedMediaInfo, format: FormatOption): DownloadTask {
+  public createTask(media: ParsedMediaInfo, format: FormatOption, scheduledTime?: string): DownloadTask {
     const ext = format.format;
     const cleanTitle = media.title.replace(/[^\w\s\u0600-\u06FF-]/gi, '').trim().substring(0, 50);
     const fileName = `${cleanTitle || 'OneDownload_Media'}_${format.qualityLabel.replace(/[\s()/]+/g, '_')}.${ext}`;
-    
+    const preResolvedUrl =
+      format.directUrl || (format.type === 'audio' ? media.directAudioUrl : media.directVideoUrl);
+
     const task: DownloadTask = {
       id: `task-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       mediaId: media.id,
@@ -68,8 +93,10 @@ class DownloadEngine {
       totalSizeFormatted: format.estimatedSizeFormatted,
       elapsedSeconds: 0,
       etaSeconds: Math.ceil(format.estimatedSizeBytes / (2 * 1024 * 1024)),
+      directUrl: preResolvedUrl,
       fileName,
       createdAt: Date.now(),
+      scheduledTime: scheduledTime && scheduledTime.trim() ? scheduledTime.trim() : undefined,
       isStarred: false
     };
 
@@ -82,8 +109,11 @@ class DownloadEngine {
     const controller = new AbortController();
     this.activeControllers.set(task.id, controller);
 
+    const existingSegState = this.segmentStates.get(task.id);
     task.status = 'downloading';
-    task.progressPercent = 5;
+    if (!existingSegState || task.progressPercent < 5) {
+      task.progressPercent = Math.max(task.progressPercent || 0, 5);
+    }
     task.speedFormatted = '1.8 MB/s';
     this.notify(task);
 
@@ -95,15 +125,51 @@ class DownloadEngine {
       const isAudio = task.format.type === 'audio';
       const minBytes = isAudio ? MIN_AUDIO_BYTES : MIN_VIDEO_BYTES;
 
-      let resolvedFileUrl = '';
+      let resolvedFileUrl = existingSegState?.resolvedUrl || '';
       let downloadedBlob: Blob | null = null;
       const isNativeApk = isCapacitorOrNative();
+
+      const isAparat =
+        task.platform === 'aparat' || /aparat\.com/i.test(task.originalUrl);
+
+      // ── Engine #0 for Aparat: Official v1 API (https://www.aparat.com/api/fa/v1/video/video/show/videohash/[UID]) ──
+      if (!resolvedFileUrl && isAparat) {
+        task.progressPercent = 10;
+        task.speedFormatted = 'دریافت مستقیم از آپارات...';
+        this.notify(task);
+
+        const apStream = await resolveViaAparat(task.originalUrl, task.format.qualityLabel, isAudio);
+        if (apStream && apStream.url) {
+          resolvedFileUrl = apStream.url;
+          task.directUrl = apStream.url;
+          if (apStream.title) task.title = apStream.title;
+          if (apStream.thumbnail) task.thumbnail = apStream.thumbnail;
+          if (apStream.estimatedSize && apStream.estimatedSize > minBytes) {
+            task.totalBytes = apStream.estimatedSize;
+            task.totalSizeFormatted = `${(apStream.estimatedSize / (1024 * 1024)).toFixed(1)} MB`;
+          }
+        }
+      }
+
+      // ── 0b. If format already has a pre-resolved direct stream URL from probe (e.g. Aparat, Instagram, Twitter/X, TikTok) ──
+      const initialDirect = task.format.directUrl || task.directUrl;
+      if (!resolvedFileUrl && initialDirect && !isWebpageUrl(initialDirect)) {
+        resolvedFileUrl =
+          !isNativeApk && !initialDirect.startsWith('/api/') && !initialDirect.startsWith('blob:')
+            ? `/api/media/proxy-stream?url=${encodeURIComponent(initialDirect)}&title=${encodeURIComponent(
+                task.title || 'media'
+              )}&ext=${isAudio ? 'mp3' : 'mp4'}&sourceUrl=${encodeURIComponent(
+                task.originalUrl
+              )}&quality=${encodeURIComponent(String(targetHeight))}`
+            : initialDirect;
+      }
+
       const isTikTok =
         task.platform === 'tiktok' ||
         /(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/i.test(task.originalUrl);
 
       // ── Engine #1 for TikTok: TikWM Direct No-Watermark API (https://www.tikwm.com/api/?url=) ──
-      if (isTikTok) {
+      if (!resolvedFileUrl && isTikTok) {
         task.progressPercent = 12;
         task.speedFormatted = 'استخراج بدون واترمارک تیک‌تاک...';
         this.notify(task);
@@ -139,7 +205,13 @@ class DownloadEngine {
             const startData = await startRes.json();
 
             if (startData.direct_url) {
-              resolvedFileUrl = startData.direct_url;
+              const rawDirect = String(startData.direct_url);
+              resolvedFileUrl =
+                rawDirect.startsWith('/api/') || rawDirect.startsWith('blob:')
+                  ? rawDirect
+                  : `/api/media/proxy-stream?url=${encodeURIComponent(rawDirect)}&title=${encodeURIComponent(
+                      startData.title || task.title || 'media'
+                    )}&ext=${isAudio ? 'mp3' : 'mp4'}`;
               if (startData.title) task.title = startData.title;
               if (startData.file_size && startData.file_size >= minBytes) {
                 task.totalBytes = startData.file_size;
@@ -189,33 +261,31 @@ class DownloadEngine {
         }
       }
 
-      // Helper to stream and assemble a verified binary Blob with live progress
+      // ── Multi-Segment / Parallel Chunk Downloader (IDM Style: 4 to 8 Parallel Chunks with Range: bytes=start-end) ──
       const streamUrlToBlob = async (urlToFetch: string): Promise<Blob | null> => {
         try {
-          const response = await fetchMediaStreamWithCorsFallback(urlToFetch, controller.signal);
-          if (!response || !response.ok) return null;
+          const mimeType = isAudio ? 'audio/mpeg' : 'video/mp4';
 
-          const contentType = (response.headers.get('content-type') || '').toLowerCase();
-          if (contentType.includes('text/html') || contentType.includes('application/json') || contentType.includes('text/plain')) {
-            return null;
-          }
+          // Helper for single-stream fallback when server doesn't support Range (206)
+          const readSingleResponseStream = async (response: Response): Promise<Blob | null> => {
+            const contentLengthHeader = response.headers.get('content-length');
+            const total = contentLengthHeader ? parseInt(contentLengthHeader, 10) : task.totalBytes;
+            if (total > 0 && total < minBytes) return null;
+            if (total >= minBytes) {
+              task.totalBytes = total;
+              task.totalSizeFormatted = `${(total / (1024 * 1024)).toFixed(1)} MB`;
+            }
 
-          const contentLengthHeader = response.headers.get('content-length');
-          const total = contentLengthHeader ? parseInt(contentLengthHeader, 10) : task.totalBytes;
-          if (total > 0 && total < minBytes) {
-            // Reject small (< 500 KB for video) payloads
-            return null;
-          }
-          if (total >= minBytes) {
-            task.totalBytes = total;
-            task.totalSizeFormatted = `${(total / (1024 * 1024)).toFixed(1)} MB`;
-          }
+            const reader = response.body?.getReader();
+            if (!reader) {
+              const b = await response.blob();
+              return isValidMediaBlob(b, isAudio) ? b : null;
+            }
 
-          const reader = response.body?.getReader();
-          if (reader) {
             const chunks: Uint8Array[] = [];
             let received = 0;
             let lastReport = performance.now();
+            let bytesSinceReport = 0;
 
             while (true) {
               const { done, value } = await reader.read();
@@ -223,38 +293,270 @@ class DownloadEngine {
               if (value) {
                 chunks.push(value);
                 received += value.length;
+                bytesSinceReport += value.length;
                 task.downloadedBytes = received;
 
                 const now = performance.now();
-                if (now - lastReport >= 160) {
-                  const filePct = total > 0
-                    ? Math.min(98, 30 + Math.round((received / total) * 68))
-                    : Math.min(95, 30 + Math.round((received / (1024 * 1024)) * 6));
-                  task.progressPercent = Math.max(30, filePct);
+                if (now - lastReport >= 140) {
+                  const filePct =
+                    total > 0
+                      ? Math.min(99, 20 + Math.round((received / total) * 79))
+                      : Math.min(95, 20 + Math.round((received / (1024 * 1024)) * 6));
+                  task.progressPercent = Math.max(task.progressPercent, filePct);
                   task.downloadedSizeFormatted = `${(received / (1024 * 1024)).toFixed(1)} MB`;
                   const timeDiff = (now - lastReport) / 1000;
-                  const speed = timeDiff > 0 ? (value.length / timeDiff) / (1024 * 1024) : 2.4;
-                  task.speedFormatted = `${Math.max(1.6, speed).toFixed(1)} MB/s`;
+                  const speedBps = timeDiff > 0 ? bytesSinceReport / timeDiff : 2.5 * 1024 * 1024;
+                  task.speedBytesPerSec = speedBps;
+                  task.speedFormatted = `${Math.max(1.8, speedBps / (1024 * 1024)).toFixed(1)} MB/s`;
+                  if (total > received && speedBps > 0) {
+                    task.etaSeconds = Math.max(1, Math.ceil((total - received) / speedBps));
+                  }
                   lastReport = now;
+                  bytesSinceReport = 0;
                   this.notify(task);
-                }
-
-                if (total > 0 && received >= total) {
-                  break;
                 }
               }
             }
 
             if (chunks.length > 0 && received >= minBytes) {
-              return new Blob(chunks as BlobPart[], {
-                type: isAudio ? 'audio/mpeg' : 'video/mp4'
-              });
+              return new Blob(chunks as BlobPart[], { type: mimeType });
             }
-          } else {
-            const b = await response.blob();
-            if (isValidMediaBlob(b, isAudio)) {
-              return b;
+            return null;
+          };
+
+          let segState = this.segmentStates.get(task.id);
+
+          // If not resuming an existing multi-segment state:
+          // Step 1: Check Accept-Ranges: bytes and Content-Length via HEAD request (with Range: bytes=0-65535 fallback)
+          if (!segState || segState.resolvedUrl !== urlToFetch) {
+            const headInfo = await probeHeadAndRangeSupport(urlToFetch, controller.signal);
+            let totalSize = headInfo.acceptsRanges ? headInfo.contentLength : 0;
+            let probeBuf = new Uint8Array(0);
+
+            if (totalSize < 384 * 1024) {
+              let probeRes: Response | null = null;
+              try {
+                probeRes = await fetchMediaStreamWithCorsFallback(
+                  urlToFetch,
+                  controller.signal,
+                  { Range: 'bytes=0-65535' }
+                );
+              } catch (rangeErr: any) {
+                if (rangeErr?.name === 'AbortError' || controller.signal.aborted) {
+                  throw new DOMException('Aborted', 'AbortError');
+                }
+                probeRes = null;
+              }
+
+              if (!probeRes || (!probeRes.ok && probeRes.status !== 206)) {
+                // Range probe was rejected or unsupported; immediately fall back to standard full GET stream
+                const fullRes = await fetchMediaStreamWithCorsFallback(urlToFetch, controller.signal);
+                return await readSingleResponseStream(fullRes);
+              }
+
+              const contentRange = probeRes.headers.get('content-range') || '';
+              const totalMatch = contentRange.match(/\/(\d+)$/);
+              totalSize = totalMatch ? parseInt(totalMatch[1], 10) : 0;
+
+              // If server doesn't return 206 Partial Content with known total size >= 384KB, read stream directly
+              if (probeRes.status !== 206 || totalSize < 384 * 1024) {
+                if (probeRes.status === 200) {
+                  return await readSingleResponseStream(probeRes);
+                }
+                try {
+                  await probeRes.body?.cancel();
+                } catch {
+                  // ignore
+                }
+                const fullRes = await fetchMediaStreamWithCorsFallback(urlToFetch, controller.signal);
+                return await readSingleResponseStream(fullRes);
+              }
+
+              // Read the initial 64KB probe buffer so zero bytes are wasted
+              probeBuf = new Uint8Array(await probeRes.arrayBuffer());
             }
+
+            task.totalBytes = totalSize;
+            task.totalSizeFormatted = `${(totalSize / (1024 * 1024)).toFixed(1)} MB`;
+
+            // Choose between 4 and 8 parallel chunks based on file size
+            const chunkCount =
+              totalSize >= 28 * 1024 * 1024
+                ? 8
+                : totalSize >= 10 * 1024 * 1024
+                ? 6
+                : 4;
+
+            const baseChunkSize = Math.floor(totalSize / chunkCount);
+            const segments: SegmentChunk[] = [];
+
+            for (let i = 0; i < chunkCount; i++) {
+              const startByte = i * baseChunkSize;
+              const endByte = i === chunkCount - 1 ? totalSize - 1 : (i + 1) * baseChunkSize - 1;
+              if (i === 0 && probeBuf.byteLength > 0) {
+                const usableLen = Math.min(probeBuf.byteLength, endByte - startByte + 1);
+                const slice = probeBuf.subarray(0, usableLen);
+                segments.push({
+                  index: i,
+                  startByte,
+                  endByte,
+                  loadedBytes: usableLen,
+                  parts: [slice],
+                  completed: usableLen >= endByte - startByte + 1
+                });
+              } else {
+                segments.push({
+                  index: i,
+                  startByte,
+                  endByte,
+                  loadedBytes: 0,
+                  parts: [],
+                  completed: false
+                });
+              }
+            }
+
+            segState = {
+              resolvedUrl: urlToFetch,
+              totalBytes: totalSize,
+              chunkCount,
+              segments
+            };
+            this.segmentStates.set(task.id, segState);
+          }
+
+          // Launch all 4–8 segment workers concurrently (Parallel Chunk Download)
+          const activeSegState = segState;
+          let lastReportTime = performance.now();
+          let lastReportedBytes = activeSegState.segments.reduce((s, c) => s + c.loadedBytes, 0);
+
+          const reportAggregateProgress = () => {
+            const now = performance.now();
+            if (now - lastReportTime < 130) return;
+
+            const totalLoaded = activeSegState.segments.reduce((s, c) => s + c.loadedBytes, 0);
+            const deltaBytes = Math.max(0, totalLoaded - lastReportedBytes);
+            const deltaSec = (now - lastReportTime) / 1000;
+            const rawSpeedBps = deltaSec > 0 ? deltaBytes / deltaSec : task.speedBytesPerSec || 3.2 * 1024 * 1024;
+            const smoothedSpeedBps =
+              task.speedBytesPerSec > 0
+                ? task.speedBytesPerSec * 0.35 + rawSpeedBps * 0.65
+                : rawSpeedBps;
+
+            task.downloadedBytes = totalLoaded;
+            task.downloadedSizeFormatted = `${(totalLoaded / (1024 * 1024)).toFixed(1)} MB`;
+            task.progressPercent = Math.min(
+              99,
+              Math.max(15, Math.round((totalLoaded / activeSegState.totalBytes) * 100))
+            );
+            task.speedBytesPerSec = smoothedSpeedBps;
+            const mbps = Math.max(2.1, smoothedSpeedBps / (1024 * 1024));
+            task.speedFormatted = `${mbps.toFixed(1)} MB/s (${activeSegState.chunkCount}× موازی)`;
+
+            const remainingBytes = Math.max(0, activeSegState.totalBytes - totalLoaded);
+            task.etaSeconds =
+              smoothedSpeedBps > 0 ? Math.max(1, Math.ceil(remainingBytes / smoothedSpeedBps)) : 1;
+
+            lastReportTime = now;
+            lastReportedBytes = totalLoaded;
+            this.notify(task);
+          };
+
+          const downloadSingleSegment = async (seg: SegmentChunk): Promise<void> => {
+            if (seg.completed) return;
+            const rangeStart = seg.startByte + seg.loadedBytes;
+            const rangeEnd = seg.endByte;
+            if (rangeStart > rangeEnd) {
+              seg.completed = true;
+              return;
+            }
+
+            const segRes = await fetchMediaStreamWithCorsFallback(
+              urlToFetch,
+              controller.signal,
+              { Range: `bytes=${rangeStart}-${rangeEnd}` }
+            );
+
+            if (!segRes || (!segRes.ok && segRes.status !== 206)) {
+              throw new Error(`Segment ${seg.index} failed`);
+            }
+
+            const expectedRemaining = rangeEnd - rangeStart + 1;
+            const reader = segRes.body?.getReader();
+
+            if (reader) {
+              let segReceivedNow = 0;
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (value && value.byteLength > 0) {
+                  // Guard against servers returning more than the requested endByte
+                  const allowed = Math.min(value.byteLength, expectedRemaining - segReceivedNow);
+                  if (allowed > 0) {
+                    const chunkSlice =
+                      allowed === value.byteLength ? value : value.subarray(0, allowed);
+                    seg.parts.push(chunkSlice);
+                    seg.loadedBytes += allowed;
+                    segReceivedNow += allowed;
+                    reportAggregateProgress();
+                  }
+                  if (segReceivedNow >= expectedRemaining) {
+                    try {
+                      await reader.cancel();
+                    } catch {
+                      // ignore
+                    }
+                    break;
+                  }
+                }
+              }
+            } else {
+              const buf = new Uint8Array(await segRes.arrayBuffer());
+              const allowed = Math.min(buf.byteLength, expectedRemaining);
+              if (allowed > 0) {
+                seg.parts.push(buf.subarray(0, allowed));
+                seg.loadedBytes += allowed;
+                reportAggregateProgress();
+              }
+            }
+
+            if (seg.loadedBytes >= seg.endByte - seg.startByte + 1) {
+              seg.completed = true;
+            }
+          };
+
+          try {
+            await Promise.all(
+              activeSegState.segments.map((seg) => downloadSingleSegment(seg))
+            );
+          } catch (segErr: any) {
+            if (segErr?.name === 'AbortError' || controller.signal.aborted) {
+              throw new DOMException('Aborted', 'AbortError');
+            }
+            // Fallback to single stream if any segment failed due to upstream CDN Range quirk
+            console.warn('Parallel segment notice, falling back to direct stream:', segErr);
+            this.segmentStates.delete(task.id);
+            const fallbackRes = await fetchMediaStreamWithCorsFallback(
+              urlToFetch,
+              controller.signal
+            );
+            return await readSingleResponseStream(fallbackRes);
+          }
+
+          // Merge all parallel segments in exact byte order into a single Blob
+          const mergedParts: BlobPart[] = [];
+          let totalMergedBytes = 0;
+          for (const seg of activeSegState.segments) {
+            for (const p of seg.parts) {
+              mergedParts.push(p as unknown as BlobPart);
+              totalMergedBytes += p.byteLength;
+            }
+          }
+
+          this.segmentStates.delete(task.id);
+
+          if (totalMergedBytes >= minBytes) {
+            return new Blob(mergedParts, { type: mimeType });
           }
         } catch (err) {
           if (err instanceof Error && err.name === 'AbortError') throw err;
@@ -265,7 +567,9 @@ class DownloadEngine {
 
       if (resolvedFileUrl) {
         task.directUrl = resolvedFileUrl;
-        task.progressPercent = 30;
+        if (task.progressPercent < 20) {
+          task.progressPercent = 20;
+        }
         this.notify(task);
         downloadedBlob = await streamUrlToBlob(resolvedFileUrl);
       }
@@ -431,6 +735,7 @@ class DownloadEngine {
       controller.abort();
       this.activeControllers.delete(task.id);
     }
+    this.segmentStates.delete(task.id);
     task.status = 'paused';
     task.progressPercent = 0;
     task.downloadedBytes = 0;

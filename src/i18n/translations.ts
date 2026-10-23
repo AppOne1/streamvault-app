@@ -3,9 +3,17 @@ import { Language } from '../types';
 export const translations = {
   en: {
     appName: 'OneDownload',
-    appSubtitle: 'Ultra-Fast Video & Music Downloader',
-    tagline: 'Ultra-fast video & music downloader with 4K stream extraction & offline player',
-    
+    appTitle: 'OneDownload',
+    appSubtitle: 'Ultra-Fast Video, Music & Subtitle Downloader • YouTube, TikTok, Instagram',
+    tagline: 'Ultra-Fast Video, Music & Subtitle Downloader • YouTube, TikTok, Instagram',
+    invalidUrlError: 'Please enter a valid link',
+
+    // App Security Lock
+    appLockTitle: 'App Security Lock',
+    appLockDesc: 'Protect app entry with a PIN or password (Default: 12345678 | Recovery Keyword: onedownload)',
+    appLockEnterPin: 'Enter your security PIN or recovery keyword (onedownload) to unlock:',
+    appLockUnlockBtn: 'Unlock App',
+
     // Navigation & Tabs
     tabDownloader: 'Downloader',
     tabDownloads: 'Downloads',
@@ -61,7 +69,7 @@ export const translations = {
     clearCompleted: 'Clear Completed',
     pauseAll: 'Pause All',
     resumeAll: 'Resume All',
-    
+
     // Task States & Details
     statusQueued: 'In Queue',
     statusDownloading: 'Downloading',
@@ -158,9 +166,17 @@ export const translations = {
   },
 
   fa: {
-    appName: 'وان دانلود (OneDownload)',
-    appSubtitle: 'دانلودر فوق‌سریع ویدیو و موزیک',
-    tagline: 'دانلود فوق‌سریع ویدیو و موزیک با کیفیت اصلی و پخش آفلاین',
+    appName: 'وان دانلود',
+    appTitle: 'وان دانلود (OneDownload)',
+    appSubtitle: 'دانلودر فوق‌سریع ویدیو، موزیک و زیرنویس • یوتیوب، تیک‌تاک، اینستاگرام',
+    tagline: 'دانلودر فوق‌سریع ویدیو، موزیک و زیرنویس • یوتیوب، تیک‌تاک، اینستاگرام',
+    invalidUrlError: 'لطفاً یک لینک معتبر وارد کنید',
+
+    // App Security Lock
+    appLockTitle: 'قفل امنیتی برنامه',
+    appLockDesc: 'محافظت از ورود به برنامه با رمز عبور یا پین (رمز پیش‌فرض: 12345678 | کیورد بازیابی: onedownload)',
+    appLockEnterPin: 'برای ورود به برنامه، رمز امنیتی یا کیورد بازیابی (onedownload) را وارد کنید:',
+    appLockUnlockBtn: 'بازگشایی قفل برنامه',
 
     // Navigation & Tabs
     tabDownloader: 'دانلودر',
@@ -238,7 +254,7 @@ export const translations = {
     deleteTask: 'حذف',
 
     // Library
-    libraryHeader: 'کتابخانه رسانه‌های آفلاین',
+    libraryHeader: 'مدیریت پوشه‌ها و فایل‌ها',
     libraryEmpty: 'هنوز هیچ فایلی در کتابخانه محلی ذخیره نشده است',
     librarySubEmpty: 'فایل‌های دانلود شده به‌صورت آفلاین در این بخش در دسترس خواهند بود.',
     tabAllMedia: 'همه فایل‌ها',
@@ -311,9 +327,173 @@ export const translations = {
     clearAllData: 'پاکسازی کلیه اطلاعات و تاریخچه',
     clearDataConfirm: 'آیا از حذف تمام دانلودها و فایل‌های کتابخانه اطمینان دارید؟',
     dataCleared: 'تمامی اطلاعات محلی با موفقیت پاک شد.'
+  },
+
+  ar: {
+    appName: 'وان داونلود',
+    appTitle: 'وان داونلود (OneDownload)',
+    appSubtitle: 'محمّل الفيديو والموسيقى والترجمة فائق السرعة • يوتيوب، تيك توك، إنستغرام',
+    tagline: 'محمّل الفيديو والموسيقى والترجمة فائق السرعة • يوتيوب، تيك توك، إنستغرام',
+    invalidUrlError: 'يرجى إدخال رابط صحيح',
+
+    // App Security Lock
+    appLockTitle: 'قفل التطبيق الأمني',
+    appLockDesc: 'حماية الدخول إلى التطبيق برمز سري (الافتراضي: 12345678 | كلمة الاسترداد: onedownload)',
+    appLockEnterPin: 'أدخل رمز القفل أو كلمة الاسترداد (onedownload) لفتح التطبيق:',
+    appLockUnlockBtn: 'فتح قفل التطبيق',
+
+    // Navigation & Tabs
+    tabDownloader: 'التحميل',
+    tabDownloads: 'التنزيلات',
+    tabLibrary: '📁 المجلدات',
+    tabSettings: 'الإعدادات',
+
+    // URL input
+    inputPlaceholder: 'الصق رابط الفيديو أو الصوت هنا (يوتيوب، تيك توك، إنستغرام، إكس...)',
+    analyzeButton: 'تحليل الرابط',
+    analyzing: 'جاري فحص وتحليل الوسائط...',
+    pasteClipboard: 'لصق الرابط',
+    clearInput: 'مسح',
+    quickTry: 'روابط سريعة للتجربة:',
+    urlDetectedFromShare: 'تم اكتشاف رابط مشارك من تطبيق آخر!',
+
+    // Platform badges
+    platformYouTube: 'يوتيوب',
+    platformTikTok: 'تيك توك',
+    platformInstagram: 'إنستغرام',
+    platformTwitter: 'إكس / تويتر',
+    platformFacebook: 'فيسبوك',
+    platformVimeo: 'فيميو',
+    platformSoundCloud: 'ساوند كلاود',
+    platformPinterest: 'بينترست',
+    platformGeneric: 'وسائط الويب',
+
+    // Media Result Modal / Card
+    mediaFound: 'تم تحليل الفيديو والصوت بنجاح',
+    duration: 'المدة',
+    author: 'القناة / الناشر',
+    views: 'المشاهدات',
+    videoStreams: 'جودات الفيديو (MP4 / WEBM)',
+    audioStreams: 'جودات الصوت والموسيقى (MP3 / M4A)',
+    qualityCol: 'الجودة والدقة',
+    codecCol: 'الترميز والإطارات',
+    sizeCol: 'الحجم التقريبي',
+    actionCol: 'تحميل',
+    downloadNow: 'تحميل الآن',
+    batchSelect: 'تحديد متعدد',
+    close: 'إغلاق',
+    codecInfo: 'الترميز',
+    framerate: 'إطار/ث',
+    hdrBadge: 'HDR 10-bit',
+
+    // Download Manager
+    downloadsHeader: 'قائمة التنزيلات',
+    queueEmpty: 'لا توجد تنزيلات نشطة أو سابقة في القائمة',
+    startNewPrompt: 'الصق رابط الفيديو أو الموسيقى في الأعلى لبدء التحميل فوراً',
+    filterAll: 'الكل',
+    filterActive: 'جاري التحميل',
+    filterCompleted: 'المكتملة',
+    filterPaused: 'المتوقفة مؤقتاً',
+    clearCompleted: 'مسح المكتملة',
+    pauseAll: 'إيقاف الكل',
+    resumeAll: 'استئناف الكل',
+
+    // Task States & Details
+    statusQueued: 'في الانتظار',
+    statusDownloading: 'جاري التحميل',
+    statusPaused: 'متوقف مؤقتاً',
+    statusCompleted: 'مكتمل',
+    statusCancelled: 'ملغي',
+    statusError: 'خطأ',
+    speed: 'السرعة',
+    eta: 'الوقت المتبقي',
+    remaining: 'متبقي',
+    elapsed: 'الوقت المنقضي',
+    pause: 'إيقاف مؤقت',
+    resume: 'استئناف',
+    cancel: 'إلغاء',
+    retry: 'إعادة المحاولة',
+    openFile: 'تشغيل',
+    saveToDisk: 'حفظ في الجهاز',
+    deleteTask: 'حذف',
+
+    // Library
+    libraryHeader: 'إدارة المجلدات والملفات',
+    libraryEmpty: 'لا توجد ملفات محفوظة في المكتبة حتى الآن',
+    librarySubEmpty: 'جميع الفيديوهات والصوتيات المحملة ستظهر هنا لتشغيلها بدون إنترنت.',
+    tabAllMedia: 'كل الملفات',
+    tabVideos: 'الفيديوهات',
+    tabAudios: 'الصوتيات',
+    tabFavorites: 'المفضلة',
+    searchPlaceholder: 'ابحث باسم الملف أو الصيغة...',
+    sortByDate: 'الأحدث أولاً',
+    sortByName: 'حسب الاسم',
+    sortBySize: 'حسب الحجم',
+    exportFile: 'حفظ في الجهاز',
+    deleteItem: 'حذف',
+    favorite: 'تفضيل',
+    unfavorite: 'إزالة التفضيل',
+    totalStorageUsed: 'المساحة المستخدمة',
+
+    // Player
+    mediaPlayer: 'مشغل وان داونلود',
+    audioVisualizer: 'مؤشر الصوت',
+    nowPlaying: 'يعرض الآن',
+    pipMode: 'نافذة عائمة (PiP)',
+    fullscreen: 'ملء الشاشة',
+    playbackSpeed: 'سرعة التشغيل',
+    loop: 'تكرار',
+    volume: 'مستوى الصوت',
+    trackInfo: 'معلومات الملف',
+    closePlayer: 'إغلاق المشغل',
+
+    // PWA & Connectivity
+    installApp: 'تثبيت التطبيق',
+    installPWAHeader: 'تثبيت تطبيق وان داونلود',
+    installPWADesc: 'ثبّت التطبيق على الشاشة الرئيسية للوصول السريع والتشغيل بدون إنترنت.',
+    offlineNotice: 'وضع عدم الاتصال: تصفح الملفات المحملة محلياً.',
+    iosInstallGuideTitle: 'طريقة التثبيت على آيفون وآيباد',
+    iosStep1: '١. اضغط على زر المشاركة (Share) أسفل متصفح سفاري.',
+    iosStep2: '٢. اختر "إضافة إلى الشاشة الرئيسية" (Add to Home Screen).',
+    iosStep3: '٣. اضغط على "إضافة" (Add) في الأعلى لإتمام التثبيت.',
+
+    // Auth & Profile
+    signIn: 'تسجيل الدخول',
+    signUp: 'إنشاء حساب',
+    guestUser: 'مستخدم VIP',
+    signOut: 'تسجيل الخروج',
+    accountProfile: 'الملف الشخصي',
+    proPlan: 'اشتراك VIP Pro',
+    freePlan: 'الباقة المجانية',
+    storageQuota: 'مساحة التخزين السحابي',
+    unlimitedSpeed: 'تحميل 4K غير محدود مفعل',
+    authModalTitle: 'حساب وان داونلود (OneDownload)',
+    authModalDesc: 'سجّل الدخول لمزامنة تنزيلاتك وتفعيل التحميل الفوري بجودة 4K.',
+    emailLabel: 'البريد الإلكتروني',
+    passwordLabel: 'كلمة المرور',
+    nameLabel: 'الاسم الكامل',
+    continueGuest: 'المتابعة كضيف',
+    noAccount: 'ليس لديك حساب؟',
+    alreadyAccount: 'لديك حساب بالفعل؟',
+    demoAuthNotice: 'يتم حفظ جلستك بأمان على جهازك.',
+
+    // Settings
+    settingsHeader: 'الإعدادات والتفضيلات',
+    langSelector: 'لغة التطبيق (Language)',
+    themeSelector: 'مظهر التطبيق',
+    themeDark: 'الوضع الداكن (Dark)',
+    themeLight: 'الوضع الفاتح (Light)',
+    autoPlayToggle: 'تشغيل تلقائي بعد اكتمال التحميل',
+    autoSaveToDeviceToggle: 'حفظ تلقائي في ذاكرة الهاتف (مجلد Downloads)',
+    autoSaveToDeviceDesc: 'حفظ الفيديو أو الصوت مباشرة في ذاكرة هاتفك أو حاسوبك فور انتهاء التحميل',
+    fileSavedNotice: 'تم حفظ الملف بنجاح في ذاكرة جهازك!',
+    chunkConcurrencyTitle: 'عدد القنوات المتزامنة للتحميل السريع',
+    clearAllData: 'مسح جميع البيانات والسجل',
+    clearDataConfirm: 'هل أنت متأكد من حذف جميع التنزيلات والملفات المحلية؟',
+    dataCleared: 'تم مسح جميع البيانات المحلية بنجاح.'
   }
 };
 
 export function getTranslation(lang: Language) {
-  return translations[lang] || translations.en;
+  return translations[lang] || translations.fa;
 }

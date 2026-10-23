@@ -1,53 +1,67 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
-  ArrowRight,
   Clipboard,
   Check,
   X,
   Loader2,
-  Share2,
+  ArrowRight,
   Sparkles,
-  Radar,
-  ListPlus,
-  Layers,
-  Play,
+  FileEdit,
   Clock,
+  Layers,
+  ListOrdered,
+  Play,
+  Trash2,
   CheckCircle2,
-  Trash2
+  AlertCircle,
+  Radar
 } from 'lucide-react';
-import { DownloadTask, Language, PlatformId } from '../types';
-import { detectPlatform, extractUrlFromText, SAMPLE_URLS } from '../services/platformDetector';
-import { PlatformIcon } from './PlatformIcon';
+import { DownloadTask, Language } from '../types';
 import { getTranslation } from '../i18n/translations';
+import {
+  detectPlatform,
+  extractUrlFromText,
+  isValidHttpUrl,
+  SAMPLE_URLS
+} from '../services/platformDetector';
+import { PlatformIcon } from './PlatformIcon';
 
 interface UrlInputSectionProps {
   language: Language;
   url: string;
-  setUrl: (url: string) => void;
+  setUrl: (val: string) => void;
+  customFileName?: string;
+  setCustomFileName?: (val: string) => void;
+  scheduledTime?: string;
+  setScheduledTime?: (val: string) => void;
   isLoading: boolean;
   onAnalyze: (targetUrl?: string) => void;
   onStartBatchDownload?: (urls: string[], qualityPreset: '1080p' | '720p' | 'mp3') => void;
-  sharedLinkNotice: boolean;
+  sharedLinkNotice?: boolean;
   autoSniffClipboard?: boolean;
   tasks?: DownloadTask[];
 }
 
-const LAST_COPIED_KEY = 'onedownload_last_copied_url';
-const AUTO_SNIFF_KEY = 'onedownload_auto_sniff_enabled_v1';
-const LAST_SNIFFED_SESSION_KEY = 'onedownload_last_auto_sniffed_url';
+const LAST_COPIED_URL_KEY = 'onedownload_last_sniffed_url_v1';
 
-function toPersianDigits(num: number): string {
-  const persian = ['۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹'];
-  return String(num)
-    .split('')
-    .map((c) => (/\d/.test(c) ? persian[Number(c)] : c))
-    .join('');
-}
+const toLocalDigits = (val: string | number, lang: Language): string => {
+  if (lang === 'fa') {
+    return String(val).replace(/\d/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[Number(d)]);
+  }
+  if (lang === 'ar') {
+    return String(val).replace(/\d/g, (d) => '٠١٢٣٤٥٦٧٨٩'[Number(d)]);
+  }
+  return String(val);
+};
 
 export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
   language,
   url,
   setUrl,
+  customFileName = '',
+  setCustomFileName,
+  scheduledTime = '',
+  setScheduledTime,
   isLoading,
   onAnalyze,
   onStartBatchDownload,
@@ -57,213 +71,172 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
 }) => {
   const t = getTranslation(language);
   const isFa = language === 'fa';
+  const isAr = language === 'ar';
+  const isRtl = isFa || isAr;
+
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const detectedPlatform: PlatformId = url.trim() ? detectPlatform(url) : 'generic';
+  const detectedPlatform = detectPlatform(url);
 
-  const [copyFeedback, setCopyFeedback] = useState(false);
+  const [pasteSuccess, setPasteSuccess] = useState(false);
   const [pasteHintVisible, setPasteHintVisible] = useState(false);
-  const [autoSniffedBanner, setAutoSniffedBanner] = useState<string | null>(null);
+  const [sniffedClipboardUrl, setSniffedClipboardUrl] = useState<string | null>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
-  const lastSniffedRef = useRef<string>(
-    typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(LAST_SNIFFED_SESSION_KEY) || '' : ''
-  );
+  // Batch Queue state
+  const [showBatchQueue, setShowBatchQueue] = useState(false);
+  const [batchText, setBatchText] = useState('');
+  const [batchQuality, setBatchQuality] = useState<'1080p' | '720p' | 'mp3'>('1080p');
 
-  // Batch Queue Multi-Link Panel State
-  const [isBatchOpen, setIsBatchOpen] = useState<boolean>(false);
-  const [batchText, setBatchText] = useState<string>('');
-  const [batchPreset, setBatchPreset] = useState<'1080p' | '720p' | 'mp3'>('1080p');
-
-  // Parse valid URLs currently entered in the Batch Queue textarea
-  const stagedBatchUrls = React.useMemo(() => {
-    return batchText
-      .split(/[\r\n]+/)
-      .map((line) => extractUrlFromText(line) || line.trim())
-      .filter((u) => /^https?:\/\//i.test(u));
-  }, [batchText]);
-
-  const removeStagedBatchUrl = (idxToRemove: number) => {
-    const next = stagedBatchUrls.filter((_, i) => i !== idxToRemove);
-    setBatchText(next.join('\n'));
-  };
-
-  /**
-   * Auto-Paste Clipboard Sniffer (Controlled via Settings switch):
-   * Automatically checks clipboard on page load, window focus, and visibility change.
-   */
+  // Auto-sniff clipboard on window focus when enabled
   useEffect(() => {
-    let isEnabled = autoSniffClipboard;
-    try {
-      const saved = localStorage.getItem(AUTO_SNIFF_KEY);
-      if (saved !== null) {
-        isEnabled = saved === 'true';
-      }
-    } catch {
-      // ignore
-    }
+    if (!autoSniffClipboard) return;
 
-    if (!isEnabled) return;
-
-    const inspectClipboardForUrl = async () => {
-      if (isLoading) return;
-      if (typeof navigator === 'undefined' || !navigator.clipboard || !navigator.clipboard.readText) {
-        return;
-      }
-
+    const checkClipboard = async () => {
       try {
-        const rawClip = await navigator.clipboard.readText();
-        if (!rawClip || !rawClip.trim()) return;
-
-        const extractedUrl = extractUrlFromText(rawClip);
-        if (!extractedUrl || !/^https?:\/\//i.test(extractedUrl)) return;
-
-        if (extractedUrl === lastSniffedRef.current || extractedUrl === url.trim()) {
-          return;
-        }
-
-        lastSniffedRef.current = extractedUrl;
-        try {
-          sessionStorage.setItem(LAST_SNIFFED_SESSION_KEY, extractedUrl);
-          localStorage.setItem(LAST_COPIED_KEY, extractedUrl);
-        } catch {
-          // ignore
-        }
-
-        setUrl(extractedUrl);
-        setAutoSniffedBanner(extractedUrl);
-        onAnalyze(extractedUrl);
-        setTimeout(() => setAutoSniffedBanner(null), 6000);
-      } catch {
-        // Browser may block background clipboard read until user interacts; fail silently
-      }
-    };
-
-    const initTimer = setTimeout(() => {
-      inspectClipboardForUrl();
-    }, 350);
-
-    const handleWindowFocus = () => {
-      inspectClipboardForUrl();
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        inspectClipboardForUrl();
-      }
-    };
-
-    window.addEventListener('focus', handleWindowFocus);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    return () => {
-      clearTimeout(initTimer);
-      window.removeEventListener('focus', handleWindowFocus);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
-  }, [autoSniffClipboard, isLoading, url]);
-
-  const applyPastedText = (rawText: string) => {
-    const cleaned = extractUrlFromText(rawText) || rawText.trim();
-    if (!cleaned) return false;
-    setUrl(cleaned);
-    lastSniffedRef.current = cleaned;
-    try {
-      localStorage.setItem(LAST_COPIED_KEY, cleaned);
-      sessionStorage.setItem(LAST_SNIFFED_SESSION_KEY, cleaned);
-    } catch {
-      // ignore storage errors
-    }
-    setCopyFeedback(true);
-    setPasteHintVisible(false);
-    setTimeout(() => setCopyFeedback(false), 1800);
-    return true;
-  };
-
-  /**
-   * 100% Active 3-Stage Android & WebView Paste Handler
-   */
-  const handlePaste = async () => {
-    setPasteHintVisible(false);
-
-    // Stage 1: Standard Async Clipboard API
-    if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.readText) {
-      try {
-        const clipText = await navigator.clipboard.readText();
-        if (clipText && clipText.trim()) {
-          if (applyPastedText(clipText)) {
-            const extracted = extractUrlFromText(clipText) || clipText.trim();
-            if (/^https?:\/\//i.test(extracted)) {
-              onAnalyze(extracted);
-            }
-            return;
+        if (navigator.clipboard && navigator.clipboard.readText) {
+          const text = await navigator.clipboard.readText();
+          const candidate = extractUrlFromText(text);
+          if (candidate && isValidHttpUrl(candidate) && candidate !== url) {
+            setSniffedClipboardUrl(candidate);
           }
         }
       } catch {
-        // Proceed immediately to Stage 2 for Android WebView
+        // Ignore clipboard permission silent check
+      }
+    };
+
+    window.addEventListener('focus', checkClipboard);
+    return () => window.removeEventListener('focus', checkClipboard);
+  }, [autoSniffClipboard, url]);
+
+  const applyValidUrl = (raw: string): string | null => {
+    const extracted = extractUrlFromText(raw);
+    if (extracted && isValidHttpUrl(extracted)) {
+      setUrl(extracted);
+      setValidationError(null);
+      try {
+        localStorage.setItem(LAST_COPIED_URL_KEY, extracted);
+      } catch {
+        // ignore
+      }
+      return extracted;
+    }
+    return null;
+  };
+
+  const handleAnalyzeClick = (overrideUrl?: string) => {
+    const candidate = (overrideUrl ?? url).trim();
+    if (!candidate || !isValidHttpUrl(candidate)) {
+      setValidationError(
+        isFa
+          ? 'لطفاً یک لینک معتبر وارد کنید (شروع با http:// یا https://)'
+          : isAr
+          ? 'يرجى إدخال رابط صحيح ومعتبر (يبدأ بـ http:// أو https://)'
+          : 'Please enter a valid URL (starting with http:// or https://)'
+      );
+      return;
+    }
+    setValidationError(null);
+    onAnalyze(candidate);
+  };
+
+  const handlePasteClipboard = async () => {
+    setValidationError(null);
+    setPasteHintVisible(false);
+
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text && text.trim()) {
+          const valid = applyValidUrl(text);
+          if (valid) {
+            setPasteSuccess(true);
+            setTimeout(() => setPasteSuccess(false), 1800);
+            onAnalyze(valid);
+          } else {
+            setValidationError(
+              isFa
+                ? 'لطفاً یک لینک معتبر وارد کنید (محتوای کلیپ‌بورد لینک معتبر وب نیست).'
+                : isAr
+                ? 'يرجى إدخال رابط صحيح (النص المنسوخ ليس رابط ويب صالح).'
+                : 'Please enter a valid URL (clipboard content is not a valid web link).'
+            );
+          }
+          return;
+        }
+      } catch {
+        // Fallback below
       }
     }
 
-    // Stage 2: Focus & Select Input + document.execCommand('paste') for Android WebView
     if (inputRef.current) {
       try {
         inputRef.current.focus();
         inputRef.current.select();
-        const pasted = document.execCommand('paste');
-        const currentVal = inputRef.current.value?.trim();
-        if (pasted && currentVal) {
-          if (applyPastedText(currentVal)) {
-            onAnalyze(currentVal);
-            return;
-          }
+        const ok = document.execCommand('paste');
+        const val = inputRef.current.value?.trim();
+        if (ok && val && applyValidUrl(val)) {
+          handleAnalyzeClick(val);
+          return;
         }
       } catch {
-        // Proceed to Stage 3
+        // ignore
       }
     }
 
-    // Stage 3: Fallback to last known copied link or show friendly interactive paste helper
     try {
-      const savedLast = localStorage.getItem(LAST_COPIED_KEY);
-      if (savedLast && savedLast.trim() && !url.trim()) {
-        applyPastedText(savedLast);
-        onAnalyze(savedLast);
+      const lastSaved = localStorage.getItem(LAST_COPIED_URL_KEY);
+      if (lastSaved && isValidHttpUrl(lastSaved) && !url.trim()) {
+        applyValidUrl(lastSaved);
+        onAnalyze(lastSaved);
         return;
       }
     } catch {
       // ignore
     }
 
-    if (inputRef.current) {
-      inputRef.current.focus();
-    }
+    inputRef.current?.focus();
     setPasteHintVisible(true);
     setTimeout(() => setPasteHintVisible(false), 6000);
   };
 
   const handleClear = () => {
     setUrl('');
+    setValidationError(null);
     setPasteHintVisible(false);
-    setAutoSniffedBanner(null);
-    if (inputRef.current) {
-      inputRef.current.focus();
+    setSniffedClipboardUrl(null);
+    inputRef.current?.focus();
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && !isLoading) {
+      e.preventDefault();
+      handleAnalyzeClick();
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && url.trim() && !isLoading) {
-      onAnalyze();
-    }
+  const stagedBatchUrls = batchText
+    .split('\n')
+    .map((line) => extractUrlFromText(line.trim()))
+    .filter((u) => Boolean(u) && isValidHttpUrl(u));
+
+  const removeStagedUrlAt = (idxToRemove: number) => {
+    const lines = batchText
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const updated = lines.filter((_, idx) => idx !== idxToRemove);
+    setBatchText(updated.join('\n'));
   };
 
-  const handleBatchSubmit = () => {
-    if (stagedBatchUrls.length === 0) return;
-    if (onStartBatchDownload) {
-      onStartBatchDownload(stagedBatchUrls, batchPreset);
-      setBatchText('');
-      setIsBatchOpen(false);
-    }
+  const handleStartBatch = () => {
+    if (stagedBatchUrls.length === 0 || !onStartBatchDownload) return;
+    onStartBatchDownload(stagedBatchUrls, batchQuality);
+    setBatchText('');
+    setShowBatchQueue(false);
   };
 
-  const fillSampleBatchUrls = () => {
+  const handleLoadSampleBatch = () => {
     const sampleLines = SAMPLE_URLS.slice(0, 3)
       .map((s) => s.url)
       .join('\n');
@@ -271,234 +244,334 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
   };
 
   const activeQueueTasks = tasks.filter(
-    (tItem) => tItem.status === 'downloading' || tItem.status === 'queued'
+    (t) => t.status === 'downloading' || t.status === 'queued'
   );
 
   return (
     <section className="w-full max-w-4xl mx-auto px-3 sm:px-4 pt-3 sm:pt-5 pb-2 overflow-x-hidden">
-      {/* Share Target notification banner */}
+      {/* Shared Link Detection Banner */}
       {sharedLinkNotice && (
         <div className="mb-3 p-3 rounded-2xl bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 flex items-center gap-2.5 text-xs sm:text-sm text-indigo-900 dark:text-indigo-200 card-3d">
-          <Share2 className="w-4 h-4 text-indigo-500 shrink-0" />
-          <div className="flex-1 font-bold truncate">
-            {t.urlDetectedFromShare}
-          </div>
+          <Sparkles className="w-4 h-4 text-indigo-500 shrink-0" />
+          <span className="font-bold">{t.urlDetectedFromShare}</span>
         </div>
       )}
 
-      {/* Auto-Sniffer Live Detection Banner */}
-      {autoSniffedBanner && (
-        <div className="mb-3 p-3 rounded-2xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-between gap-2 text-xs text-emerald-800 dark:text-emerald-200 card-3d animate-fade-in">
+      {/* Auto-Sniffed Clipboard Banner */}
+      {sniffedClipboardUrl && sniffedClipboardUrl !== url && (
+        <div className="mb-3 p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-300 dark:border-emerald-800 flex flex-wrap items-center justify-between gap-2 text-xs card-3d animate-fade-in">
           <div className="flex items-center gap-2 min-w-0">
             <Radar className="w-4 h-4 text-emerald-500 animate-spin shrink-0" />
-            <span className="font-extrabold truncate">
+            <span className="font-black text-emerald-900 dark:text-emerald-200 truncate">
               {isFa
-                ? 'رادار هوشمند کلیپ‌بورد: لینک کپی‌شده شما به صورت خودکار شناسایی و تحلیل شد!'
-                : 'Auto-Sniffer: Clipboard link automatically detected & analyzed!'}
+                ? 'لینک کپی‌شده در کلیپ‌بورد شناسایی شد:'
+                : isAr
+                ? 'تم اكتشاف رابط منسوخ في الحافظة:'
+                : 'Copied link detected in clipboard:'}
+            </span>
+            <span className="font-mono text-[11px] text-emerald-700 dark:text-emerald-300 truncate max-w-[200px]" dir="ltr">
+              {sniffedClipboardUrl}
             </span>
           </div>
-          <button
-            type="button"
-            onClick={() => setAutoSniffedBanner(null)}
-            className="p-1 rounded-lg hover:bg-emerald-500/20 shrink-0"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      )}
-
-      {/* Compact 3D Hero Header */}
-      <div className="text-center mb-4">
-        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 text-[11px] font-extrabold text-slate-700 dark:text-slate-300 mb-2 card-3d">
-          <span className="w-2 h-2 rounded-full dot-3d-indigo shrink-0" />
-          <span>
-            {isFa
-              ? 'دانلودر فوق‌سریع ویدیو، موزیک و زیرنویس • یوتیوب، تیک‌تاک، اینستاگرام'
-              : 'Ultra-Fast 4K Video, Audio & Subtitle Downloader'}
-          </span>
-        </div>
-        <h1 className="text-xl sm:text-3xl font-black text-slate-900 dark:text-white tracking-tight leading-snug drop-shadow-sm text-3d px-1">
-          {t.tagline}
-        </h1>
-      </div>
-
-      {/* Android Clipboard Helper Tooltip when OS blocks silent read */}
-      {pasteHintVisible && (
-        <div className="mb-3 p-3 rounded-2xl bg-amber-50 dark:bg-amber-950/70 border border-amber-300/80 dark:border-amber-700/80 text-amber-900 dark:text-amber-200 text-xs card-3d animate-fade-in">
-          <div className="flex items-center justify-between gap-2 mb-2">
-            <span className="font-extrabold flex items-center gap-1.5">
-              <Sparkles className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-              {isFa
-                ? 'کادر آماده است! انگشت خود را روی کادر نگه داشته و Paste را بزنید، یا یک لینک نمونه انتخاب کنید:'
-                : 'Input focused! Long-press inside the box and tap Paste, or pick a quick link below:'}
-            </span>
+          <div className="flex items-center gap-1.5">
             <button
               type="button"
-              onClick={() => setPasteHintVisible(false)}
-              className="p-1 rounded-lg hover:bg-amber-200/50 dark:hover:bg-amber-900/50"
+              onClick={() => {
+                setUrl(sniffedClipboardUrl);
+                onAnalyze(sniffedClipboardUrl);
+                setSniffedClipboardUrl(null);
+              }}
+              className="px-3 py-1 rounded-xl bg-emerald-600 text-white font-black text-[11px] btn-3d-emerald"
+            >
+              {isFa ? 'دانلود همین لینک' : isAr ? 'تحميل هذا الرابط' : 'Download Link'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setSniffedClipboardUrl(null)}
+              className="p-1 text-slate-400 hover:text-slate-600"
             >
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
-          <div className="flex flex-wrap gap-1.5">
-            {SAMPLE_URLS.slice(0, 3).map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => {
-                  applyPastedText(item.url);
-                  onAnalyze(item.url);
-                }}
-                className="px-2.5 py-1 rounded-xl bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-bold text-[11px] border border-amber-300 dark:border-amber-800 shadow-xs active:translate-y-[2px] transition-all"
-              >
-                {item.name}
-              </button>
-            ))}
-          </div>
         </div>
       )}
 
-      {/* Main 3D Tactile Input Box Container */}
-      <div className="relative space-y-2.5">
-        <div className="p-2.5 sm:p-3 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 card-3d space-y-2.5 sm:space-y-0 sm:flex sm:items-center sm:gap-2">
-          {/* Input Row */}
-          <div className="flex items-center gap-2 flex-1 min-w-0 bg-slate-50 dark:bg-slate-950/90 border border-slate-200/80 dark:border-slate-800 rounded-2xl px-3 py-2 input-3d">
-            <div className="flex items-center gap-1.5 shrink-0 pr-1 border-r border-slate-200 dark:border-slate-800">
-              <PlatformIcon platform={detectedPlatform} size={18} />
+      {/* Hero Header - Strictly Single Unified Subtitle Sentence */}
+      <div className="text-center mb-4">
+        <p className="text-xs sm:text-sm md:text-base font-extrabold text-slate-700 dark:text-slate-200 max-w-2xl mx-auto">
+          {isFa
+            ? 'دانلودر فوق‌سریع ویدیو و موزیک با کیفیت 4K و پخش آفلاین'
+            : isAr
+            ? 'أسرع برنامج لتحميل الفيديو والموسيقى بجودة 4K وتشغيل بدون إنترنت'
+            : 'Ultra-Fast 4K Video & Music Downloader with Offline Playback'}
+        </p>
+      </div>
+
+      {/* Prominent Enlarged Input Card */}
+      <div className="relative space-y-3">
+        <div className="p-3.5 sm:p-5 rounded-3xl bg-white dark:bg-slate-900 border-2 border-indigo-500/70 dark:border-indigo-400/70 ring-4 ring-indigo-500/15 shadow-2xl card-3d space-y-3">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+            {/* Large URL Input Box */}
+            <div className="flex items-center gap-3 flex-1 min-w-0 min-h-[60px] sm:min-h-[68px] bg-slate-50 dark:bg-slate-950 border-2 border-indigo-500/50 dark:border-indigo-500/60 focus-within:border-indigo-600 dark:focus-within:border-indigo-400 focus-within:ring-4 focus-within:ring-indigo-500/20 rounded-2xl px-4 py-3.5 input-3d transition-all">
+              <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-indigo-500/10 dark:bg-indigo-500/20 shrink-0 border border-indigo-500/30">
+                <PlatformIcon platform={detectedPlatform} size={24} />
+              </div>
+
+              <input
+                ref={inputRef}
+                type="url"
+                dir="ltr"
+                value={url}
+                onChange={(e) => {
+                  setUrl(e.target.value);
+                  if (validationError) setValidationError(null);
+                  if (e.target.value.trim() && isValidHttpUrl(e.target.value.trim())) {
+                    try {
+                      localStorage.setItem(LAST_COPIED_URL_KEY, e.target.value.trim());
+                    } catch {
+                      // ignore
+                    }
+                  }
+                }}
+                onPaste={(e) => {
+                  const pasted = e.clipboardData?.getData('text');
+                  if (pasted) {
+                    const extracted = extractUrlFromText(pasted) || pasted.trim();
+                    if (isValidHttpUrl(extracted)) {
+                      setValidationError(null);
+                      try {
+                        localStorage.setItem(LAST_COPIED_URL_KEY, extracted);
+                      } catch {
+                        // ignore
+                      }
+                      setTimeout(() => onAnalyze(extracted), 120);
+                    } else {
+                      setValidationError(
+                        isFa
+                          ? 'لطفاً یک لینک معتبر وارد کنید (شروع با http:// یا https://)'
+                          : isAr
+                          ? 'يرجى إدخال رابط صحيح ومعتبر (يبدأ بـ http:// أو https://)'
+                          : 'Please enter a valid URL (starting with http:// or https://)'
+                      );
+                    }
+                  }
+                }}
+                onKeyDown={handleKeyDown}
+                placeholder={t.inputPlaceholder}
+                className="w-full min-w-0 py-1.5 text-sm sm:text-base md:text-lg bg-transparent text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none font-extrabold tracking-wide"
+              />
+
+              {url && (
+                <button
+                  type="button"
+                  onClick={handleClear}
+                  className="p-2 rounded-xl text-slate-400 hover:text-rose-500 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors shrink-0"
+                  title={t.clearInput}
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              )}
             </div>
 
-            <input
-              ref={inputRef}
-              type="url"
-              dir="ltr"
-              value={url}
-              onChange={(e) => {
-                setUrl(e.target.value);
-                if (e.target.value.trim()) {
-                  try {
-                    localStorage.setItem(LAST_COPIED_KEY, e.target.value.trim());
-                  } catch {
-                    // ignore
-                  }
-                }
-              }}
-              onPaste={(e) => {
-                const text = e.clipboardData?.getData('text');
-                if (text) {
-                  const extracted = extractUrlFromText(text) || text.trim();
-                  try {
-                    localStorage.setItem(LAST_COPIED_KEY, extracted);
-                  } catch {
-                    // ignore
-                  }
-                  if (/^https?:\/\//i.test(extracted)) {
-                    setTimeout(() => onAnalyze(extracted), 120);
-                  }
-                }
-              }}
-              onKeyDown={handleKeyDown}
-              placeholder={t.inputPlaceholder}
-              className="w-full min-w-0 py-1 text-xs sm:text-sm bg-transparent text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none font-bold"
-            />
-
-            {url && (
+            {/* Paste & Analyze Buttons */}
+            <div className="flex items-center gap-2.5 w-full sm:w-auto shrink-0">
               <button
                 type="button"
-                onClick={handleClear}
-                className="p-1.5 rounded-xl text-slate-400 hover:text-rose-500 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors shrink-0"
-                title={t.clearInput}
+                onClick={handlePasteClipboard}
+                className="flex items-center justify-center gap-2 px-4 py-3.5 sm:py-4 rounded-2xl text-xs sm:text-sm font-black bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 border-t border-white/40 dark:border-white/15 shadow-[0_4px_0_rgb(148,163,184),0_8px_14px_rgba(15,23,42,0.1)] dark:shadow-[0_4px_0_rgb(15,23,42),0_8px_14px_rgba(0,0,0,0.45)] active:translate-y-[3px] active:shadow-[0_1px_0_rgb(148,163,184)] transition-all duration-150 shrink-0 cursor-pointer"
+                title={t.pasteClipboard}
               >
-                <X className="w-4 h-4" />
-              </button>
-            )}
-          </div>
-
-          {/* 3D Tactile Action Buttons: Always Active Smart Paste + 3D Analyze */}
-          <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
-            <button
-              type="button"
-              onClick={handlePaste}
-              className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-2xl text-xs font-black bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 border-t border-white/40 dark:border-white/15 shadow-[0_4px_0_rgb(148,163,184),0_8px_14px_rgba(15,23,42,0.1)] dark:shadow-[0_4px_0_rgb(15,23,42),0_8px_14px_rgba(0,0,0,0.45)] active:translate-y-[3px] active:shadow-[0_1px_0_rgb(148,163,184)] transition-all duration-150 shrink-0"
-              title={t.pasteClipboard}
-            >
-              {copyFeedback ? (
-                <Check className="w-4 h-4 text-emerald-500 shrink-0" />
-              ) : (
-                <Clipboard className="w-4 h-4 text-indigo-500 shrink-0" />
-              )}
-              <span>{copyFeedback ? (isFa ? 'جای‌گذاری شد' : 'Pasted!') : t.pasteClipboard}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onAnalyze()}
-              disabled={!url.trim() || isLoading}
-              className="flex-1 sm:flex-initial flex items-center justify-center gap-2 px-5 py-2.5 rounded-2xl text-xs sm:text-sm font-black text-white bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 border-t border-white/25 shadow-[0_5px_0_rgb(76,29,149),0_10px_20px_rgba(124,58,237,0.3)] active:translate-y-[3px] active:shadow-[0_2px_0_rgb(76,29,149)] disabled:opacity-55 disabled:cursor-not-allowed transition-all duration-150"
-            >
-              {isLoading ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-                  <span className="truncate">{t.analyzing}</span>
-                </>
-              ) : (
-                <>
-                  <span className="drop-shadow-xs">{t.analyzeButton}</span>
-                  <ArrowRight className={`w-4 h-4 shrink-0 ${isFa ? 'rotate-180' : ''}`} />
-                </>
-              )}
-            </button>
-          </div>
-        </div>
-
-        {/* Minimal Toolbar Row: Dedicated Batch Queue Trigger (Auto-Paste button removed to keep home screen clean) */}
-        {onStartBatchDownload && (
-          <div className="flex items-center justify-between gap-2 px-1">
-            <button
-              type="button"
-              onClick={() => setIsBatchOpen(!isBatchOpen)}
-              className="flex items-center gap-2 px-3.5 py-2 rounded-2xl text-xs font-black bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-700 dark:text-indigo-300 border border-indigo-500/35 btn-3d-secondary active:translate-y-[2px] transition-all"
-            >
-              <ListPlus className="w-4 h-4 text-indigo-500 shrink-0" />
-              <span>
-                {isFa ? 'دانلود دسته‌جمعی (Batch Queue)' : 'Batch Download Queue'}
-              </span>
-              {(stagedBatchUrls.length > 0 || activeQueueTasks.length > 0) && (
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-indigo-600 text-white">
-                  {isFa
-                    ? toPersianDigits(stagedBatchUrls.length || activeQueueTasks.length)
-                    : stagedBatchUrls.length || activeQueueTasks.length}
-                </span>
-              )}
-            </button>
-
-            {activeQueueTasks.length > 0 && (
-              <div className="text-[11px] font-extrabold text-indigo-600 dark:text-indigo-300 flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping" />
+                {pasteSuccess ? (
+                  <Check className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-500 shrink-0" />
+                ) : (
+                  <Clipboard className="w-4 h-4 sm:w-5 sm:h-5 text-indigo-500 shrink-0" />
+                )}
                 <span>
-                  {isFa
-                    ? `${toPersianDigits(activeQueueTasks.length)} فایل در صف فعال`
-                    : `${activeQueueTasks.length} in active queue`}
+                  {pasteSuccess
+                    ? isFa
+                      ? 'جای‌گذاری شد'
+                      : isAr
+                      ? 'تم اللصق!'
+                      : 'Pasted!'
+                    : t.pasteClipboard}
                 </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleAnalyzeClick()}
+                disabled={isLoading}
+                className="flex-1 sm:flex-initial flex items-center justify-center gap-2 px-6 py-3.5 sm:py-4 rounded-2xl text-sm sm:text-base font-black text-white bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 border-t border-white/25 shadow-[0_5px_0_rgb(76,29,149),0_10px_20px_rgba(124,58,237,0.35)] active:translate-y-[3px] active:shadow-[0_2px_0_rgb(76,29,149)] disabled:opacity-55 disabled:cursor-not-allowed transition-all duration-150 cursor-pointer"
+              >
+                {isLoading ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin shrink-0" />
+                    <span className="truncate">{t.analyzing}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="drop-shadow-xs">{t.analyzeButton}</span>
+                    <ArrowRight className={`w-5 h-5 shrink-0 ${isRtl ? 'rotate-180' : ''}`} />
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Custom File Name & Scheduled Time Row */}
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-2.5 pt-2.5 border-t border-slate-200/80 dark:border-slate-800/80">
+            {setCustomFileName && (
+              <div className="md:col-span-7 flex flex-col sm:flex-row sm:items-center gap-2">
+                <label className="text-xs font-black text-slate-700 dark:text-slate-300 flex items-center gap-1.5 shrink-0">
+                  <FileEdit className="w-4 h-4 text-indigo-500 shrink-0" />
+                  <span>
+                    {isFa
+                      ? 'نام دلخواه فایل (اختیاری):'
+                      : isAr
+                      ? 'اسم الملف المخصص (اختياري):'
+                      : 'Custom File Name (Optional):'}
+                  </span>
+                </label>
+                <div className="relative flex-1">
+                  <input
+                    type="text"
+                    value={customFileName}
+                    onChange={(e) => setCustomFileName(e.target.value)}
+                    placeholder={
+                      isFa
+                        ? 'اگر خالی بماند، نام اصلی ویدیو/موزیک ذخیره می‌شود...'
+                        : isAr
+                        ? 'اتركه فارغاً لحفظ الاسم الأصلي للفيديو أو الموسيقى...'
+                        : 'Leave empty to keep original media title...'
+                    }
+                    className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:border-indigo-500 input-3d"
+                  />
+                  {customFileName && (
+                    <button
+                      type="button"
+                      onClick={() => setCustomFileName('')}
+                      className="absolute left-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-rose-500"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {setScheduledTime && (
+              <div className="md:col-span-5 flex items-center justify-between sm:justify-end gap-2 bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-1.5">
+                <label className="text-xs font-black text-amber-700 dark:text-amber-300 flex items-center gap-1.5 shrink-0">
+                  <Clock className="w-4 h-4 text-amber-500 shrink-0" />
+                  <span>
+                    {isFa
+                      ? 'زمان‌بندی دانلود:'
+                      : isAr
+                      ? 'جدولة التحميل:'
+                      : 'Schedule Time:'}
+                  </span>
+                </label>
+                <div className="flex items-center gap-1">
+                  <input
+                    type="time"
+                    dir="ltr"
+                    value={scheduledTime}
+                    onChange={(e) => setScheduledTime(e.target.value)}
+                    className="px-2 py-1 rounded-lg bg-white dark:bg-slate-900 border border-amber-500/40 text-xs font-mono font-black text-slate-900 dark:text-white focus:outline-none"
+                  />
+                  {scheduledTime && (
+                    <button
+                      type="button"
+                      onClick={() => setScheduledTime('')}
+                      className="p-1 text-rose-500 hover:bg-rose-500/10 rounded-lg"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
               </div>
             )}
           </div>
-        )}
 
-        {/* Expandable Batch Queue Multi-Link Drawer with Ordered Numbered List (۱، ۲، ۳...) & Distinct Statuses */}
-        {isBatchOpen && onStartBatchDownload && (
+          {/* Validation Error or Paste Hint */}
+          {validationError && (
+            <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-300 dark:border-rose-800 text-rose-600 dark:text-rose-300 text-xs font-extrabold flex items-center gap-2 animate-fade-in">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{validationError}</span>
+            </div>
+          )}
+
+          {pasteHintVisible && !validationError && (
+            <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-200 text-xs font-bold flex items-center gap-2 animate-fade-in">
+              <Clipboard className="w-4 h-4 shrink-0 text-amber-500" />
+              <span>
+                {isFa
+                  ? 'انگشت خود را داخل کادر لینک نگه دارید و گزینه Paste (جای‌گذاری) را بزنید.'
+                  : isAr
+                  ? 'اضغط مطولاً داخل مربع الرابط واختر لصق (Paste).'
+                  : 'Long-press inside the URL box and tap Paste.'}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Batch Queue Toggle Bar (Localized without English "(Batch Queue)" in FA/AR) */}
+        <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+          <button
+            type="button"
+            onClick={() => setShowBatchQueue(!showBatchQueue)}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-2xl text-xs font-black bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-300 border border-indigo-500/35 btn-3d-secondary active:translate-y-[2px] transition-all cursor-pointer"
+          >
+            <Layers className="w-4 h-4 text-indigo-500 shrink-0" />
+            <span>
+              {isFa
+                ? 'دانلود دسته‌جمعی'
+                : isAr
+                ? 'التحميل الجماعي المتسلسل'
+                : 'Batch Download Queue'}
+            </span>
+            {(stagedBatchUrls.length > 0 || activeQueueTasks.length > 0) && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-indigo-600 text-white">
+                {toLocalDigits(stagedBatchUrls.length || activeQueueTasks.length, language)}
+              </span>
+            )}
+          </button>
+
+          {activeQueueTasks.length > 0 && (
+            <div className="text-[11px] font-extrabold text-indigo-600 dark:text-indigo-300 flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping" />
+              <span>
+                {isFa
+                  ? `${toLocalDigits(activeQueueTasks.length, 'fa')} فایل در صف فعال`
+                  : isAr
+                  ? `${toLocalDigits(activeQueueTasks.length, 'ar')} ملفات في قائمة الانتظار`
+                  : `${activeQueueTasks.length} in active queue`}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Numbered Batch Download Queue Drawer */}
+        {showBatchQueue && onStartBatchDownload && (
           <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-indigo-500/40 card-3d space-y-3.5 animate-fade-in">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <div className="p-2 rounded-xl bg-indigo-500/15 text-indigo-500">
-                  <Layers className="w-4 h-4" />
+                  <ListOrdered className="w-4 h-4" />
                 </div>
                 <div>
                   <h4 className="text-xs sm:text-sm font-black text-slate-900 dark:text-white">
-                    {isFa ? 'فهرست صف دانلود دسته‌جمعی (Batch Queue)' : 'Numbered Batch Download Queue'}
+                    {isFa
+                      ? 'فهرست صف دانلود دسته‌جمعی'
+                      : isAr
+                      ? 'قائمة التحميل الجماعي المرقمة'
+                      : 'Numbered Batch Download Queue'}
                   </h4>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400">
                     {isFa
                       ? 'لینک‌ها را در خطوط جداگانه وارد کنید؛ فهرست به صورت شماره‌گذاری‌شده (۱، ۲، ۳...) و به نوبت دانلود می‌شود'
+                      : isAr
+                      ? 'أدخل الروابط في أسطر منفصلة لتحميلها بالترتيب تلقائياً'
                       : 'Paste multiple links (one per line) to queue and download sequentially'}
                   </p>
                 </div>
@@ -506,10 +579,14 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
 
               <button
                 type="button"
-                onClick={fillSampleBatchUrls}
-                className="px-2.5 py-1.5 rounded-xl text-[10px] font-black bg-slate-100 dark:bg-slate-800 text-indigo-600 dark:text-indigo-300 hover:bg-slate-200 btn-3d-secondary shrink-0"
+                onClick={handleLoadSampleBatch}
+                className="px-2.5 py-1.5 rounded-xl text-[10px] font-black bg-slate-100 dark:bg-slate-800 text-indigo-600 dark:text-indigo-300 hover:bg-slate-200 btn-3d-secondary shrink-0 cursor-pointer"
               >
-                {isFa ? '+ درج ۳ لینک نمونه' : '+ Load 3 Sample Links'}
+                {isFa
+                  ? '+ درج ۳ لینک نمونه'
+                  : isAr
+                  ? '+ إضافة ٣ روابط تجريبية'
+                  : '+ Load 3 Sample Links'}
               </button>
             </div>
 
@@ -518,60 +595,54 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
               dir="ltr"
               value={batchText}
               onChange={(e) => setBatchText(e.target.value)}
-              placeholder={
-                isFa
-                  ? 'https://www.youtube.com/watch?v=...\nhttps://www.tiktok.com/@user/video/...\nhttps://www.instagram.com/reel/...'
-                  : 'Paste one URL per line...'
-              }
+              placeholder={"https://www.youtube.com/watch?v=...\nhttps://www.tiktok.com/@user/video/...\nhttps://www.instagram.com/reel/..."}
               className="w-full p-3 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 input-3d"
             />
 
-            {/* Ordered Numbered List (۱، ۲، ۳...) of Staged Links & Active Queue Items with Distinct Statuses */}
             {(stagedBatchUrls.length > 0 || tasks.length > 0) && (
               <div className="space-y-2 pt-1">
                 <div className="flex items-center justify-between text-[11px] font-black text-slate-600 dark:text-slate-300 px-1">
                   <span>
                     {isFa
                       ? 'فهرست شماره‌گذاری‌شده صف لینک‌ها (وضعیت لحظه‌ای):'
+                      : isAr
+                      ? 'قائمة الروابط المرقمة (الحالة المباشرة):'
                       : 'Numbered Queue List (Live Status):'}
                   </span>
                   <span className="text-indigo-500">
-                    {isFa
-                      ? `${toPersianDigits(stagedBatchUrls.length + tasks.slice(0, 5).length)} مورد`
+                    {isRtl
+                      ? toLocalDigits(stagedBatchUrls.length + tasks.slice(0, 5).length, language)
                       : `${stagedBatchUrls.length + tasks.slice(0, 5).length} items`}
                   </span>
                 </div>
 
                 <div className="space-y-1.5 max-h-52 overflow-y-auto pr-0.5">
-                  {/* 1. Staged Links Ready to Queue */}
-                  {stagedBatchUrls.map((stagedUrl, idx) => {
-                    const itemNumber = idx + 1;
-                    const plat = detectPlatform(stagedUrl);
+                  {stagedBatchUrls.map((itemUrl, idx) => {
+                    const num = idx + 1;
+                    const plat = detectPlatform(itemUrl);
                     return (
                       <div
-                        key={`staged-${idx}-${stagedUrl}`}
+                        key={`staged-${idx}-${itemUrl}`}
                         className="flex items-center justify-between gap-2 p-2.5 rounded-2xl bg-slate-50 dark:bg-slate-950/80 border border-slate-200/80 dark:border-slate-800 text-xs"
                       >
                         <div className="flex items-center gap-2 min-w-0 flex-1">
                           <span className="w-6 h-6 rounded-xl bg-indigo-600 text-white font-black text-[11px] flex items-center justify-center shrink-0 shadow-xs">
-                            {isFa ? toPersianDigits(itemNumber) : itemNumber}
+                            {toLocalDigits(num, language)}
                           </span>
                           <PlatformIcon platform={plat} size={15} />
                           <span className="font-mono text-[11px] text-slate-700 dark:text-slate-200 truncate" dir="ltr">
-                            {stagedUrl}
+                            {itemUrl}
                           </span>
                         </div>
-
                         <div className="flex items-center gap-1.5 shrink-0">
                           <span className="px-2 py-0.5 rounded-lg text-[10px] font-black bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 flex items-center gap-1">
                             <Clock className="w-3 h-3" />
-                            <span>{isFa ? 'در انتظار' : 'Waiting'}</span>
+                            <span>{isFa ? 'در انتظار' : isAr ? 'في الانتظار' : 'Waiting'}</span>
                           </span>
                           <button
                             type="button"
-                            onClick={() => removeStagedBatchUrl(idx)}
+                            onClick={() => removeStagedUrlAt(idx)}
                             className="p-1 rounded-lg text-slate-400 hover:text-rose-500 hover:bg-slate-200/50 dark:hover:bg-slate-800"
-                            title={isFa ? 'حذف از صف' : 'Remove'}
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -580,9 +651,8 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
                     );
                   })}
 
-                  {/* 2. Existing Queue Tasks (Downloading / Queued / Completed) */}
                   {tasks.slice(0, 5).map((taskItem, idx) => {
-                    const itemNumber = stagedBatchUrls.length + idx + 1;
+                    const num = stagedBatchUrls.length + idx + 1;
                     const isDownloading = taskItem.status === 'downloading';
                     const isQueued = taskItem.status === 'queued';
                     const isCompleted = taskItem.status === 'completed';
@@ -593,8 +663,8 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
                         className="flex items-center justify-between gap-2 p-2.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 text-xs"
                       >
                         <div className="flex items-center gap-2 min-w-0 flex-1">
-                          <span className="w-6 h-6 rounded-xl bg-slate-800 dark:bg-slate-800 text-indigo-400 font-black text-[11px] flex items-center justify-center shrink-0 border border-indigo-500/30">
-                            {isFa ? toPersianDigits(itemNumber) : itemNumber}
+                          <span className="w-6 h-6 rounded-xl bg-slate-800 text-indigo-400 font-black text-[11px] flex items-center justify-center shrink-0 border border-indigo-500/30">
+                            {toLocalDigits(num, language)}
                           </span>
                           <PlatformIcon platform={taskItem.platform} size={15} />
                           <span className="font-bold text-xs text-slate-800 dark:text-slate-100 truncate">
@@ -608,19 +678,33 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
                               <Loader2 className="w-3 h-3 animate-spin" />
                               <span>
                                 {isFa
-                                  ? `در حال دانلود (${toPersianDigits(taskItem.progressPercent)}٪)`
+                                  ? `در حال دانلود (${toLocalDigits(taskItem.progressPercent, 'fa')}٪)`
+                                  : isAr
+                                  ? `جاري التحميل (${toLocalDigits(taskItem.progressPercent, 'ar')}٪)`
                                   : `Downloading (${taskItem.progressPercent}%)`}
                               </span>
                             </span>
                           ) : isQueued ? (
                             <span className="px-2.5 py-0.5 rounded-lg text-[10px] font-black bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 flex items-center gap-1">
                               <Clock className="w-3 h-3" />
-                              <span>{isFa ? 'در انتظار نوبت' : 'Queued'}</span>
+                              <span>
+                                {taskItem.scheduledTime
+                                  ? isFa
+                                    ? `⏰ ساعت ${taskItem.scheduledTime}`
+                                  : isAr
+                                    ? `⏰ الساعة ${taskItem.scheduledTime}`
+                                    : `⏰ At ${taskItem.scheduledTime}`
+                                  : isFa
+                                  ? 'در انتظار نوبت'
+                                  : isAr
+                                  ? 'في الدور'
+                                  : 'Queued'}
+                              </span>
                             </span>
                           ) : isCompleted ? (
                             <span className="px-2.5 py-0.5 rounded-lg text-[10px] font-black bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
                               <CheckCircle2 className="w-3 h-3" />
-                              <span>{isFa ? 'تکمیل شده' : 'Completed'}</span>
+                              <span>{isFa ? 'تکمیل شده' : isAr ? 'مكتمل' : 'Completed'}</span>
                             </span>
                           ) : (
                             <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-slate-200 dark:bg-slate-800 text-slate-500">
@@ -638,19 +722,23 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
             <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
               <div className="flex items-center gap-1.5">
                 <span className="text-[11px] font-bold text-slate-500">
-                  {isFa ? 'کیفیت پیش‌فرض صف:' : 'Queue Quality:'}
+                  {isFa
+                    ? 'کیفیت پیش‌فرض صف:'
+                    : isAr
+                    ? 'جودة التحميل:'
+                    : 'Queue Quality:'}
                 </span>
                 {[
-                  { id: '1080p', label: '1080p Full HD' },
-                  { id: '720p', label: '720p HD' },
-                  { id: 'mp3', label: 'MP3 320kbps' }
+                  { id: '1080p' as const, label: '1080p Full HD' },
+                  { id: '720p' as const, label: '720p HD' },
+                  { id: 'mp3' as const, label: 'MP3 320kbps' }
                 ].map((q) => (
                   <button
                     key={q.id}
                     type="button"
-                    onClick={() => setBatchPreset(q.id as any)}
-                    className={`px-2.5 py-1 rounded-lg text-[10px] font-black transition-all ${
-                      batchPreset === q.id
+                    onClick={() => setBatchQuality(q.id)}
+                    className={`px-2.5 py-1 rounded-lg text-[10px] font-black transition-all cursor-pointer ${
+                      batchQuality === q.id
                         ? 'bg-indigo-600 text-white'
                         : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
                     }`}
@@ -662,14 +750,16 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
 
               <button
                 type="button"
-                onClick={handleBatchSubmit}
+                onClick={handleStartBatch}
                 disabled={stagedBatchUrls.length === 0}
-                className="px-4 py-2 rounded-xl text-xs font-black text-white bg-gradient-to-r from-indigo-600 to-violet-600 btn-3d-primary disabled:opacity-50 flex items-center gap-1.5"
+                className="px-4 py-2 rounded-xl text-xs font-black text-white bg-gradient-to-r from-indigo-600 to-violet-600 btn-3d-primary disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
                 <span>
                   {isFa
-                    ? `شروع دانلود نوبتی (${toPersianDigits(stagedBatchUrls.length)} لینک)`
+                    ? `شروع دانلود نوبتی (${toLocalDigits(stagedBatchUrls.length, 'fa')} لینک)`
+                    : isAr
+                    ? `بدء التحميل المتسلسل (${toLocalDigits(stagedBatchUrls.length, 'ar')})`
                     : `Start Batch Queue (${stagedBatchUrls.length})`}
                 </span>
               </button>

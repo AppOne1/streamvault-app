@@ -7,6 +7,7 @@ export type PlatformId =
   | 'vimeo' 
   | 'soundcloud' 
   | 'pinterest' 
+  | 'aparat'
   | 'generic';
 
 export type MediaType = 'video' | 'audio';
@@ -28,6 +29,7 @@ export interface FormatOption {
   isHdr?: boolean;
   estimatedSizeBytes: number;
   estimatedSizeFormatted: string;
+  directUrl?: string;   // Direct resolved stream URL when extracted per-format
 }
 
 export interface ParsedMediaInfo {
@@ -43,10 +45,18 @@ export interface ParsedMediaInfo {
   viewsCount?: string;
   thumbnail: string;
   formats: FormatOption[];
+  directVideoUrl?: string;
+  directAudioUrl?: string;
   timestamp: number;
 }
 
 export type TaskStatus = 'queued' | 'downloading' | 'paused' | 'completed' | 'cancelled' | 'error';
+
+export interface CustomMediaFolder {
+  id: string;
+  name: string;
+  createdAt: number;
+}
 
 export interface DownloadTask {
   id: string;
@@ -75,10 +85,14 @@ export interface DownloadTask {
   fileName: string;
   createdAt: number;
   completedAt?: number;
+  scheduledTime?: string; // e.g. "14:30" for Scheduled Download
   isStarred?: boolean;
   isVaulted?: boolean;
+  folderId?: string;
   errorMessage?: string;
 }
+
+export type UserCountryCode = 'IR' | 'IQ' | 'AE' | 'SA' | 'GCC' | 'INT';
 
 export interface UserSession {
   isLoggedIn: boolean;
@@ -86,6 +100,9 @@ export interface UserSession {
     id: string;
     name: string;
     email: string;
+    phone?: string;
+    country?: UserCountryCode;
+    passwordHash?: string;
     avatarUrl?: string;
     plan: 'Free' | 'VIP Pro';
     quotaUsedMb: number;
@@ -93,7 +110,7 @@ export interface UserSession {
   };
 }
 
-export type Language = 'fa' | 'en';
+export type Language = 'fa' | 'en' | 'ar';
 export type ThemeMode = 'dark' | 'light';
 
 export interface AppSettings {
@@ -105,4 +122,3 @@ export interface AppSettings {
   downloadPathHint: string;
   chunkConcurrency: number;
 }
-

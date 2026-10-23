@@ -3,21 +3,21 @@ import {
   AppSettings,
   DownloadTask,
   FormatOption,
-  Language,
   ParsedMediaInfo,
-  ThemeMode,
   UserSession
 } from './types';
 import { getTranslation } from './i18n/translations';
-import { detectPlatform, extractUrlFromText, parseMediaUrl } from './services/platformDetector';
+import { extractUrlFromText, isValidHttpUrl, parseMediaUrl } from './services/platformDetector';
 import { downloadEngine } from './services/downloadEngine';
 import {
   clearAllIDBBlobs,
   deleteMediaBlobFromIDB,
   DEFAULT_SETTINGS,
   loadSettingsFromStorage,
+  loadSessionFromIDB,
   loadSessionFromStorage,
   loadTasksFromStorage,
+  resetUserSessionAndClearAllData,
   saveSettingsToStorage,
   saveSessionToStorage,
   saveTasksToStorage
@@ -35,18 +35,27 @@ import { AuthModal } from './components/AuthModal';
 import { ProUpgradeModal } from './components/ProUpgradeModal';
 import { IOSInstallGuide } from './components/IOSInstallGuide';
 import { OfflineBanner } from './components/OfflineBanner';
-import { ShareAppModal } from './components/ShareAppModal';
 import { TrendingShowcase } from './components/TrendingShowcase';
 import { PermissionsDisclosureModal, PERMISSIONS_DISCLOSURE_STORAGE_KEY } from './components/PermissionsDisclosureModal';
+import { CoinRewardAnimation } from './components/CoinRewardAnimation';
+import { ODLogo } from './components/ODLogo';
+import { shareAppToFriends } from './services/deviceService';
 import {
   canDownload,
+  claimRewardAction,
   consumeDownloadQuota,
+  DEFAULT_LOCK_PASSWORD,
   getCoinsBalance,
   getDailyQuota,
+  getMyReferralCode,
+  isAppLockEnabled,
+  MASTER_KEYWORD,
   QuotaInfo,
-  subscribeQuotaAndCoins
+  resetUserAccountAndQuotaToGuest,
+  subscribeQuotaAndCoins,
+  verifyAppLockPinOrKeyword
 } from './services/quotaService';
-import { Download, Film, HardDrive, Settings, Sparkles, AlertCircle, Loader2, CheckCircle, Crown, Coins } from 'lucide-react';
+import { Download, Film, Settings, Sparkles, AlertCircle, Loader2, CheckCircle, Crown, Lock, KeyRound } from 'lucide-react';
 
 interface ToastNotice {
   type: 'success' | 'error' | 'info';
@@ -60,15 +69,23 @@ export default function App() {
   const [tasks, setTasks] = useState<DownloadTask[]>(() => loadTasksFromStorage());
   const [quotaInfo, setQuotaInfo] = useState<QuotaInfo>(() => getDailyQuota());
   const [coinsBalance, setCoinsBalance] = useState<number>(() => getCoinsBalance());
-  
+
+  // App Security Lock State (Default PIN: 12345678 | Master Keyword: onedownload)
+  const [isAppLocked, setIsAppLocked] = useState<boolean>(() => isAppLockEnabled());
+  const [lockInput, setLockInput] = useState<string>('');
+  const [lockError, setLockError] = useState<string | null>(null);
+
   const [activeTab, setActiveTab] = useState<'downloader' | 'downloads' | 'library' | 'settings'>('downloader');
   const [inputUrl, setInputUrl] = useState<string>('');
+  const [customFileName, setCustomFileName] = useState<string>('');
+  const [scheduledTime, setScheduledTime] = useState<string>('');
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [parsedMedia, setParsedMedia] = useState<ParsedMediaInfo | null>(null);
   const [activePlayerTask, setActivePlayerTask] = useState<DownloadTask | null>(null);
-  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
+  // Persistent Login: Skip Auth screen on startup if user is already logged in (od_user_session)
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(() => !loadSessionFromStorage().isLoggedIn);
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState<boolean>(false);
-  const [isShareModalOpen, setIsShareModalOpen] = useState<boolean>(false);
+  // First-Launch Privacy & Permission Notice Modal: Shown automatically on first launch until accepted
   const [isPermissionsModalOpen, setIsPermissionsModalOpen] = useState<boolean>(() => {
     try {
       return localStorage.getItem(PERMISSIONS_DISCLOSURE_STORAGE_KEY) !== 'true';
@@ -88,8 +105,23 @@ export default function App() {
   } = usePWAInstall();
 
   const t = getTranslation(settings.language);
+  const isFa = settings.language === 'fa';
+  const isAr = settings.language === 'ar';
+  const isRtl = isFa || isAr;
 
-  // Sync theme class & direction
+  // Restore session from IndexedDB on mount if localStorage was cleared
+  useEffect(() => {
+    if (!userSession.isLoggedIn) {
+      loadSessionFromIDB().then((idbSession) => {
+        if (idbSession && idbSession.isLoggedIn) {
+          setUserSession(idbSession);
+          setIsAuthModalOpen(false);
+        }
+      });
+    }
+  }, []);
+
+  // Sync theme class & direction (RTL for both Persian & Arabic)
   useEffect(() => {
     const root = document.documentElement;
     if (settings.theme === 'dark') {
@@ -98,9 +130,9 @@ export default function App() {
       root.classList.remove('dark');
     }
 
-    root.setAttribute('dir', settings.language === 'fa' ? 'rtl' : 'ltr');
+    root.setAttribute('dir', isRtl ? 'rtl' : 'ltr');
     root.setAttribute('lang', settings.language);
-  }, [settings.theme, settings.language]);
+  }, [settings.theme, settings.language, isRtl]);
 
   // Save settings and session changes
   useEffect(() => {
@@ -137,12 +169,49 @@ export default function App() {
         return copy;
       });
 
+      // Smart Notifications: Notify on download completion
+      if (updatedTask.status === 'completed') {
+        const smartNotifyEnabled = localStorage.getItem('onedownload_smart_notifications_v1') !== 'false';
+        if (smartNotifyEnabled) {
+          setToastNotice({
+            type: 'success',
+            title: isFa
+              ? '🔔 دانلود با موفقیت تکمیل شد!'
+              : isAr
+              ? '🔔 اكتمل التحميل بنجاح!'
+              : '🔔 Download Completed!',
+            message: updatedTask.fileName
+          });
+          setTimeout(() => setToastNotice(null), 4500);
+          try {
+            if ('Notification' in window && Notification.permission === 'granted') {
+              new Notification(
+                isFa ? 'وان دانلود (OneDownload)' : 'OneDownload',
+                {
+                  body: isFa
+                    ? `فایل «${updatedTask.fileName}» با موفقیت دانلود شد.`
+                    : isAr
+                    ? `تم تحميل الملف "${updatedTask.fileName}" بنجاح.`
+                    : `"${updatedTask.fileName}" finished downloading.`
+                }
+              );
+            }
+          } catch {
+            // Ignore browser Notification API errors
+          }
+        }
+      }
+
       // Auto-save finished task directly to device storage
       if (updatedTask.status === 'completed' && settings.autoSaveToDevice) {
         downloadEngine.saveFileToDisk(updatedTask);
         setToastNotice({
           type: 'success',
-          title: settings.language === 'fa' ? 'فایل در حافظه دستگاه ذخیره شد' : 'File saved to device',
+          title: isFa
+            ? 'فایل در حافظه دستگاه ذخیره شد'
+            : isAr
+            ? 'تم حفظ الملف في ذاكرة الجهاز'
+            : 'File saved to device',
           message: updatedTask.fileName
         });
         setTimeout(() => setToastNotice(null), 4500);
@@ -155,7 +224,7 @@ export default function App() {
     });
 
     return () => unsubscribe();
-  }, [settings.autoPlayAfterDownload, settings.autoSaveToDevice]);
+  }, [settings.autoPlayAfterDownload, settings.autoSaveToDevice, isFa, isAr]);
 
   // Web Share Target API: Catch URL shared from external apps (e.g. YouTube, TikTok, Instagram)
   useEffect(() => {
@@ -165,7 +234,7 @@ export default function App() {
 
       if (sharedUrl) {
         const extracted = extractUrlFromText(sharedUrl);
-        if (extracted) {
+        if (extracted && isValidHttpUrl(extracted)) {
           setInputUrl(extracted);
           setSharedLinkNotice(true);
           handleAnalyze(extracted);
@@ -176,6 +245,33 @@ export default function App() {
       console.warn('Share target parsing error:', err);
     }
   }, []);
+
+  // Helper to check if a scheduled HH:MM time is due
+  const isScheduledTimeDue = (hhmm?: string): boolean => {
+    if (!hhmm) return true;
+    const now = new Date();
+    const currentHm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    return currentHm === hhmm;
+  };
+
+  // Automatic Sequential Queue Scheduler + Scheduled Download Timer
+  useEffect(() => {
+    const checkQueueAndSchedule = () => {
+      const currentlyDownloading = tasks.filter((t) => t.status === 'downloading');
+      if (currentlyDownloading.length === 0) {
+        const nextReadyQueued = [...tasks]
+          .reverse()
+          .find((t) => t.status === 'queued' && (!t.scheduledTime || isScheduledTimeDue(t.scheduledTime)));
+        if (nextReadyQueued) {
+          downloadEngine.startTask(nextReadyQueued);
+        }
+      }
+    };
+
+    checkQueueAndSchedule();
+    const timer = window.setInterval(checkQueueAndSchedule, 5000);
+    return () => window.clearInterval(timer);
+  }, [tasks]);
 
   // Handlers
   const handleToggleTheme = () => {
@@ -188,17 +284,44 @@ export default function App() {
   const handleToggleLanguage = () => {
     setSettings((prev) => ({
       ...prev,
-      language: prev.language === 'fa' ? 'en' : 'fa'
+      language: prev.language === 'fa' ? 'ar' : prev.language === 'ar' ? 'en' : 'fa'
     }));
   };
 
-  const handleAnalyze = async (targetUrl?: string) => {
-    const urlToParse = targetUrl || inputUrl;
-    if (!urlToParse.trim()) return;
+  const handleDirectShareApp = async () => {
+    const code = getMyReferralCode();
+    const ok = await shareAppToFriends(code, settings.language);
+    if (ok) {
+      claimRewardAction('share_app');
+    }
+  };
 
+  /**
+   * Strict URL Validation: Rejects plain text, symbols, or non-URL input
+   * and shows a clear warning without opening MediaResultModal.
+   */
+  const handleAnalyze = async (targetUrl?: string) => {
+    const rawCandidate = (targetUrl ?? inputUrl).trim();
+    if (!rawCandidate || !isValidHttpUrl(rawCandidate)) {
+      setToastNotice({
+        type: 'error',
+        title: t.invalidUrlError,
+        message: isFa
+          ? 'لینک باید با https:// یا http:// شروع شود'
+          : isAr
+          ? 'يجب أن يبدأ الرابط بـ https:// أو http://'
+          : 'URL must start with https:// or http://'
+      });
+      setTimeout(() => setToastNotice(null), 3500);
+      return;
+    }
+
+    const cleanUrl = extractUrlFromText(rawCandidate) || rawCandidate;
+    // Automatically clear the URL input box immediately so it is ready for the next link
+    setInputUrl('');
     setIsAnalyzing(true);
     try {
-      const media = await parseMediaUrl(urlToParse);
+      const media = await parseMediaUrl(cleanUrl);
       setParsedMedia(media);
     } catch (err) {
       console.error('Failed to parse media URL:', err);
@@ -207,45 +330,101 @@ export default function App() {
     }
   };
 
-  // Automatic Sequential Queue Scheduler: starts next 'queued' task when active downloads < 2
-  useEffect(() => {
-    const currentlyDownloading = tasks.filter((t) => t.status === 'downloading');
-    if (currentlyDownloading.length === 0) {
-      const nextQueued = [...tasks].reverse().find((t) => t.status === 'queued');
-      if (nextQueued) {
-        downloadEngine.startTask(nextQueued);
-      }
-    }
-  }, [tasks]);
-
-  const handleStartDownload = (media: ParsedMediaInfo, format: FormatOption) => {
-    // 1. Enforce daily quota for guest / free tier
-    if (!canDownload()) {
-      setIsUpgradeModalOpen(true);
+  const handleStartDownload = (
+    media: ParsedMediaInfo,
+    format: FormatOption,
+    modalScheduledTime?: string
+  ) => {
+    // 0. Enforce mandatory simple registration (email + password) for download access
+    if (!userSession.isLoggedIn) {
+      setIsAuthModalOpen(true);
       setToastNotice({
-        type: 'error',
-        title: settings.language === 'fa' ? 'سهمیه دانلود رایگان امروز به پایان رسید!' : 'Daily Free Quota Reached!',
-        message:
-          settings.language === 'fa'
-            ? 'با استفاده از سکه‌های رایگان یا ارتقا به VIP Pro بدون محدودیت دانلود کنید'
-            : 'Redeem free coins or upgrade to VIP Pro for unlimited downloads'
+        type: 'info',
+        title: isFa
+          ? 'ثبت‌نام ساده برای دانلود الزامی است'
+          : isAr
+          ? 'التسجيل السريع مطلوب للتحميل'
+          : 'Registration Required to Download',
+        message: isFa
+          ? 'لطفاً با ایمیل و رمز عبور خود ثبت‌نام کنید یا وارد شوید'
+          : isAr
+          ? 'يرجى التسجيل أو تسجيل الدخول بالبريد الإلكتروني وكلمة المرور'
+          : 'Please register or sign in with your email and password'
       });
       setTimeout(() => setToastNotice(null), 5000);
       return;
     }
 
-    // 2. Consume 1 quota count
-    consumeDownloadQuota();
-    setQuotaInfo(getDailyQuota());
+    // 1. Enforce daily quota (3 free downloads/day; extra download costs 5 coins)
+    if (!canDownload() && getCoinsBalance() < 5) {
+      setIsUpgradeModalOpen(true);
+      setToastNotice({
+        type: 'error',
+        title: isFa
+          ? 'سهمیه ۳ دانلود رایگان روزانه به پایان رسید!'
+          : isAr
+          ? 'انتهت الحصة اليومية المجانية (٣ تحميلات)!'
+          : '3 Daily Free Downloads Used!',
+        message: isFa
+          ? 'هر دانلود اضافه نیازمند ۵ سکه است؛ سکه دریافت کنید یا اشتراک VIP فعال نمایید'
+          : isAr
+          ? 'كل تحميل إضافي يتطلب ٥ عملات، أو قم بتفعيل اشتراك VIP'
+          : 'Each extra download requires 5 coins, or upgrade to VIP Pro'
+      });
+      setTimeout(() => setToastNotice(null), 5000);
+      return;
+    }
 
-    const newTask = downloadEngine.createTask(media, format);
+    // 2. Consume 1 quota count (or auto-deduct 5 coins if 3 free downloads are used)
+    const { quota, autoDeductedCoins } = consumeDownloadQuota();
+    setQuotaInfo(quota);
+    setCoinsBalance(getCoinsBalance());
+
+    if (autoDeductedCoins > 0) {
+      setToastNotice({
+        type: 'info',
+        title: isFa
+          ? '۵ سکه بابت دانلود اضافه کسر شد'
+          : isAr
+          ? 'تم خصم ٥ عملات للتحميل الإضافي'
+          : '5 Coins deducted for extra download',
+        message: isFa
+          ? `موجودی فعلی سکه: ${getCoinsBalance()} سکه`
+          : isAr
+          ? `الرصيد المتبقي: ${getCoinsBalance()} عملة`
+          : `Remaining balance: ${getCoinsBalance()} Coins`
+      });
+      setTimeout(() => setToastNotice(null), 4000);
+    }
+
+    const finalMedia: ParsedMediaInfo = customFileName.trim()
+      ? { ...media, title: customFileName.trim() }
+      : media;
+
+    const finalSchedule = modalScheduledTime || scheduledTime || undefined;
+    const newTask = downloadEngine.createTask(finalMedia, format, finalSchedule);
+    setInputUrl('');
+    setCustomFileName('');
+    setScheduledTime('');
+
     const hasActiveDownload = tasks.some((t) => t.status === 'downloading');
     setTasks((prev) => [newTask, ...prev]);
 
-    // Start immediately if no active download, otherwise keep 'queued' for sequential scheduler
-    if (!hasActiveDownload) {
+    if (finalSchedule && !isScheduledTimeDue(finalSchedule)) {
+      setToastNotice({
+        type: 'info',
+        title: isFa
+          ? `⏰ دانلود برای ساعت ${finalSchedule} زمان‌بندی شد`
+          : isAr
+          ? `⏰ تمت جدولة التحميل للساعة ${finalSchedule}`
+          : `⏰ Download scheduled for ${finalSchedule}`,
+        message: newTask.fileName
+      });
+      setTimeout(() => setToastNotice(null), 4500);
+    } else if (!hasActiveDownload) {
       downloadEngine.startTask(newTask);
     }
+
     setActiveTab('downloads');
   };
 
@@ -253,34 +432,61 @@ export default function App() {
     urls: string[],
     qualityPreset: '1080p' | '720p' | 'mp3'
   ) => {
-    if (!canDownload()) {
-      setIsUpgradeModalOpen(true);
+    if (!userSession.isLoggedIn) {
+      setIsAuthModalOpen(true);
       setToastNotice({
-        type: 'error',
-        title: settings.language === 'fa' ? 'سهمیه دانلود رایگان امروز تکمیل شده است!' : 'Daily Free Quota Reached!',
-        message:
-          settings.language === 'fa'
-            ? 'برای استفاده از دانلود دسته‌جمعی، با سکه یا اشتراک به VIP Pro ارتقا دهید'
-            : 'Redeem coins or upgrade to VIP Pro for batch downloading'
+        type: 'info',
+        title: isFa
+          ? 'ثبت‌نام ساده برای دانلود الزامی است'
+          : isAr
+          ? 'التسجيل السريع مطلوب للتحميل'
+          : 'Registration Required to Download',
+        message: isFa
+          ? 'لطفاً با ایمیل و رمز عبور خود ثبت‌نام کنید یا وارد شوید'
+          : isAr
+          ? 'يرجى التسجيل أو تسجيل الدخول بالبريد الإلكتروني وكلمة المرور'
+          : 'Please register or sign in with your email and password'
       });
       setTimeout(() => setToastNotice(null), 5000);
       return;
     }
 
-    consumeDownloadQuota();
-    setQuotaInfo(getDailyQuota());
+    if (!canDownload() && getCoinsBalance() < 5) {
+      setIsUpgradeModalOpen(true);
+      setToastNotice({
+        type: 'error',
+        title: isFa
+          ? 'سهمیه ۳ دانلود رایگان روزانه تکمیل شده است!'
+          : isAr
+          ? 'انتهت الحصة اليومية المجانية!'
+          : '3 Daily Free Downloads Reached!',
+        message: isFa
+          ? 'هر دانلود اضافه ۵ سکه کسر می‌کند؛ سکه دریافت کنید یا اشتراک VIP فعال نمایید'
+          : isAr
+          ? 'كل تحميل إضافي يخصم ٥ عملات أو قم بالترقية إلى VIP'
+          : 'Extra download costs 5 coins or upgrade to VIP Pro'
+      });
+      setTimeout(() => setToastNotice(null), 5000);
+      return;
+    }
+
+    const { quota } = consumeDownloadQuota();
+    setQuotaInfo(quota);
+    setCoinsBalance(getCoinsBalance());
 
     setToastNotice({
       type: 'info',
-      title:
-        settings.language === 'fa'
-          ? `در حال افزودن ${urls.length} لینک به صف دانلود نوبتی...`
-          : `Adding ${urls.length} links to batch queue...`,
+      title: isFa
+        ? `در حال افزودن ${urls.length} لینک به صف دانلود نوبتی...`
+        : isAr
+        ? `جاري إضافة ${urls.length} روابط إلى قائمة التحميل...`
+        : `Adding ${urls.length} links to batch queue...`,
       message: qualityPreset.toUpperCase()
     });
 
     const createdTasks: DownloadTask[] = [];
     for (const rawUrl of urls) {
+      if (!isValidHttpUrl(rawUrl)) continue;
       try {
         const media = await parseMediaUrl(rawUrl);
         let chosenFormat =
@@ -304,14 +510,16 @@ export default function App() {
       setActiveTab('downloads');
       setToastNotice({
         type: 'success',
-        title:
-          settings.language === 'fa'
-            ? `${createdTasks.length} فایل به صف دانلود نوبتی اضافه شد!`
-            : `${createdTasks.length} files added to sequential queue!`,
-        message:
-          settings.language === 'fa'
-            ? 'دانلودها به نوبت و خودکار انجام می‌شوند'
-            : 'Downloads will run automatically in sequence'
+        title: isFa
+          ? `${createdTasks.length} فایل به صف دانلود نوبتی اضافه شد!`
+          : isAr
+          ? `تمت إضافة ${createdTasks.length} ملفات إلى قائمة الانتظار!`
+          : `${createdTasks.length} files added to sequential queue!`,
+        message: isFa
+          ? 'دانلودها به نوبت و خودکار انجام می‌شوند'
+          : isAr
+          ? 'سيتم التحميل بالتتابع تلقائياً'
+          : 'Downloads will run automatically in sequence'
       });
       setTimeout(() => setToastNotice(null), 4000);
     }
@@ -352,27 +560,31 @@ export default function App() {
   const handleSaveToDisk = async (task: DownloadTask) => {
     setToastNotice({
       type: 'info',
-      title: settings.language === 'fa' ? 'در حال آماده‌سازی فایل...' : 'Preparing file...',
+      title: isFa ? 'در حال آماده‌سازی فایل...' : isAr ? 'جاري تجهيز الملف...' : 'Preparing file...',
       message: task.fileName
     });
     const success = await downloadEngine.saveFileToDisk(task, (msg) => {
       setToastNotice({
         type: 'info',
-        title: settings.language === 'fa' ? 'در حال انتقال به حافظه...' : 'Saving to storage...',
+        title: isFa ? 'در حال انتقال به حافظه...' : isAr ? 'جاري الحفظ في الجهاز...' : 'Saving to storage...',
         message: msg
       });
     });
     if (success) {
       setToastNotice({
         type: 'success',
-        title: settings.language === 'fa' ? 'فایل با موفقیت ذخیره شد!' : 'File successfully saved!',
+        title: isFa ? 'فایل با موفقیت ذخیره شد!' : isAr ? 'تم حفظ الملف بنجاح!' : 'File successfully saved!',
         message: task.fileName
       });
     } else {
       setToastNotice({
         type: 'error',
-        title: settings.language === 'fa' ? 'خطا در ذخیره‌سازی فایل' : 'Failed to save file',
-        message: settings.language === 'fa' ? 'لطفاً وضعیت اتصال را بررسی کرده و مجدد امتحان کنید' : 'Please check connection and retry'
+        title: isFa ? 'خطا در ذخیره‌سازی فایل' : isAr ? 'خطأ في حفظ الملف' : 'Failed to save file',
+        message: isFa
+          ? 'لطفاً وضعیت اتصال را بررسی کرده و مجدد امتحان کنید'
+          : isAr
+          ? 'يرجى التحقق من الاتصال والمحاولة مرة أخرى'
+          : 'Please check connection and retry'
       });
     }
     setTimeout(() => setToastNotice(null), 4500);
@@ -418,10 +630,101 @@ export default function App() {
     setSettings(DEFAULT_SETTINGS);
   };
 
+  /**
+   * Complete Logout & State Reset:
+   * Cancels active downloads, clears session, tasks, IndexedDB blobs, and resets coins to 0.
+   */
+  const handleCompleteLogout = async (keepModalOpen = true) => {
+    tasks.forEach((t) => downloadEngine.cancelTask(t));
+    setTasks([]);
+    setParsedMedia(null);
+    setActivePlayerTask(null);
+    setInputUrl('');
+    setCustomFileName('');
+    setScheduledTime('');
+    resetUserAccountAndQuotaToGuest();
+    setCoinsBalance(0);
+    setQuotaInfo(getDailyQuota());
+    setActiveTab('downloader');
+    setIsAuthModalOpen(keepModalOpen);
+    const freshGuest = await resetUserSessionAndClearAllData(settings.language);
+    setUserSession(freshGuest);
+  };
+
+  const handleUnlockAppSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setLockError(null);
+    if (verifyAppLockPinOrKeyword(lockInput)) {
+      setIsAppLocked(false);
+      setLockInput('');
+    } else {
+      setLockError(
+        isFa
+          ? `رمز واردشده نادرست است! (رمز پیش‌فرض: ${DEFAULT_LOCK_PASSWORD} یا کیورد: ${MASTER_KEYWORD})`
+          : isAr
+          ? `الرمز غير صحيح! (الرمز الافتراضي: ${DEFAULT_LOCK_PASSWORD} أو الكلمة المفتاحية: ${MASTER_KEYWORD})`
+          : `Incorrect PIN! (Default: ${DEFAULT_LOCK_PASSWORD} or Keyword: ${MASTER_KEYWORD})`
+      );
+    }
+  };
+
   const activeDownloadsCount = tasks.filter(
     (t) => t.status === 'downloading' || t.status === 'queued'
   ).length;
   const completedLibraryCount = tasks.filter((t) => t.status === 'completed').length;
+
+  // Startup App Security Lock Screen (when enabled in Settings)
+  if (isAppLocked) {
+    return (
+      <div className="min-h-screen w-full flex items-center justify-center p-4 bg-slate-950 text-white">
+        <div className="w-full max-w-md rounded-3xl bg-slate-900 border border-indigo-500/40 p-6 card-3d text-center space-y-4">
+          <div className="flex justify-center">
+            <ODLogo className="w-16 h-16" />
+          </div>
+          <div>
+            <h1 className="text-xl font-black text-white">
+              {t.appTitle}
+            </h1>
+            <p className="text-xs text-amber-400 font-bold mt-1 flex items-center justify-center gap-1.5">
+              <Lock className="w-3.5 h-3.5" />
+              <span>{t.appLockTitle}</span>
+            </p>
+            <p className="text-xs text-slate-400 mt-1">
+              {t.appLockEnterPin}
+            </p>
+          </div>
+
+          {lockError && (
+            <div className="p-2.5 rounded-xl bg-rose-950/70 border border-rose-700 text-rose-200 text-xs font-bold">
+              {lockError}
+            </div>
+          )}
+
+          <form onSubmit={handleUnlockAppSubmit} className="space-y-3">
+            <div className="relative">
+              <KeyRound className="w-4 h-4 text-amber-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="password"
+                dir="ltr"
+                autoFocus
+                value={lockInput}
+                onChange={(e) => setLockInput(e.target.value)}
+                placeholder={`${DEFAULT_LOCK_PASSWORD} / ${MASTER_KEYWORD}`}
+                className="w-full pl-10 pr-4 py-3 rounded-2xl bg-slate-950 border border-slate-700 text-center text-sm font-mono font-black tracking-widest text-white focus:outline-none focus:border-amber-400 input-3d"
+              />
+            </div>
+
+            <button
+              type="submit"
+              className="w-full py-3 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-black text-sm btn-3d-amber"
+            >
+              {t.appLockUnlockBtn}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen w-full max-w-[100vw] overflow-x-hidden flex flex-col bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors">
@@ -440,10 +743,10 @@ export default function App() {
         onOpenInstallGuide={() => setShowIOSModal(true)}
         onOpenAuth={() => setIsAuthModalOpen(true)}
         onOpenUpgrade={() => setIsUpgradeModalOpen(true)}
-        onOpenShare={() => setIsShareModalOpen(true)}
+        onOpenShare={handleDirectShareApp}
       />
 
-      {/* Main Content Area (Proper top & bottom padding so headers never hide under sticky header or 3D bottom dock) */}
+      {/* Main Content Area */}
       <main className="flex-1 w-full max-w-[100vw] overflow-x-hidden pt-2 sm:pt-4 pb-28 sm:pb-12">
         {/* Navigation Tabs (Desktop & Tablet view only - hidden on mobile) */}
         <div className="hidden sm:block max-w-4xl mx-auto px-4 pt-4 sm:pt-6">
@@ -511,26 +814,38 @@ export default function App() {
               <button
                 onClick={() => setIsUpgradeModalOpen(true)}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black bg-amber-400 hover:bg-amber-300 text-slate-950 shadow-xs active:scale-95 transition-all"
-                title="مشاهده سهمیه روزانه و ارتقا"
+                title={isFa ? 'مشاهده سهمیه روزانه و ارتقا' : 'Daily Quota & VIP'}
               >
                 <Crown className="w-3.5 h-3.5 fill-current" />
                 <span>
                   {quotaInfo.isPro
-                    ? (settings.language === 'fa' ? 'VIP Pro نامحدود' : 'VIP Unlimited')
-                    : (settings.language === 'fa' ? `${quotaInfo.remainingToday} از ${quotaInfo.maxDaily} دانلود` : `${quotaInfo.remainingToday}/${quotaInfo.maxDaily} downloads`)}
+                    ? isFa
+                      ? 'VIP Pro نامحدود'
+                      : isAr
+                      ? 'VIP غير محدود'
+                      : 'VIP Unlimited'
+                    : isFa
+                    ? `${quotaInfo.remainingToday} از ${quotaInfo.maxDaily} دانلود`
+                    : isAr
+                    ? `${quotaInfo.remainingToday} من ${quotaInfo.maxDaily} تحميلات`
+                    : `${quotaInfo.remainingToday}/${quotaInfo.maxDaily} downloads`}
                 </span>
               </button>
             </div>
           </div>
         </div>
 
-        {/* Tab 1: URL Downloader + Trending Clips & Music Showcase */}
+        {/* Tab 1: URL Downloader + Coin Rewards & Latest 2 Files */}
         {activeTab === 'downloader' && (
           <div className="animate-fade-in">
             <UrlInputSection
               language={settings.language}
               url={inputUrl}
               setUrl={setInputUrl}
+              customFileName={customFileName}
+              setCustomFileName={setCustomFileName}
+              scheduledTime={scheduledTime}
+              setScheduledTime={setScheduledTime}
               isLoading={isAnalyzing}
               onAnalyze={handleAnalyze}
               onStartBatchDownload={handleStartBatchDownload}
@@ -539,94 +854,15 @@ export default function App() {
               tasks={tasks}
             />
 
-            {/* Trending Clips & Music Showcase + 3-Option Jet Coins Panel */}
             <TrendingShowcase
               language={settings.language}
+              recentTasks={tasks}
               onPlayItem={handlePlayMedia}
-              onDownloadItem={handleStartDownload}
-              onOpenShare={() => setIsShareModalOpen(true)}
+              onOpenViewAllDownloads={() => setActiveTab('downloads')}
+              onOpenShare={handleDirectShareApp}
               onOpenUpgrade={() => setIsUpgradeModalOpen(true)}
+              onOpenAuth={() => setIsAuthModalOpen(true)}
             />
-
-            {/* Numbered Queue Overview (۱، ۲، ۳...) with Distinct Statuses */}
-            {tasks.length > 0 && (
-              <div className="max-w-4xl mx-auto px-3 sm:px-4 mt-6">
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-sm font-black text-slate-800 dark:text-slate-200 flex items-center gap-2">
-                    <span>{settings.language === 'fa' ? 'فهرست صف دانلودها (نوبتی):' : t.downloadsHeader}</span>
-                  </h3>
-                  <button
-                    onClick={() => setActiveTab('downloads')}
-                    className="text-xs font-extrabold text-indigo-600 dark:text-indigo-400 hover:underline"
-                  >
-                    {settings.language === 'fa' ? `مشاهده کل صف (${tasks.length}) ←` : `View All (${tasks.length}) →`}
-                  </button>
-                </div>
-                <div className="space-y-2">
-                  {tasks.slice(0, 4).map((task, idx) => {
-                    const numLabel =
-                      settings.language === 'fa'
-                        ? String(idx + 1).replace(/\d/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[Number(d)])
-                        : String(idx + 1);
-                    return (
-                      <div
-                        key={task.id}
-                        className="p-3 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 flex items-center justify-between gap-3 card-3d"
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <span className="w-6 h-6 rounded-xl bg-indigo-600 text-white font-black text-xs flex items-center justify-center shrink-0 shadow-xs">
-                            {numLabel}
-                          </span>
-                          {task.thumbnail ? (
-                            <img
-                              src={task.thumbnail}
-                              alt={task.title}
-                              className="w-12 h-8 rounded-lg object-cover shrink-0"
-                            />
-                          ) : (
-                            <div className="w-12 h-8 rounded-lg bg-slate-800 flex items-center justify-center shrink-0">
-                              <Film className="w-4 h-4 text-slate-500" />
-                            </div>
-                          )}
-                          <div className="min-w-0">
-                            <h4 className="font-bold text-xs sm:text-sm truncate">
-                              {task.title}
-                            </h4>
-                            <p className="text-[11px] text-slate-400 font-mono">
-                              {task.format.qualityLabel} • {task.progressPercent}%
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-2 shrink-0">
-                          {task.status === 'completed' ? (
-                            <button
-                              onClick={() => handlePlayMedia(task)}
-                              className="px-3 py-1 rounded-xl text-xs font-black bg-indigo-600 text-white btn-3d-primary"
-                            >
-                              {t.openFile}
-                            </button>
-                          ) : task.status === 'downloading' ? (
-                            <span className="px-2.5 py-1 rounded-xl text-[11px] font-black bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 border border-indigo-500/30 flex items-center gap-1">
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                              <span>{settings.language === 'fa' ? 'در حال دانلود' : 'Downloading'}</span>
-                            </span>
-                          ) : task.status === 'queued' ? (
-                            <span className="px-2.5 py-1 rounded-xl text-[11px] font-black bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
-                              {settings.language === 'fa' ? 'در انتظار' : 'Waiting'}
-                            </span>
-                          ) : (
-                            <span className="text-xs font-mono font-bold text-indigo-500">
-                              {task.status}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
           </div>
         )}
 
@@ -647,6 +883,7 @@ export default function App() {
               onResumeAll={handleResumeAll}
               onClearCompleted={handleClearCompleted}
               onStartBatchDownload={handleStartBatchDownload}
+              onBackToHome={() => setActiveTab('downloader')}
             />
           </div>
         )}
@@ -662,6 +899,7 @@ export default function App() {
               onDeleteTask={handleDeleteTask}
               onToggleStar={handleToggleStar}
               onToggleVault={handleToggleVault}
+              onBackToHome={() => setActiveTab('downloader')}
             />
           </div>
         )}
@@ -675,8 +913,9 @@ export default function App() {
               onUpdateSettings={setSettings}
               onClearAllAppData={handleClearAllAppData}
               onOpenUpgradeModal={() => setIsUpgradeModalOpen(true)}
-              onOpenShare={() => setIsShareModalOpen(true)}
+              onOpenShare={handleDirectShareApp}
               onOpenPermissionsModal={() => setIsPermissionsModalOpen(true)}
+              onBackToHome={() => setActiveTab('downloader')}
             />
           </div>
         )}
@@ -723,7 +962,9 @@ export default function App() {
           }`}
         >
           <Film className="w-4 h-4" />
-          <span className="truncate max-w-[78px]">{settings.language === 'fa' ? 'پوشه دانلودها' : 'Library'}</span>
+          <span className="truncate max-w-[78px]">
+            {isFa ? 'پوشه دانلودها' : isAr ? 'المجلدات' : 'Library'}
+          </span>
         </button>
 
         <button
@@ -744,6 +985,8 @@ export default function App() {
       <MediaResultModal
         language={settings.language}
         media={parsedMedia}
+        initialCustomFileName={customFileName}
+        initialScheduledTime={scheduledTime}
         onClose={() => setParsedMedia(null)}
         onStartDownload={handleStartDownload}
       />
@@ -758,25 +1001,53 @@ export default function App() {
       <AuthModal
         language={settings.language}
         isOpen={isAuthModalOpen}
-        userSession={userSession}
+        session={userSession}
         onClose={() => setIsAuthModalOpen(false)}
         onUpdateSession={setUserSession}
+        onOpenUpgrade={() => setIsUpgradeModalOpen(true)}
+        onLogout={handleCompleteLogout}
+        onSelectLanguage={(newLang) =>
+          setSettings((prev) => ({
+            ...prev,
+            language: newLang
+          }))
+        }
+        onAuthSuccess={() => {
+          setToastNotice({
+            type: 'success',
+            title: isFa
+              ? 'خوش آمدید! ورود با موفقیت انجام شد.'
+              : isAr
+              ? 'أهلاً بك! تم تسجيل الدخول بنجاح.'
+              : 'Welcome! Logged in successfully.',
+            message: isFa
+              ? 'دسترسی دانلود و امکانات حساب شما فعال است'
+              : isAr
+              ? 'تم تفعيل حسابك وصلاحية التحميل بنجاح'
+              : 'Your account and download access are now active'
+          });
+          setTimeout(() => setToastNotice(null), 4500);
+        }}
       />
 
       <ProUpgradeModal
         language={settings.language}
+        userCountry={userSession.user.country}
         isOpen={isUpgradeModalOpen}
         onClose={() => setIsUpgradeModalOpen(false)}
+        onOpenAuthReferral={() => setIsAuthModalOpen(true)}
         onSuccess={(updatedQuota, customMessage) => {
           setQuotaInfo(updatedQuota);
           setCoinsBalance(getCoinsBalance());
           setToastNotice({
             type: 'success',
-            title: settings.language === 'fa' ? 'ارتقای سهمیه انجام شد!' : 'Quota Upgraded!',
+            title: isFa ? 'عملیات با موفقیت انجام شد!' : isAr ? 'تمت العملية بنجاح!' : 'Success!',
             message:
               customMessage ||
-              (settings.language === 'fa'
+              (isFa
                 ? 'اشتراک VIP Pro فعال گردید و اکنون نامحدود هستید.'
+                : isAr
+                ? 'تم تفعيل اشتراك VIP غير المحدود بنجاح.'
                 : 'Unlimited downloads enabled.')
           });
           setTimeout(() => setToastNotice(null), 4500);
@@ -790,26 +1061,22 @@ export default function App() {
         onTriggerInstall={triggerInstall}
       />
 
-      <ShareAppModal
-        language={settings.language}
-        isOpen={isShareModalOpen}
-        onClose={() => setIsShareModalOpen(false)}
-      />
-
       <PermissionsDisclosureModal
         language={settings.language}
         isOpen={isPermissionsModalOpen}
         onAccept={() => setIsPermissionsModalOpen(false)}
       />
 
+      <CoinRewardAnimation language={settings.language} />
+
       <OfflineBanner
         language={settings.language}
         isOnline={isOnline}
       />
 
-      {/* Direct Device Storage Save Notification Toast */}
+      {/* Top Notification Toast (Welcome on Login/Register + Device Storage Save Notices) */}
       {toastNotice && (
-        <div className={`fixed bottom-20 sm:bottom-6 left-4 right-4 sm:left-auto sm:right-6 z-50 max-w-md rounded-2xl text-white p-4 shadow-2xl flex items-center gap-3 border animate-bounce-subtle ${
+        <div className={`fixed top-16 sm:top-20 left-1/2 -translate-x-1/2 z-50 w-[calc(100%-2rem)] max-w-md rounded-2xl text-white p-4 shadow-2xl flex items-center gap-3 border animate-bounce-subtle ${
           toastNotice.type === 'error'
             ? 'bg-rose-600 border-rose-400/40 shadow-rose-900/40'
             : toastNotice.type === 'info'

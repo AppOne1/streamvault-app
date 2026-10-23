@@ -1,6 +1,6 @@
 {
-	"appId": "com.streamvault.downloader",
-	"appName": "StreamVault",
+	"appId": "ir.appone.onedownload",
+	"appName": "وان دانلود (OneDownload)",
 	"webDir": "dist",
 	"server": {
 		"androidScheme": "https"
