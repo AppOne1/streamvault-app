@@ -1,10 +1,9 @@
 import React, { useState } from 'react';
 import { AppSettings, Language } from '../types';
 import { getTranslation } from '../i18n/translations';
-import { clearAllIDBBlobs } from '../services/storageService';
+import { clearAllIDBBlobs, getLockedAccountCurrency } from '../services/storageService';
 import {
-  buildAppShareMessage,
-  shareAppToFriends
+  buildAppShareMessage
 } from '../services/deviceService';
 import {
   claimRewardAction,
@@ -15,8 +14,10 @@ import {
   isAppLockEnabled,
   MASTER_KEYWORD,
   setAppLockEnabled,
-  setAppLockPin
+  setAppLockPin,
+  syncReferralFromCloud
 } from '../services/quotaService';
+import { SupportChannelsBox } from './SupportChannelsBox';
 import {
   Globe,
   Moon,
@@ -38,8 +39,6 @@ import {
   HardDrive,
   Bell,
   Cloud,
-  Send,
-  X,
   Lock,
   KeyRound
 } from 'lucide-react';
@@ -52,6 +51,7 @@ interface SettingsViewProps {
   onOpenUpgradeModal: () => void;
   onOpenShare?: () => void;
   onOpenPermissionsModal?: () => void;
+  onOpenUpdateModal?: () => void;
   onBackToHome?: () => void;
 }
 
@@ -68,18 +68,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onClearAllAppData,
   onOpenUpgradeModal,
   onOpenPermissionsModal,
+  onOpenUpdateModal,
   onBackToHome
 }) => {
   const t = getTranslation(language);
   const isFa = language === 'fa';
   const isAr = language === 'ar';
   const isRtl = isFa || isAr;
+  const lockedCurrency = getLockedAccountCurrency();
+  const isTomanAccount = lockedCurrency === 'toman' || isFa;
 
   const [clearedNotice, setClearedNotice] = useState(false);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [updateStatusText, setUpdateStatusText] = useState<string | null>(null);
   const [shareFeedback, setShareFeedback] = useState<string | null>(null);
-  const [isShareSheetOpen, setIsShareSheetOpen] = useState(false);
   const [copiedShareText, setCopiedShareText] = useState(false);
   const [copiedRefCode, setCopiedRefCode] = useState(false);
 
@@ -136,67 +138,52 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setUpdateStatusText(null);
     setTimeout(() => {
       setIsCheckingUpdate(false);
-      setUpdateStatusText(
-        isFa
-          ? 'نرم‌افزار شما به آخرین نسخه پایدار (v2.6.0) به‌روز است ✓'
-          : isAr
-          ? 'تطبيقك محدّث إلى آخر إصدار مستقر (v2.6.0) ✓'
-          : 'You are on the latest version (v2.6.0) ✓'
-      );
-      setTimeout(() => setUpdateStatusText(null), 4000);
-    }, 1000);
+      if (onOpenUpdateModal) {
+        onOpenUpdateModal();
+      } else {
+        setUpdateStatusText(
+          isFa
+            ? 'نرم‌افزار شما به آخرین نسخه پایدار (v2.6.0) به‌روز است ✓'
+            : isAr
+            ? 'تطبيقك محدّث إلى آخر إصدار مستقر (v2.6.0) ✓'
+            : 'You are on the latest version (v2.6.0) ✓'
+        );
+        setTimeout(() => setUpdateStatusText(null), 4000);
+      }
+    }, 650);
   };
 
   /**
-   * Shares ONLY the promotional slogan + personal referral code (NO APK file sending, NO web URLs).
+   * Single unified copy button for promotional slogan + personal referral code
    */
-  const handleInviteFriends = async () => {
-    const res = await shareAppToFriends(myReferralCode, language);
-    claimRewardAction('share_app');
-    setIsShareSheetOpen(true);
-    if (res.openedNativeSheet) {
-      setShareFeedback(
-        isFa
-          ? 'متن شعار تبلیغاتی و کد معرف اختصاصی شما آماده ارسال شد ✓'
-          : isAr
-          ? 'تم تجهيز رسالة الدعوة وكود الإحالة الخاص بك للإرسال ✓'
-          : 'Promotional slogan and your referral code ready to share ✓'
-      );
-      setTimeout(() => setShareFeedback(null), 4000);
-    }
-  };
-
-  const handleShareToTargetMessenger = async (targetMessenger?: 'telegram' | 'whatsapp' | 'eitaa' | 'rubika') => {
-    await handleCopyFullShareMessage();
-    claimRewardAction('share_app');
-
-    const encoded = encodeURIComponent(fullShareMessage);
-    if (targetMessenger === 'telegram') {
-      window.location.href = `tg://msg?text=${encoded}`;
-    } else if (targetMessenger === 'whatsapp') {
-      window.location.href = `whatsapp://send?text=${encoded}`;
-    } else {
-      await shareAppToFriends(myReferralCode, language);
-    }
-
-    setShareFeedback(
-      isFa
-        ? 'متن شعار تبلیغاتی و کد معرف کپی و به پیام‌رسان ارسال شد ✓'
-        : isAr
-        ? 'تم نسخ وإرسال رسالة الدعوة وكود الإحالة ✓'
-        : 'Slogan & referral code copied and sent ✓'
-    );
-    setTimeout(() => setShareFeedback(null), 4000);
-  };
-
   const handleCopyFullShareMessage = async () => {
     try {
       await navigator.clipboard.writeText(fullShareMessage);
-      setCopiedShareText(true);
-      setTimeout(() => setCopiedShareText(false), 2200);
     } catch {
-      // ignore
+      const textarea = document.createElement('textarea');
+      textarea.value = fullShareMessage;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand('copy');
+      } catch {
+        // ignore
+      }
+      document.body.removeChild(textarea);
     }
+    claimRewardAction('share_app');
+    setCopiedShareText(true);
+    setShareFeedback(
+      isFa
+        ? 'متن دعوت و کد معرف اختصاصی شما در کلیپ‌بورد کپی شد ✓ اکنون در هر برنامه‌ای جای‌گذاری (Paste) کنید.'
+        : isAr
+        ? 'تم نسخ نص الدعوة وكود الإحالة الخاص بك إلى الحافظة ✓'
+        : 'Invite text and your referral code copied to clipboard ✓'
+    );
+    setTimeout(() => setCopiedShareText(false), 2800);
+    setTimeout(() => setShareFeedback(null), 4500);
   };
 
   const handleCopyMyRefCode = async () => {
@@ -266,32 +253,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const handleCloudSyncNow = () => {
     setIsSyncingCloud(true);
-    setTimeout(() => {
-      const nowStr = new Date().toLocaleTimeString(isFa ? 'fa-IR' : isAr ? 'ar-IQ' : 'en-US', {
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-      const label = isFa
-        ? `آخرین همگام‌سازی موفق: ساعت ${nowStr}`
-        : isAr
-        ? `آخر مزامنة ناجحة: ${nowStr}`
-        : `Last synced at ${nowStr}`;
-      setLastCloudSync(label);
-      try {
-        localStorage.setItem(CLOUD_SYNC_TIMESTAMP_KEY, label);
-      } catch {
-        // ignore
-      }
-      setIsSyncingCloud(false);
-      setShareFeedback(
-        isFa
-          ? 'همگام‌سازی ابری (Cloud Sync) اطلاعات، سکه‌ها و وضعیت اشتراک با موفقیت انجام شد ✓'
+    syncReferralFromCloud().finally(() => {
+      setTimeout(() => {
+        const nowStr = new Date().toLocaleTimeString(isFa ? 'fa-IR' : isAr ? 'ar-IQ' : 'en-US', {
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+        const label = isFa
+          ? `آخرین همگام‌سازی موفق: ساعت ${nowStr}`
           : isAr
-          ? 'تمت المزامنة السحابية للحساب والعملات وحالة VIP بنجاح ✓'
-          : 'Cloud sync of profile, coins, and VIP status completed ✓'
-      );
-      setTimeout(() => setShareFeedback(null), 3500);
-    }, 900);
+          ? `آخر مزامنة ناجحة: ${nowStr}`
+          : `Last synced at ${nowStr}`;
+        setLastCloudSync(label);
+        try {
+          localStorage.setItem(CLOUD_SYNC_TIMESTAMP_KEY, label);
+        } catch {
+          // ignore
+        }
+        setIsSyncingCloud(false);
+        setShareFeedback(
+          isFa
+            ? 'همگام‌سازی ابری (Cloud Sync) کد معرف، سکه‌ها و وضعیت اشتراک VIP با موفقیت انجام شد ✓'
+            : isAr
+            ? 'تمت المزامنة السحابية لكود الإحالة والعملات وحالة VIP بنجاح ✓'
+            : 'Cloud sync of referral count, coins, and VIP status completed ✓'
+        );
+        setTimeout(() => setShareFeedback(null), 3500);
+      }, 650);
+    });
   };
 
   return (
@@ -365,7 +354,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       )}
 
       <div className="space-y-4">
-        {/* 1. Exclusive "معرفی به دوستان (شعار تبلیغاتی + کد معرف)" Card (Strictly ONLY in Settings, NO APK sending) */}
+        {/* 1. Exclusive "معرفی به دوستان (شعار تبلیغاتی + کد معرف)" Card with Single Prominent Copy Button */}
         <div className="p-5 rounded-3xl bg-gradient-to-br from-indigo-950 via-slate-900 to-violet-950 text-white border border-indigo-500/40 card-3d space-y-3.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-3">
@@ -382,17 +371,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </h4>
                 <p className="text-[11px] text-indigo-200/80">
                   {isFa
-                    ? 'ارسال و کپی متن شعار تبلیغاتی به همراه کد معرف اختصاصی شما (با دعوت هر ۳ نفر در ثبت‌نام = ۱ ماه VIP رایگان)'
+                    ? 'کپی متن دعوت به همراه کد معرف اختصاصی شما (با دعوت هر ۳ نفر در ثبت‌نام = ۱ ماه VIP رایگان خودکار)'
                     : isAr
-                    ? 'شارك شعار التطبيق مع كود الإحالة الخاص بك (دعوة ٣ أصدقاء = شهر VIP مجاناً)'
-                    : 'Share promotional slogan & your personal referral code (3 referrals = 1 Month Free VIP)'}
+                    ? 'انسخ نص الدعوة مع كود الإحالة الخاص بك (دعوة ٣ أصدقاء = شهر VIP مجاناً تلقائياً)'
+                    : 'Copy invite slogan & your personal referral code (3 referrals = Automatic 1-Month Free VIP)'}
                 </p>
               </div>
             </div>
 
             <div className="flex items-center gap-1.5 bg-slate-900/90 border border-indigo-500/40 px-3 py-1.5 rounded-xl">
               <span className="text-[10px] text-slate-400 font-bold">
-                {isFa ? 'کد معرف شما:' : isAr ? 'كود الإحالة:' : 'Your Code:'}
+                {isFa ? 'کد معرف ثابت شما:' : isAr ? 'كود الإحالة:' : 'Your Fixed Code:'}
               </span>
               <span className="font-mono font-black text-xs text-amber-400 select-all">
                 {myReferralCode}
@@ -413,47 +402,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             {fullShareMessage}
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            <button
-              type="button"
-              onClick={handleInviteFriends}
-              className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-black text-xs sm:text-sm flex items-center justify-center gap-2 btn-3d-primary cursor-pointer"
-            >
-              <Share2 className="w-4 h-4 text-white shrink-0" />
-              <span>
-                {isFa
-                  ? 'ارسال شعار تبلیغاتی و کد معرف به پیام‌رسان‌ها'
+          {/* Single Unified Prominent Copy Invite Text & Referral Code Button */}
+          <button
+            type="button"
+            onClick={handleCopyFullShareMessage}
+            className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-black text-xs sm:text-sm flex items-center justify-center gap-2 btn-3d-primary cursor-pointer"
+          >
+            {copiedShareText ? (
+              <Check className="w-4 h-4 text-emerald-300 shrink-0" />
+            ) : (
+              <Copy className="w-4 h-4 text-amber-300 shrink-0" />
+            )}
+            <span>
+              {copiedShareText
+                ? isFa
+                  ? 'متن دعوت و کد معرف در کلیپ‌بورد کپی شد ✓'
                   : isAr
-                  ? 'إرسال شعار الدعوة وكود الإحالة'
-                  : 'Share Slogan & Referral Code'}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleCopyFullShareMessage}
-              className="w-full py-3.5 px-4 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white font-black text-xs sm:text-sm flex items-center justify-center gap-2 border border-slate-700 btn-3d-secondary cursor-pointer"
-            >
-              {copiedShareText ? (
-                <Check className="w-4 h-4 text-emerald-400 shrink-0" />
-              ) : (
-                <Copy className="w-4 h-4 text-amber-400 shrink-0" />
-              )}
-              <span>
-                {copiedShareText
-                  ? isFa
-                    ? 'متن شعار و کد معرف کپی شد ✓'
-                    : isAr
-                    ? 'تم نسخ الشعار وكود الإحالة ✓'
-                    : 'Slogan & Code Copied ✓'
-                  : isFa
-                  ? 'کپی متن شعار و کد معرف'
-                  : isAr
-                  ? 'نسخ نص الدعوة وكود الإحالة'
-                  : 'Copy Slogan & Referral Code'}
-              </span>
-            </button>
-          </div>
+                  ? 'تم نسخ نص الدعوة وكود الإحالة ✓'
+                  : 'Invite Text & Referral Code Copied ✓'
+                : isFa
+                ? 'کپی متن دعوت و کد معرف'
+                : isAr
+                ? 'نسخ نص الدعوة وكود الإحالة'
+                : 'Copy Invite Text & Referral Code'}
+            </span>
+          </button>
         </div>
 
         {/* 2. App Security Lock (قفل امنیتی برنامه + کیورد بازیابی onedownload) */}
@@ -816,7 +789,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </label>
         </div>
 
-        {/* 9. Developer, Privacy Statement & In-App Update Card */}
+        {/* 9. Official Support & Management Contact Channels («پشتیبانی و ارتباط با مدیریت») */}
+        <SupportChannelsBox
+          language={language}
+          isTomanAccount={isTomanAccount}
+          darkVariant={false}
+        />
+
+        {/* 10. Developer, Privacy Statement & In-App Update Card */}
         <div className="p-5 rounded-3xl bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950 text-white border border-indigo-500/20 card-3d space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -825,7 +805,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
               <div>
                 <h4 className="font-black text-base text-white">
-                  {isFa ? 'درباره ما و پشتیبانی' : isAr ? 'من نحن والدعم الفني' : 'About Us & Support'}
+                  {isFa ? 'درباره ما و نسخه برنامه' : isAr ? 'من نحن وإصدار التطبيق' : 'About App & Version'}
                 </h4>
                 <p className="text-xs text-slate-400">
                   {isFa
@@ -857,7 +837,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <button
                 type="button"
                 onClick={onOpenPermissionsModal}
-                className="w-full py-3 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs flex items-center justify-center gap-2 btn-3d-emerald"
+                className="w-full py-3 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs flex items-center justify-center gap-2 btn-3d-emerald cursor-pointer"
               >
                 <ShieldCheck className="w-4 h-4 text-white shrink-0" />
                 <span>
@@ -874,7 +854,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               type="button"
               onClick={handleCheckUpdate}
               disabled={isCheckingUpdate}
-              className="w-full py-3 px-4 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white font-black text-xs flex items-center justify-center gap-2 border border-slate-700 btn-3d-secondary"
+              className="w-full py-3 px-4 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white font-black text-xs flex items-center justify-center gap-2 border border-slate-700 btn-3d-secondary cursor-pointer"
             >
               <RefreshCw className={`w-4 h-4 ${isCheckingUpdate ? 'animate-spin' : ''}`} />
               <span>
@@ -894,7 +874,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
-        {/* 10. Clear Data Card */}
+        {/* 11. Clear Data Card */}
         <div className="p-4 rounded-2xl bg-rose-50/50 dark:bg-rose-950/20 border border-rose-200/70 dark:border-rose-900/50 flex items-center justify-between card-3d">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-xl bg-rose-100 dark:bg-rose-900/60 text-rose-600 dark:text-rose-400">
@@ -917,134 +897,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <button
             type="button"
             onClick={handleClear}
-            className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-500 transition-colors shadow-sm shrink-0"
+            className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-500 transition-colors shadow-sm shrink-0 cursor-pointer"
           >
             {isFa ? 'پاکسازی کامل' : isAr ? 'مسح الكل' : 'Clear Data'}
           </button>
         </div>
       </div>
-
-      {/* Promotional Slogan + Referral Code Share Modal (NO APK sending, pure slogan + referral code) */}
-      {isShareSheetOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/85 backdrop-blur-md animate-fade-in">
-          <div className="relative w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border border-indigo-500/40 card-3d overflow-hidden p-5 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
-              <div className="flex items-center gap-2">
-                <div className="p-2 rounded-xl bg-indigo-600 text-white">
-                  <Share2 className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="font-black text-sm sm:text-base text-slate-900 dark:text-white">
-                    {isFa
-                      ? 'ارسال شعار تبلیغاتی و کد معرف به دوستان'
-                      : isAr
-                      ? 'إرسال شعار الدعوة وكود الإحالة'
-                      : 'Share Promotional Slogan & Referral Code'}
-                  </h3>
-                  <p className="text-[10px] text-slate-500 dark:text-slate-400">
-                    {isFa
-                      ? 'ارسال مستقیم متن دعوت و کد معرف به تلگرام، واتساپ، ایتا و روبیکا'
-                      : isAr
-                      ? 'إرسال نص الدعوة وكود الإحالة عبر تيليجرام، واتساب، إيتا وروبيكا'
-                      : 'Send invite slogan & referral code via Telegram, WhatsApp, Eitaa, or Rubika'}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => setIsShareSheetOpen(false)}
-                  className="px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-black flex items-center gap-1"
-                >
-                  <span>{isFa ? 'بازگشت' : isAr ? 'رجوع' : 'Back'}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsShareSheetOpen(false)}
-                  className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-
-            {/* Slogan + Referral Code Box */}
-            <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs leading-relaxed text-slate-800 dark:text-slate-200 font-bold whitespace-pre-line select-all">
-              {fullShareMessage}
-            </div>
-
-            {/* Messenger Share Buttons */}
-            <div className="space-y-2">
-              <div className="text-[11px] font-black text-slate-500 dark:text-slate-400">
-                {isFa
-                  ? 'ارسال متن دعوت و کد معرف به پیام‌رسان مورد نظر:'
-                  : isAr
-                  ? 'إرسال نص الدعوة وكود الإحالة إلى:'
-                  : 'Send invite slogan & referral code to:'}
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => handleShareToTargetMessenger('telegram')}
-                  className="py-2.5 px-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-white font-black text-xs flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>{isFa ? 'ارسال به تلگرام' : isAr ? 'تيليجرام' : 'Telegram'}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleShareToTargetMessenger('whatsapp')}
-                  className="py-2.5 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-white font-black text-xs flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
-                >
-                  <Share2 className="w-3.5 h-3.5" />
-                  <span>{isFa ? 'ارسال به واتساپ' : isAr ? 'واتساب' : 'WhatsApp'}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleShareToTargetMessenger('eitaa')}
-                  className="py-2.5 px-3 rounded-xl bg-orange-500 hover:bg-orange-400 text-white font-black text-xs flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>{isFa ? 'ارسال به ایتا (Eitaa)' : isAr ? 'إيتا (Eitaa)' : 'Eitaa'}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleShareToTargetMessenger('rubika')}
-                  className="py-2.5 px-3 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-black text-xs flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
-                >
-                  <Share2 className="w-3.5 h-3.5" />
-                  <span>{isFa ? 'روبیکا / سایر برنامه‌ها' : isAr ? 'روبيكا / مشاركة' : 'Rubika / More'}</span>
-                </button>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={handleCopyFullShareMessage}
-              className="w-full py-2.5 px-4 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 font-black text-xs flex items-center justify-center gap-2 btn-3d-secondary cursor-pointer"
-            >
-              {copiedShareText ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4 text-indigo-500" />}
-              <span>
-                {copiedShareText
-                  ? isFa
-                    ? 'متن دعوت و کد معرف در کلیپ‌بورد کپی شد ✓'
-                    : isAr
-                    ? 'تم نسخ النص وكود الإحالة ✓'
-                    : 'Copied to Clipboard ✓'
-                  : isFa
-                  ? 'کپی متن دعوت و کد معرف'
-                  : isAr
-                  ? 'نسخ نص الدعوة وكود الإحالة'
-                  : 'Copy Invite Text & Code'}
-              </span>
-            </button>
-          </div>
-        </div>
-      )}
     </section>
   );
 };

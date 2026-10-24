@@ -99,45 +99,66 @@ export const TrendingShowcase: React.FC<TrendingShowcaseProps> = ({
 
   return (
     <section className="w-full max-w-4xl mx-auto px-3 sm:px-4 mt-4 space-y-5">
-      {/* Gamified Coin Wallet & Daily Quota Card */}
+      {/* Gamified Coin Wallet & Daily Quota Card (Replaced with VIP Active badge for VIP subscribers) */}
       <div className="p-4 rounded-3xl bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-white border border-indigo-500/30 card-3d space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2.5">
-            <div className="p-2.5 rounded-2xl bg-amber-400 text-slate-950 shadow-md shrink-0">
-              <Coins className="w-5 h-5" />
+            <div className={`p-2.5 rounded-2xl shadow-md shrink-0 ${quota.isPro ? 'bg-gradient-to-br from-amber-400 to-yellow-500 text-slate-950' : 'bg-amber-400 text-slate-950'}`}>
+              {quota.isPro ? <Crown className="w-5 h-5 fill-slate-950" /> : <Coins className="w-5 h-5" />}
             </div>
             <div>
               <h3 className="font-black text-xs sm:text-sm text-white flex flex-wrap items-center gap-2">
                 <span>
-                  {isFa
+                  {quota.isPro
+                    ? isFa
+                      ? 'وضعیت اشتراک ویژه شما'
+                      : isAr
+                      ? 'حالة اشتراكك المميز'
+                      : 'Your Premium Subscription Status'
+                    : isFa
                     ? 'کیف پول سکه و سهمیه روزانه'
                     : isAr
                     ? 'محفظة العملات والحصة اليومية'
                     : 'Coin Wallet & Daily Quota'}
                 </span>
-                <span className="px-2 py-0.5 rounded-lg text-[10px] font-black bg-amber-400 text-slate-950">
-                  {isFa
-                    ? `${toLocalDigits(coinsBalance, 'fa')} سکه`
-                    : isAr
-                    ? `${toLocalDigits(coinsBalance, 'ar')} عملة`
-                    : `${coinsBalance} Coins`}
-                </span>
-                <span className="px-2 py-0.5 rounded-lg text-[10px] font-black bg-indigo-500/30 border border-indigo-400/40 text-indigo-100">
-                  {quota.isPro
-                    ? isFa
-                      ? 'اشتراک VIP فعال (دانلود نامحدود)'
-                      : isAr
-                      ? 'اشتراك VIP نشط (تحميل غير محدود)'
-                      : 'VIP Active (Unlimited)'
-                    : isFa
-                    ? `سهمیه رایگان امروز: ${toLocalDigits(quota.remainingToday, 'fa')} از ${toLocalDigits(quota.maxDaily, 'fa')} دانلود`
-                    : isAr
-                    ? `المجاني اليوم: ${toLocalDigits(quota.remainingToday, 'ar')} من ${toLocalDigits(quota.maxDaily, 'ar')} تحميلات`
-                    : `Free Today: ${quota.remainingToday}/${quota.maxDaily} downloads`}
-                </span>
+                {quota.isPro ? (
+                  <span className="px-2.5 py-0.5 rounded-lg text-[10px] font-black bg-emerald-500/25 border border-emerald-400/50 text-emerald-300 flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                    <span>
+                      {isFa
+                        ? 'VIP فعال (دسترسی نامحدود)'
+                        : isAr
+                        ? 'VIP نشط (وصول غير محدود)'
+                        : 'VIP Active (Unlimited Access)'}
+                    </span>
+                  </span>
+                ) : (
+                  <>
+                    <span className="px-2 py-0.5 rounded-lg text-[10px] font-black bg-amber-400 text-slate-950">
+                      {isFa
+                        ? `${toLocalDigits(coinsBalance, 'fa')} سکه`
+                        : isAr
+                        ? `${toLocalDigits(coinsBalance, 'ar')} عملة`
+                        : `${coinsBalance} Coins`}
+                    </span>
+                    <span className="px-2 py-0.5 rounded-lg text-[10px] font-black bg-indigo-500/30 border border-indigo-400/40 text-indigo-100">
+                      {isFa
+                        ? `سهمیه رایگان امروز: ${toLocalDigits(quota.remainingToday, 'fa')} از ${toLocalDigits(quota.maxDaily, 'fa')} دانلود`
+                        : isAr
+                        ? `المجاني اليوم: ${toLocalDigits(quota.remainingToday, 'ar')} من ${toLocalDigits(quota.maxDaily, 'ar')} تحميلات`
+                        : `Free Today: ${quota.remainingToday}/${quota.maxDaily} downloads`}
+                    </span>
+                  </>
+                )}
               </h3>
               <p className="text-[11px] text-indigo-200/85 mt-0.5">
-                {isFa
+                {quota.isPro
+                  ? isFa
+                    ? `تمامی محدودیت‌های روزانه و سکه برداشته شده است (${toLocalDigits(quota.remainingProDays || 30, 'fa')} روز اعتبار VIP باقی‌مانده)`
+                    : isAr
+                    ? `تم إلغاء جميع القيود اليومية (${toLocalDigits(quota.remainingProDays || 30, 'ar')} يوم متبقي)`
+                    : `All daily limits & coin requirements removed (${quota.remainingProDays || 30} days remaining)`
+                  : isFa
                   ? '۳ دانلود رایگان در روز • دانلود اضافه = ۵ سکه • ۱۰۰ سکه = اشتراک VIP'
                   : isAr
                   ? '٣ تحميلات مجانية يومياً • تحميل إضافي = ٥ عملات • ١٠٠ عملة = اشتراك VIP'
@@ -153,7 +174,13 @@ export const TrendingShowcase: React.FC<TrendingShowcaseProps> = ({
           >
             <Crown className="w-3.5 h-3.5 fill-slate-950" />
             <span>
-              {isFa
+              {quota.isPro
+                ? isFa
+                  ? 'VIP فعال (دسترسی نامحدود)'
+                  : isAr
+                  ? 'VIP نشط (غير محدود)'
+                  : 'VIP Active (Unlimited)'
+                : isFa
                 ? 'فعال‌سازی VIP'
                 : isAr
                 ? 'تفعيل VIP'
@@ -169,63 +196,93 @@ export const TrendingShowcase: React.FC<TrendingShowcaseProps> = ({
           </div>
         )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-          <button
-            type="button"
-            onClick={handleWatchAd}
-            className="p-3 rounded-2xl bg-slate-800/80 border border-slate-700 text-slate-400 font-black text-xs flex items-center justify-center gap-2 opacity-85 cursor-pointer"
-          >
-            <Clock className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>
-              {isFa
-                ? 'تماشای تبلیغ (+۵ سکه • در حال به‌روزرسانی)'
-                : isAr
-                ? 'مشاهدة إعلان (+٥ عملات • قيد التحديث)'
-                : 'Watch Ad (+5 Coins • Updating)'}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleDailyCheckin}
-            disabled={rewardStatus.checkedInToday}
-            className={`p-3 rounded-2xl font-black text-xs flex items-center justify-center gap-2 transition-all cursor-pointer ${
-              rewardStatus.checkedInToday
-                ? 'bg-slate-800/80 text-slate-400 border border-slate-700'
-                : 'bg-indigo-600 hover:bg-indigo-500 text-white btn-3d-primary'
-            }`}
-          >
-            <Gift className="w-4 h-4 shrink-0" />
-            <span>
-              {rewardStatus.checkedInToday
-                ? isFa
-                  ? 'هدیه امروز دریافت شد ✓'
+        {quota.isPro ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div className="p-3 rounded-2xl bg-emerald-500/15 border border-emerald-400/40 text-emerald-300 font-black text-xs flex items-center justify-center gap-2">
+              <Crown className="w-4 h-4 text-amber-400 fill-amber-400 shrink-0" />
+              <span>
+                {isFa
+                  ? 'VIP فعال (دسترسی نامحدود) • بدون نیاز به سکه روزانه'
                   : isAr
-                  ? 'تم استلام هدية اليوم ✓'
-                  : 'Daily Bonus Claimed ✓'
-                : isFa
-                ? 'هدیه ورود روزانه (+۲ سکه)'
-                : isAr
-                ? 'هدية الدخول اليومي (+٢ عملة)'
-                : 'Daily Check-in (+2 Coins)'}
-            </span>
-          </button>
+                  ? 'VIP نشط (وصول غير محدود) • لا حاجة للعملات اليومية'
+                  : 'VIP Active (Unlimited Access) • No daily coins required'}
+              </span>
+            </div>
 
-          <button
-            type="button"
-            onClick={onOpenAuth}
-            className="p-3 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white font-black text-xs border border-slate-700 btn-3d-secondary flex items-center justify-center gap-2 cursor-pointer"
-          >
-            <User className="w-4 h-4 text-indigo-400 shrink-0" />
-            <span>
-              {isFa
-                ? 'پروفایل شخصی'
-                : isAr
-                ? 'الملف الشخصي'
-                : 'Personal Profile'}
-            </span>
-          </button>
-        </div>
+            <button
+              type="button"
+              onClick={onOpenAuth}
+              className="p-3 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white font-black text-xs border border-slate-700 btn-3d-secondary flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <User className="w-4 h-4 text-indigo-400 shrink-0" />
+              <span>
+                {isFa
+                  ? 'پروفایل شخصی'
+                  : isAr
+                  ? 'الملف الشخصي'
+                  : 'Personal Profile'}
+              </span>
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <button
+              type="button"
+              onClick={handleWatchAd}
+              className="p-3 rounded-2xl bg-slate-800/80 border border-slate-700 text-slate-400 font-black text-xs flex items-center justify-center gap-2 opacity-85 cursor-pointer"
+            >
+              <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>
+                {isFa
+                  ? 'تماشای تبلیغ (+۵ سکه • در حال به‌روزرسانی)'
+                  : isAr
+                  ? 'مشاهدة إعلان (+٥ عملات • قيد التحديث)'
+                  : 'Watch Ad (+5 Coins • Updating)'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleDailyCheckin}
+              disabled={rewardStatus.checkedInToday}
+              className={`p-3 rounded-2xl font-black text-xs flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                rewardStatus.checkedInToday
+                  ? 'bg-slate-800/80 text-slate-400 border border-slate-700'
+                  : 'bg-indigo-600 hover:bg-indigo-500 text-white btn-3d-primary'
+              }`}
+            >
+              <Gift className="w-4 h-4 shrink-0" />
+              <span>
+                {rewardStatus.checkedInToday
+                  ? isFa
+                    ? 'هدیه امروز دریافت شد ✓'
+                    : isAr
+                    ? 'تم استلام هدية اليوم ✓'
+                    : 'Daily Bonus Claimed ✓'
+                  : isFa
+                  ? 'هدیه ورود روزانه (+۲ سکه)'
+                  : isAr
+                  ? 'هدية الدخول اليومي (+٢ عملة)'
+                  : 'Daily Check-in (+2 Coins)'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenAuth}
+              className="p-3 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white font-black text-xs border border-slate-700 btn-3d-secondary flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <User className="w-4 h-4 text-indigo-400 shrink-0" />
+              <span>
+                {isFa
+                  ? 'پروفایل شخصی'
+                  : isAr
+                  ? 'الملف الشخصي'
+                  : 'Personal Profile'}
+              </span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Latest 2 Downloaded Files Card */}

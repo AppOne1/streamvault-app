@@ -2,9 +2,10 @@ import { AppSettings, DownloadTask, Language, UserSession } from '../types';
 
 const STORAGE_KEYS = {
   TASKS: 'onedownload_tasks_v2',
-  SETTINGS: 'onedownload_settings_v2',
+  SETTINGS: 'onedownload_settings_v3',
   SESSION: 'onedownload_session_v2',
-  OD_USER_SESSION: 'od_user_session'
+  OD_USER_SESSION: 'od_user_session',
+  ACCOUNT_CURRENCY_LOCK: 'onedownload_account_currency_lock_v1'
 };
 
 const DB_NAME = 'OneDownloadOfflineDB';
@@ -220,7 +221,7 @@ export function saveTasksToStorage(tasks: DownloadTask[]): void {
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  language: 'fa', // Default to Persian as requested by user prompt, dynamic switch to English
+  language: 'en', // Default to English (EN) on first installation as required
   theme: 'dark',
   autoPlayAfterDownload: false,
   autoSaveToDevice: true, // Automatically triggers native file download to phone/system Downloads folder
@@ -395,6 +396,7 @@ export async function resetUserSessionAndClearAllData(language: Language): Promi
     localStorage.removeItem(STORAGE_KEYS.OD_USER_SESSION);
     localStorage.removeItem(STORAGE_KEYS.SESSION);
     localStorage.removeItem(STORAGE_KEYS.TASKS);
+    localStorage.removeItem(STORAGE_KEYS.ACCOUNT_CURRENCY_LOCK);
     localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(freshGuestSession));
   } catch {
     // ignore storage errors
@@ -408,3 +410,26 @@ export async function resetUserSessionAndClearAllData(language: Language): Promi
 
   return freshGuestSession;
 }
+
+export function getLockedAccountCurrency(): 'toman' | 'usdt' | null {
+  try {
+    const val = localStorage.getItem(STORAGE_KEYS.ACCOUNT_CURRENCY_LOCK);
+    if (val === 'toman' || val === 'usdt') return val;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function setLockedAccountCurrency(mode: 'toman' | 'usdt' | null): void {
+  try {
+    if (!mode) {
+      localStorage.removeItem(STORAGE_KEYS.ACCOUNT_CURRENCY_LOCK);
+    } else {
+      localStorage.setItem(STORAGE_KEYS.ACCOUNT_CURRENCY_LOCK, mode);
+    }
+  } catch {
+    // ignore
+  }
+}
+

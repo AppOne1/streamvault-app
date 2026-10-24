@@ -24,11 +24,13 @@ import {
   getReferralInfo,
   ReferralInfo,
   submitReferralCodeOrInvite,
-  subscribeQuotaAndCoins
+  subscribeQuotaAndCoins,
+  syncReferralFromCloud
 } from '../services/quotaService';
 import {
   getLocalizedGuestName,
-  isDefaultGuestName
+  isDefaultGuestName,
+  setLockedAccountCurrency
 } from '../services/storageService';
 import { ODLogo } from './ODLogo';
 
@@ -165,6 +167,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setCaptcha(createMathChallenge());
       setCaptchaInput('');
       setStatusMessage(null);
+      syncReferralFromCloud().then(() => {
+        setReferralInfo(getReferralInfo());
+        setQuota(getDailyQuota());
+      });
     }
   }, [isOpen, session, language]);
 
@@ -282,22 +288,29 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     reader.readAsDataURL(file);
   };
 
-  // 1. Simple Mandatory Registration / Login Handler
+  const isValidEmailOrPhone = (raw: string): boolean => {
+    const cleaned = normalizeDigits(raw).replace(/[\s-]/g, '');
+    if (!cleaned) return false;
+    if (cleaned.includes('@') && cleaned.includes('.')) return true;
+    return /^(\+?\d{8,15}|09\d{9})$/.test(cleaned);
+  };
+
+  // 1. Simple Mandatory Registration / Login Handler (Supports Email OR Mobile Phone Number)
   const handleGuestAuthSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setStatusMessage(null);
 
-    const cleanEmail = email.trim();
+    const cleanIdentifier = normalizeDigits(email.trim());
     const cleanPass = password.trim();
 
-    if (!cleanEmail || !cleanEmail.includes('@')) {
+    if (!isValidEmailOrPhone(cleanIdentifier)) {
       setStatusMessage({
         type: 'error',
         text: isFa
-          ? 'لطفاً یک آدرس ایمیل معتبر وارد نمایید.'
+          ? 'لطفاً یک آدرس ایمیل یا شماره موبایل معتبر وارد نمایید.'
           : isAr
-          ? 'يرجى إدخال عنوان بريد إلكتروني صحيح.'
-          : 'Please enter a valid email address.'
+          ? 'يرجى إدخال بريد إلكتروني أو رقم هاتف صحيح.'
+          : 'Please enter a valid email address or mobile phone number.'
       });
       return;
     }
@@ -320,7 +333,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       if (
         session.user.email &&
         session.user.passwordHash &&
-        session.user.email.toLowerCase() === cleanEmail.toLowerCase() &&
+        session.user.email.toLowerCase() === cleanIdentifier.toLowerCase() &&
         session.user.passwordHash !== cleanPass
       ) {
         setStatusMessage({
@@ -335,14 +348,24 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       }
     }
 
-    // If registering and user entered a referral code, process it now
+    // Lock account currency type permanently at registration/login based on selected country / initial language
+    const effectiveCountry: UserCountryCode =
+      guestMode === 'register'
+        ? country
+        : session.user.country || (language === 'fa' ? 'IR' : country);
+    setLockedAccountCurrency(effectiveCountry === 'IR' || language === 'fa' ? 'toman' : 'usdt');
+
+    // If registering and user entered a referral code, process it now (syncs to cloud)
     if (guestMode === 'register' && registerReferralCode.trim().length >= 3) {
-      submitReferralCodeOrInvite(registerReferralCode.trim(), cleanEmail);
+      submitReferralCodeOrInvite(registerReferralCode.trim(), cleanIdentifier);
     }
 
+    const fallbackName = cleanIdentifier.includes('@')
+      ? cleanIdentifier.split('@')[0]
+      : cleanIdentifier;
     const displayName =
       (!isDefaultGuestName(name) && name.trim()) ||
-      cleanEmail.split('@')[0] ||
+      fallbackName ||
       getLocalizedGuestName(language);
 
     onUpdateSession({
@@ -351,8 +374,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         ...session.user,
         id: `user-${Date.now()}`,
         name: displayName,
-        email: cleanEmail,
-        country,
+        email: cleanIdentifier,
+        country: effectiveCountry,
         passwordHash: cleanPass,
         avatarUrl,
         plan: quota.isPro ? 'VIP Pro' : 'Free'
@@ -375,17 +398,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     e.preventDefault();
     setStatusMessage(null);
 
-    const cleanEmail = email.trim();
+    const cleanIdentifier = normalizeDigits(email.trim());
     const cleanNewPass = newPassword.trim();
 
-    if (!cleanEmail || !cleanEmail.includes('@')) {
+    if (!isValidEmailOrPhone(cleanIdentifier)) {
       setStatusMessage({
         type: 'error',
         text: isFa
-          ? 'لطفاً ایمیل حساب خود را وارد نمایید.'
+          ? 'لطفاً ایمیل یا شماره موبایل حساب خود را وارد نمایید.'
           : isAr
-          ? 'يرجى إدخال البريد الإلكتروني الخاص بحسابك.'
-          : 'Please enter your account email.'
+          ? 'يرجى إدخال البريد الإلكتروني أو رقم الهاتف الخاص بحسابك.'
+          : 'Please enter your account email or mobile number.'
       });
       return;
     }
@@ -407,8 +430,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       isLoggedIn: true,
       user: {
         ...session.user,
-        email: cleanEmail,
-        name: (!isDefaultGuestName(name) && name.trim()) || cleanEmail.split('@')[0],
+        email: cleanIdentifier,
+        name:
+          (!isDefaultGuestName(name) && name.trim()) ||
+          (cleanIdentifier.includes('@') ? cleanIdentifier.split('@')[0] : cleanIdentifier),
         passwordHash: cleanNewPass
       }
     });
@@ -429,16 +454,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
     const cleanName =
       name.trim() || getLocalizedGuestName(language);
-    const cleanEmail = email.trim();
+    const cleanIdentifier = normalizeDigits(email.trim());
 
-    if (!cleanEmail || !cleanEmail.includes('@')) {
+    if (!isValidEmailOrPhone(cleanIdentifier)) {
       setStatusMessage({
         type: 'error',
         text: isFa
-          ? 'لطفاً یک آدرس ایمیل معتبر وارد کنید.'
+          ? 'لطفاً یک آدرس ایمیل یا شماره موبایل معتبر وارد کنید.'
           : isAr
-          ? 'يرجى إدخال بريد إلكتروني صحيح.'
-          : 'Please enter a valid email address.'
+          ? 'يرجى إدخال بريد إلكتروني أو رقم هاتف صحيح.'
+          : 'Please enter a valid email address or mobile number.'
       });
       return;
     }
@@ -449,7 +474,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       user: {
         ...session.user,
         name: cleanName,
-        email: cleanEmail,
+        email: cleanIdentifier,
         country,
         avatarUrl,
         plan: quota.isPro ? 'VIP Pro' : 'Free'
@@ -578,12 +603,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     if (isFa) {
       return (
         <>
-          <option value="IR">🇮🇷 ایران (پرداخت تومانی)</option>
-          <option value="IQ">🇮🇶 عراق (پرداخت با USDT BEP20)</option>
-          <option value="AE">🇦🇪 امارات (پرداخت با USDT BEP20)</option>
-          <option value="SA">🇸🇦 عربستان (پرداخت با USDT BEP20)</option>
-          <option value="GCC">🇰🇼 کشورهای خلیج فارس (پرداخت با USDT BEP20)</option>
-          <option value="INT">🌐 بین‌المللی / خارج از ایران (پرداخت با USDT BEP20)</option>
+          <option value="IR">🇮🇷 ایران (تعرفه تومانی داخل کشور)</option>
+          <option value="IQ">🇮🇶 عراق (کاربران خارج از کشور)</option>
+          <option value="AE">🇦🇪 امارات (کاربران خارج از کشور)</option>
+          <option value="SA">🇸🇦 عربستان (کاربران خارج از کشور)</option>
+          <option value="GCC">🇰🇼 کشورهای خلیج فارس</option>
+          <option value="INT">🌐 بین‌المللی / خارج از ایران</option>
         </>
       );
     }
@@ -602,7 +627,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/85 backdrop-blur-md animate-fade-in overflow-y-auto">
       <div className="relative w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 card-3d overflow-hidden my-auto">
-        {/* Prominent Language Switcher Bar at Top of Auth Screen */}
+        {/* Prominent Language Switcher Bar at Top of Auth Screen: English 🇬🇧 | العربية 🇮🇶 | فارسی 🇮🇷 */}
         <div className="px-4 py-2.5 bg-slate-900 text-white border-b border-slate-800 flex items-center justify-between gap-2">
           <div className="flex items-center gap-1.5 text-[11px] font-black text-indigo-300 shrink-0">
             <Globe className="w-3.5 h-3.5 text-amber-400 shrink-0" />
@@ -610,17 +635,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               {isFa ? 'انتخاب زبان:' : isAr ? 'اختر اللغة:' : 'Language:'}
             </span>
           </div>
-          <div className="grid grid-cols-3 gap-1.5 flex-1 max-w-[270px]">
+          <div className="grid grid-cols-3 gap-1.5 flex-1 max-w-[270px]" dir="ltr">
             <button
               type="button"
-              onClick={() => handleLanguageSwitch('fa')}
+              onClick={() => handleLanguageSwitch('en')}
               className={`py-1.5 px-2 rounded-xl text-[11px] font-black transition-all cursor-pointer ${
-                language === 'fa'
+                language === 'en'
                   ? 'bg-indigo-600 text-white shadow-md shadow-indigo-500/30 ring-1 ring-indigo-400'
                   : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
               }`}
             >
-              فارسی 🇮🇷
+              English 🇬🇧
             </button>
             <button
               type="button"
@@ -635,14 +660,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => handleLanguageSwitch('en')}
+              onClick={() => handleLanguageSwitch('fa')}
               className={`py-1.5 px-2 rounded-xl text-[11px] font-black transition-all cursor-pointer ${
-                language === 'en'
+                language === 'fa'
                   ? 'bg-indigo-600 text-white shadow-md shadow-indigo-500/30 ring-1 ring-indigo-400'
                   : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
               }`}
             >
-              English 🇬🇧
+              فارسی 🇮🇷
             </button>
           </div>
         </div>
@@ -693,10 +718,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     ? 'إدارة الحساب والصورة والعملات وحالة VIP'
                     : 'Manage profile, photo, coins & VIP status'
                   : isFa
-                  ? 'با ایمیل و رمز عبور وارد شوید یا به عنوان مهمان ادامه دهید'
+                  ? 'ثبت‌نام و ورود آنی با ایمیل یا شماره موبایل (بدون نیاز به سرویس گوگل)'
                   : isAr
-                  ? 'سجّل الدخول بالبريد وكلمة المرور أو ادخل كزائر'
-                  : 'Sign in with email & password or continue as guest'}
+                  ? 'سجّل الدخول بالبريد الإلكتروني أو رقم الهاتف فوراً'
+                  : 'Fast sign in with Email or Mobile Number'}
               </p>
             </div>
           </div>
@@ -781,20 +806,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <div>
                     <label className="block text-[11px] font-black text-slate-600 dark:text-slate-300 mb-1">
                       {isFa
-                        ? 'آدرس ایمیل ثبت‌شده:'
+                        ? 'ایمیل یا شماره موبایل ثبت‌شده:'
                         : isAr
-                        ? 'البريد الإلكتروني المسجل:'
-                        : 'Registered Email Address:'}
+                        ? 'البريد الإلكتروني أو رقم الهاتف المسجل:'
+                        : 'Registered Email or Mobile Number:'}
                     </label>
                     <div className="relative">
                       <Mail className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                       <input
-                        type="email"
+                        type="text"
                         dir="ltr"
                         required
                         value={email}
                         onChange={(e) => setEmail(e.target.value)}
-                        placeholder="email@example.com"
+                        placeholder={isFa ? '0912... / email@example.com' : 'email@example.com / +98...'}
                         className="w-full pr-9 pl-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 input-3d"
                       />
                     </div>
@@ -859,7 +884,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                           <Globe className="w-3.5 h-3.5 shrink-0" />
                           <span>
                             {isFa
-                              ? 'کشور / ملیت (نوع پرداخت):'
+                              ? 'کشور / منطقه کاربری:'
                               : isAr
                               ? 'البلد / الجنسية (طريقة الدفع):'
                               : 'Country / Region:'}
@@ -879,20 +904,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <div>
                     <label className="block text-[11px] font-black text-slate-600 dark:text-slate-300 mb-1">
                       {isFa
-                        ? 'ایمیل (اجباری برای دسترسی دانلود):'
+                        ? 'ایمیل یا شماره موبایل (برای فعال‌سازی دانلود):'
                         : isAr
-                        ? 'البريد الإلكتروني (مطلوب للتحميل):'
-                        : 'Email Address (Required):'}
+                        ? 'البريد الإلكتروني أو رقم الهاتف (مطلوب للتحميل):'
+                        : 'Email or Mobile Number (Required):'}
                     </label>
                     <div className="relative">
                       <Mail className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                       <input
-                        type="email"
+                        type="text"
                         dir="ltr"
                         required
                         value={email}
                         onChange={(e) => setEmail(e.target.value)}
-                        placeholder="email@example.com"
+                        placeholder={isFa ? '09123456789 یا email@example.com' : 'email@example.com or +98912...'}
                         className="w-full pr-9 pl-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 input-3d"
                       />
                     </div>
@@ -1189,16 +1214,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
                   <div>
                     <label className="block text-[11px] font-black text-slate-600 dark:text-slate-300 mb-1">
-                      {isFa ? 'آدرس ایمیل:' : isAr ? 'البريد الإلكتروني:' : 'Email Address:'}
+                      {isFa ? 'ایمیل یا شماره موبایل:' : isAr ? 'البريد الإلكتروني أو الهاتف:' : 'Email or Mobile Number:'}
                     </label>
                     <div className="relative">
                       <Mail className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                       <input
-                        type="email"
+                        type="text"
                         dir="ltr"
                         value={email}
                         onChange={(e) => setEmail(e.target.value)}
-                        placeholder="email@example.com"
+                        placeholder="0912... / email@example.com"
                         className="w-full pr-9 pl-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 input-3d"
                       />
                     </div>
@@ -1207,7 +1232,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <div>
                     <label className="block text-[11px] font-black text-indigo-600 dark:text-indigo-300 mb-1">
                       {isFa
-                        ? 'کشور / ملیت (تنظیم خودکار تعرفه تومانی یا دلاری USDT):'
+                        ? 'کشور / منطقه کاربری:'
                         : isAr
                         ? 'البلد / الجنسية (طريقة الدفع):'
                         : 'Country / Payment Region:'}

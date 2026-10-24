@@ -67,6 +67,48 @@ export function detectPlatform(url: string): PlatformId {
   return 'generic';
 }
 
+/**
+ * Checks whether a URL belongs to a supported video/music platform or is a direct media file link.
+ * Used to block unsupported general websites with the «این پلتفرم پشتیبانی نمی‌شود» warning.
+ */
+export function isSupportedMediaUrl(url: string): boolean {
+  if (!isValidHttpUrl(url)) return false;
+  const lower = url.toLowerCase().trim();
+
+  if (detectPlatform(lower) !== 'generic') return true;
+
+  if (
+    /\.(mp4|mp3|m4a|webm|mkv|mov|wav|ogg|aac|flac|m3u8)(\?.*|#.*)?$/i.test(lower)
+  ) {
+    return true;
+  }
+
+  const extraSupportedHosts = [
+    'reddit.com',
+    'redd.it',
+    'dailymotion.com',
+    'dai.ly',
+    'twitch.tv',
+    'bilibili.com',
+    'rumble.com',
+    'threads.net',
+    'snapchat.com',
+    't.me',
+    'telegram.me',
+    'linkedin.com',
+    'namasha.com',
+    'tamasha.com',
+    'telewebion.com',
+    'cdninstagram.com',
+    'fbcdn.net',
+    'tiktokcdn.com',
+    'googlevideo.com',
+    'aparat.com'
+  ];
+
+  return extraSupportedHosts.some((host) => lower.includes(host));
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
   const k = 1024;

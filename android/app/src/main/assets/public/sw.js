@@ -1,1 +1,167 @@
-if(!self.define){let e,s={};const n=(n,i)=>(n=new URL(n+".js",i).href,s[n]||new Promise(s=>{if("document"in self){const e=document.createElement("script");e.src=n,e.onload=s,document.head.appendChild(e)}else e=n,importScripts(n),s()}).then(()=>{let e=s[n];if(!e)throw new Error(`Module ${n} didn’t register its module`);return e}));self.define=(i,c)=>{const o=e||("document"in self?document.currentScript.src:"")||location.href;if(s[o])return;let a={};const r=e=>n(e,o),t={module:{uri:o},exports:a,require:r};s[o]=Promise.all(i.map(e=>t[e]||r(e))).then(e=>(c(...e),a))}}define(["./workbox-835c8c05"],function(e){"use strict";self.skipWaiting(),e.clientsClaim(),e.precacheAndRoute([{url:"pwa-maskable-512x512.png",revision:"cd83af74b1ff1742fa44ad94e4609e4d"},{url:"pwa-512x512.png",revision:"9ce8e2feda1f91f26a2b13c27b82f661"},{url:"pwa-192x192.png",revision:"764d745368138183785c771cefe7ce43"},{url:"index.html",revision:"b3e078c5808b8e36c6e2d6a6679f1ba0"},{url:"icon.svg",revision:"159d4ccc9c66646fd7b8470e39389b9e"},{url:"favicon.ico",revision:"663e57c4a0446a7579b29f60c8a34039"},{url:"apple-touch-icon.png",revision:"2171737bb54a6fdbcfffe6bae84ad67a"},{url:"assets/workbox-window.prod.es5-Bd17z0YL.js",revision:null},{url:"assets/web-g128oFSC.js",revision:null},{url:"assets/web-D9WTqOL6.js",revision:null},{url:"assets/index-HQK8htNs.css",revision:null},{url:"assets/index-BdPGh3RM.js",revision:null},{url:"apple-touch-icon.png",revision:"2171737bb54a6fdbcfffe6bae84ad67a"},{url:"favicon.ico",revision:"663e57c4a0446a7579b29f60c8a34039"},{url:"icon.svg",revision:"159d4ccc9c66646fd7b8470e39389b9e"},{url:"pwa-192x192.png",revision:"764d745368138183785c771cefe7ce43"},{url:"pwa-512x512.png",revision:"9ce8e2feda1f91f26a2b13c27b82f661"},{url:"pwa-maskable-512x512.png",revision:"cd83af74b1ff1742fa44ad94e4609e4d"},{url:"manifest.webmanifest",revision:"4ef9de26c72824fdfb96795100360fa2"}],{}),e.cleanupOutdatedCaches(),e.registerRoute(new e.NavigationRoute(e.createHandlerBoundToURL("index.html"))),e.registerRoute(/^https:\/\/fonts\.googleapis\.com\/.*/i,new e.CacheFirst({cacheName:"google-fonts-cache",plugins:[new e.ExpirationPlugin({maxEntries:10,maxAgeSeconds:31536e3}),new e.CacheableResponsePlugin({statuses:[0,200]})]}),"GET"),e.registerRoute(/^https:\/\/fonts\.gstatic\.com\/.*/i,new e.CacheFirst({cacheName:"gstatic-fonts-cache",plugins:[new e.ExpirationPlugin({maxEntries:10,maxAgeSeconds:31536e3}),new e.CacheableResponsePlugin({statuses:[0,200]})]}),"GET"),e.registerRoute(/^https:\/\/cdn\.jsdelivr\.net\/.*/i,new e.CacheFirst({cacheName:"jsdelivr-fonts-cache",plugins:[new e.ExpirationPlugin({maxEntries:10,maxAgeSeconds:31536e3}),new e.CacheableResponsePlugin({statuses:[0,200]})]}),"GET")});
+/**
+ * Copyright 2018 Google Inc. All Rights Reserved.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// If the loader is already loaded, just stop.
+if (!self.define) {
+  let registry = {};
+
+  // Used for `eval` and `importScripts` where we can't get script URL by other means.
+  // In both cases, it's safe to use a global var because those functions are synchronous.
+  let nextDefineUri;
+
+  const singleRequire = (uri, parentUri) => {
+    uri = new URL(uri + ".js", parentUri).href;
+    return registry[uri] || (
+      
+        new Promise(resolve => {
+          if ("document" in self) {
+            const script = document.createElement("script");
+            script.src = uri;
+            script.onload = resolve;
+            document.head.appendChild(script);
+          } else {
+            nextDefineUri = uri;
+            importScripts(uri);
+            resolve();
+          }
+        })
+      
+      .then(() => {
+        let promise = registry[uri];
+        if (!promise) {
+          throw new Error(`Module ${uri} didn’t register its module`);
+        }
+        return promise;
+      })
+    );
+  };
+
+  self.define = (depsNames, factory) => {
+    const uri = nextDefineUri || ("document" in self ? document.currentScript.src : "") || location.href;
+    if (registry[uri]) {
+      // Module is already loading or loaded.
+      return;
+    }
+    let exports = {};
+    const require = depUri => singleRequire(depUri, uri);
+    const specialDeps = {
+      module: { uri },
+      exports,
+      require
+    };
+    registry[uri] = Promise.all(depsNames.map(
+      depName => specialDeps[depName] || require(depName)
+    )).then(deps => {
+      factory(...deps);
+      return exports;
+    });
+  };
+}
+define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
+
+  self.skipWaiting();
+  workbox.clientsClaim();
+  /**
+   * The precacheAndRoute() method efficiently caches and responds to
+   * requests for URLs in the manifest.
+   * See https://goo.gl/S9QRab
+   */
+  workbox.precacheAndRoute([{
+    "url": "pwa-maskable-512x512.png",
+    "revision": "cd83af74b1ff1742fa44ad94e4609e4d"
+  }, {
+    "url": "pwa-512x512.png",
+    "revision": "9ce8e2feda1f91f26a2b13c27b82f661"
+  }, {
+    "url": "pwa-192x192.png",
+    "revision": "764d745368138183785c771cefe7ce43"
+  }, {
+    "url": "index.html",
+    "revision": "5c3de0ea8c8c682882309c4233e39a8b"
+  }, {
+    "url": "icon.svg",
+    "revision": "159d4ccc9c66646fd7b8470e39389b9e"
+  }, {
+    "url": "favicon.ico",
+    "revision": "663e57c4a0446a7579b29f60c8a34039"
+  }, {
+    "url": "apple-touch-icon.png",
+    "revision": "2171737bb54a6fdbcfffe6bae84ad67a"
+  }, {
+    "url": "assets/workbox-window.prod.es5-Bd17z0YL.js",
+    "revision": null
+  }, {
+    "url": "assets/web-uaaNjUtH.js",
+    "revision": null
+  }, {
+    "url": "assets/web-B2E37974.js",
+    "revision": null
+  }, {
+    "url": "assets/index-Cxj_GXKc.css",
+    "revision": null
+  }, {
+    "url": "assets/index-BZsTb4ib.js",
+    "revision": null
+  }, {
+    "url": "apple-touch-icon.png",
+    "revision": "2171737bb54a6fdbcfffe6bae84ad67a"
+  }, {
+    "url": "favicon.ico",
+    "revision": "663e57c4a0446a7579b29f60c8a34039"
+  }, {
+    "url": "icon.svg",
+    "revision": "159d4ccc9c66646fd7b8470e39389b9e"
+  }, {
+    "url": "pwa-192x192.png",
+    "revision": "764d745368138183785c771cefe7ce43"
+  }, {
+    "url": "pwa-512x512.png",
+    "revision": "9ce8e2feda1f91f26a2b13c27b82f661"
+  }, {
+    "url": "pwa-maskable-512x512.png",
+    "revision": "cd83af74b1ff1742fa44ad94e4609e4d"
+  }, {
+    "url": "manifest.webmanifest",
+    "revision": "4ef9de26c72824fdfb96795100360fa2"
+  }], {});
+  workbox.cleanupOutdatedCaches();
+  workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("index.html")));
+  workbox.registerRoute(/^https:\/\/fonts\.googleapis\.com\/.*/i, new workbox.CacheFirst({
+    "cacheName": "google-fonts-cache",
+    plugins: [new workbox.ExpirationPlugin({
+      maxEntries: 10,
+      maxAgeSeconds: 31536000
+    }), new workbox.CacheableResponsePlugin({
+      statuses: [0, 200]
+    })]
+  }), 'GET');
+  workbox.registerRoute(/^https:\/\/fonts\.gstatic\.com\/.*/i, new workbox.CacheFirst({
+    "cacheName": "gstatic-fonts-cache",
+    plugins: [new workbox.ExpirationPlugin({
+      maxEntries: 10,
+      maxAgeSeconds: 31536000
+    }), new workbox.CacheableResponsePlugin({
+      statuses: [0, 200]
+    })]
+  }), 'GET');
+  workbox.registerRoute(/^https:\/\/cdn\.jsdelivr\.net\/.*/i, new workbox.CacheFirst({
+    "cacheName": "jsdelivr-fonts-cache",
+    plugins: [new workbox.ExpirationPlugin({
+      maxEntries: 10,
+      maxAgeSeconds: 31536000
+    }), new workbox.CacheableResponsePlugin({
+      statuses: [0, 200]
+    })]
+  }), 'GET');
+
+}));

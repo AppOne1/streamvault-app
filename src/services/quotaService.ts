@@ -380,8 +380,8 @@ export function claimRewardAction(action: 'daily_checkin' | 'watch_ad' | 'share_
 }
 
 /**
- * Generates a truly random, unguessable cryptographic referral code for each user (e.g., OD-8K4X9P2M)
- * Stored persistently in localStorage so it never leaks or derives from predictable user info.
+ * Generates a 100% permanent, non-changeable personal referral code bound deterministically
+ * to the device's permanent Hardware ID (e.g., OD-8K4X9P2M).
  */
 export function getMyReferralCode(): string {
   try {
@@ -389,18 +389,22 @@ export function getMyReferralCode(): string {
     if (existing && /^OD-[A-Z0-9]{8}$/.test(existing)) {
       return existing;
     }
+    const hwid = getOrCreateDeviceId();
     const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    const rand = new Uint32Array(8);
+    const seedStr = `OD_REF_PERMANENT_V1::${hwid}::APPONE_LOCK`;
+    let h1 = 0x811c9dc5;
+    let h2 = 0x1b873593;
+    for (let i = 0; i < seedStr.length; i++) {
+      const c = seedStr.charCodeAt(i);
+      h1 ^= c;
+      h1 = Math.imul(h1, 0x01000193);
+      h2 ^= c + i * 29;
+      h2 = Math.imul(h2, 0x85ebca6b);
+    }
     let token = '';
-    if (typeof window !== 'undefined' && window.crypto && window.crypto.getRandomValues) {
-      window.crypto.getRandomValues(rand);
-      for (let i = 0; i < 8; i++) {
-        token += alphabet[rand[i] % alphabet.length];
-      }
-    } else {
-      for (let i = 0; i < 8; i++) {
-        token += alphabet[Math.floor(Math.random() * alphabet.length)];
-      }
+    for (let i = 0; i < 8; i++) {
+      const mixed = Math.abs(Math.imul(i % 2 === 0 ? h1 : h2, (i + 3) * 41) ^ (h1 >>> (i % 5)));
+      token += alphabet[mixed % alphabet.length];
     }
     const generated = `OD-${token}`;
     localStorage.setItem(MY_RANDOM_REF_CODE_KEY, generated);
@@ -506,14 +510,27 @@ export function submitReferralCodeOrInvite(
     // ignore
   }
 
-  if (unlockedVipRequest && newCount % 3 === 0) {
+  // Cloud Sync: Register referral usage on backend so code owner's invite count increments & syncs
+  if (typeof window !== 'undefined' && typeof fetch === 'function') {
+    fetch('/api/referral/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ownerCode: cleanedCode,
+        friendIdentifier: friendIdentifier || '',
+        refereeHardwareId: getOrCreateDeviceId()
+      })
+    }).catch(() => {});
+  }
+
+  if (unlockedVipRequest) {
     activateProPlan('monthly_referral');
     playVipUnlockSound();
     triggerCoinAnimation(
       0,
       'vip',
-      '🎉 ۳ دعوت موفق تکمیل شد! اشتراک ۱ ماهه VIP فعال گردید',
-      '🎉 3 Referrals Completed! 1-Month VIP Activated'
+      '🎉 تبریک! با ثبت ۳ زیرمجموعه موفق، اشتراک VIP یک‌ماهه (۳۰ روزه) شما به طور خودکار فعال شد!',
+      '🎉 Congratulations! 3 Referrals Completed — 1-Month VIP Activated Automatically!'
     );
   }
 
@@ -526,8 +543,8 @@ export function submitReferralCodeOrInvite(
       referralInfo: updatedInfo,
       unlockedVipRequest: true,
       coinsAwarded: 0,
-      messageFa: '🎉 تبریک! با تکمیل ۳ دعوت موفق، اشتراک ۱ ماهه VIP فعال گردید!',
-      messageEn: '🎉 Congratulations! 3 referrals completed and 1-Month VIP activated!'
+      messageFa: '🎉 تبریک! با تکمیل ۳ دعوت موفق، اشتراک ۱ ماهه VIP (۳۰ روزه) به طور خودکار فعال گردید!',
+      messageEn: '🎉 Congratulations! 3 referrals completed and 1-Month VIP activated automatically!'
     };
   }
 
@@ -537,8 +554,77 @@ export function submitReferralCodeOrInvite(
     referralInfo: updatedInfo,
     unlockedVipRequest: false,
     coinsAwarded: 0,
-    messageFa: `کد معرف هنگام ثبت‌نام ثبت شد (${newCount} از ۳ دعوت موفق — ${remainingToVip} دعوت دیگر تا فعال‌سازی اشتراک ۱ ماهه VIP).`,
-    messageEn: `Referral recorded (${newCount}/3 invites — ${remainingToVip} more for 1-Month VIP).`
+    messageFa: `کد معرف هنگام ثبت‌نام در ساختار ابری ثبت شد (${newCount} از ۳ دعوت موفق — ${remainingToVip} دعوت دیگر تا فعال‌سازی خودکار اشتراک ۱ ماهه VIP).`,
+    messageEn: `Referral synced to cloud (${newCount}/3 invites — ${remainingToVip} more for automatic 1-Month VIP).`
+  };
+}
+
+/**
+ * Syncs the current user's referral invite list from the Cloud Sync API (/api/referral/sync).
+ * Automatically activates 1-Month (30-Day) VIP as soon as 3 successful referrals are reached!
+ */
+export async function syncReferralFromCloud(): Promise<{
+  referralInfo: ReferralInfo;
+  autoActivatedVip: boolean;
+}> {
+  const myCode = getMyReferralCode();
+  const current = getReferralInfo();
+  try {
+    const res = await fetch(`/api/referral/sync?code=${encodeURIComponent(myCode)}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.success && Array.isArray(data.invitedUsers)) {
+        const mergedMap = new Map<string, InvitedReferralRecord>();
+        for (const item of current.invitedUsers) {
+          mergedMap.set(item.codeOrIdentifier, item);
+        }
+        for (const cloudItem of data.invitedUsers) {
+          if (cloudItem && cloudItem.codeOrIdentifier && !mergedMap.has(cloudItem.codeOrIdentifier)) {
+            mergedMap.set(cloudItem.codeOrIdentifier, {
+              id: cloudItem.id || `cloud-${Date.now()}`,
+              codeOrIdentifier: cloudItem.codeOrIdentifier,
+              timestamp: cloudItem.timestamp || Date.now()
+            });
+          }
+        }
+        const mergedList = Array.from(mergedMap.values());
+        const prevCount = current.invitedUsers.length;
+        if (mergedList.length !== prevCount) {
+          localStorage.setItem(
+            REFERRAL_STORAGE_KEY,
+            JSON.stringify({
+              invitedUsers: mergedList,
+              appliedReferralCode: current.appliedReferralCode
+            })
+          );
+        }
+
+        const quota = getDailyQuota();
+        let autoActivatedVip = false;
+        if (mergedList.length >= 3 && !quota.isPro) {
+          activateProPlan('monthly_referral');
+          playVipUnlockSound();
+          triggerCoinAnimation(
+            0,
+            'vip',
+            '🎉 تبریک! ۳ زیرمجموعه با کد معرف شما ثبت شد و اشتراک VIP یک‌ماهه (۳۰ روزه) فعال گردید!',
+            '🎉 Congratulations! 3 Referrals Reached — 1-Month VIP Activated Automatically!'
+          );
+          autoActivatedVip = true;
+        }
+        notifySubscribers();
+        return {
+          referralInfo: getReferralInfo(),
+          autoActivatedVip
+        };
+      }
+    }
+  } catch {
+    // ignore offline/network errors
+  }
+  return {
+    referralInfo: current,
+    autoActivatedVip: false
   };
 }
 
@@ -1154,7 +1240,6 @@ export function resetUserAccountAndQuotaToGuest(): void {
     localStorage.removeItem(PRO_STORAGE_KEY);
     localStorage.removeItem(REWARD_LOG_STORAGE_KEY);
     localStorage.removeItem(REFERRAL_STORAGE_KEY);
-    localStorage.removeItem(MY_RANDOM_REF_CODE_KEY);
     localStorage.removeItem(VIP_REQUEST_STORAGE_KEY);
     localStorage.setItem(COINS_STORAGE_KEY, '0');
   } catch {

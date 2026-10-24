@@ -7,7 +7,12 @@ import {
   UserSession
 } from './types';
 import { getTranslation } from './i18n/translations';
-import { extractUrlFromText, isValidHttpUrl, parseMediaUrl } from './services/platformDetector';
+import {
+  extractUrlFromText,
+  isSupportedMediaUrl,
+  isValidHttpUrl,
+  parseMediaUrl
+} from './services/platformDetector';
 import { downloadEngine } from './services/downloadEngine';
 import {
   clearAllIDBBlobs,
@@ -37,9 +42,14 @@ import { IOSInstallGuide } from './components/IOSInstallGuide';
 import { OfflineBanner } from './components/OfflineBanner';
 import { TrendingShowcase } from './components/TrendingShowcase';
 import { PermissionsDisclosureModal, PERMISSIONS_DISCLOSURE_STORAGE_KEY } from './components/PermissionsDisclosureModal';
+import { InAppUpdateModal, CURRENT_APP_VERSION } from './components/InAppUpdateModal';
 import { CoinRewardAnimation } from './components/CoinRewardAnimation';
 import { ODLogo } from './components/ODLogo';
-import { shareAppToFriends } from './services/deviceService';
+import {
+  getOrCreateDeviceId,
+  restoreHardwareIdFromIndexedDB,
+  shareAppToFriends
+} from './services/deviceService';
 import {
   canDownload,
   claimRewardAction,
@@ -53,6 +63,7 @@ import {
   QuotaInfo,
   resetUserAccountAndQuotaToGuest,
   subscribeQuotaAndCoins,
+  syncReferralFromCloud,
   verifyAppLockPinOrKeyword
 } from './services/quotaService';
 import { Download, Film, Settings, Sparkles, AlertCircle, Loader2, CheckCircle, Crown, Lock, KeyRound } from 'lucide-react';
@@ -63,7 +74,11 @@ interface ToastNotice {
   message: string;
 }
 
+const UPDATE_DISMISSED_SESSION_KEY = 'onedownload_update_dismissed_session_v1';
+
 export default function App() {
+  // 1.5-second sleek dark 3D Splash Screen on startup
+  const [isSplashVisible, setIsSplashVisible] = useState<boolean>(true);
   const [settings, setSettings] = useState<AppSettings>(() => loadSettingsFromStorage());
   const [userSession, setUserSession] = useState<UserSession>(() => loadSessionFromStorage());
   const [tasks, setTasks] = useState<DownloadTask[]>(() => loadTasksFromStorage());
@@ -85,6 +100,8 @@ export default function App() {
   // Persistent Login: Skip Auth screen on startup if user is already logged in (od_user_session)
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(() => !loadSessionFromStorage().isLoggedIn);
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState<boolean>(false);
+  const [isUpdateModalOpen, setIsUpdateModalOpen] = useState<boolean>(false);
+  const [latestServerVersion, setLatestServerVersion] = useState<string>('2.7.0');
   // First-Launch Privacy & Permission Notice Modal: Shown automatically on first launch until accepted
   const [isPermissionsModalOpen, setIsPermissionsModalOpen] = useState<boolean>(() => {
     try {
@@ -108,6 +125,54 @@ export default function App() {
   const isFa = settings.language === 'fa';
   const isAr = settings.language === 'ar';
   const isRtl = isFa || isAr;
+
+  // 1.5s Splash Screen Timer + Permanent Hardware ID Restore + Cloud Referral Sync + Version Check
+  useEffect(() => {
+    const splashTimer = window.setTimeout(() => {
+      setIsSplashVisible(false);
+    }, 1500);
+
+    restoreHardwareIdFromIndexedDB().then(() => {
+      getOrCreateDeviceId();
+      syncReferralFromCloud().then((res) => {
+        setQuotaInfo(getDailyQuota());
+        if (res.autoActivatedVip) {
+          setToastNotice({
+            type: 'success',
+            title: isFa
+              ? '🎉 تبریک! ۱ ماه اشتراک VIP رایگان فعال شد!'
+              : isAr
+              ? '🎉 مبروك! تم تفعيل اشتراك VIP لمدة شهر مجاناً!'
+              : '🎉 Congrats! 1-Month Free VIP Activated!',
+            message: isFa
+              ? '۳ دعوت موفق با کد معرف شما ثبت شد و اشتراک VIP یک‌ماهه به صورت خودکار فعال گردید.'
+              : isAr
+              ? 'تم تسجيل ٣ دعوات ناجحة بكود الإحالة الخاص بك وتفعيل VIP تلقائياً.'
+              : '3 successful referrals reached! Your 1-Month VIP subscription is now active.'
+          });
+          setTimeout(() => setToastNotice(null), 6500);
+        }
+      });
+    });
+
+    // Check server version for In-App Update popup
+    fetch('/api/app/version')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data && data.latestVersion && data.latestVersion !== CURRENT_APP_VERSION) {
+          setLatestServerVersion(data.latestVersion);
+          const dismissed = sessionStorage.getItem(UPDATE_DISMISSED_SESSION_KEY) === 'true';
+          if (!dismissed) {
+            setTimeout(() => setIsUpdateModalOpen(true), 2200);
+          }
+        }
+      })
+      .catch(() => {
+        // Ignore offline version check
+      });
+
+    return () => window.clearTimeout(splashTimer);
+  }, []);
 
   // Restore session from IndexedDB on mount if localStorage was cleared
   useEffect(() => {
@@ -297,7 +362,7 @@ export default function App() {
   };
 
   /**
-   * Strict URL Validation: Rejects plain text, symbols, or non-URL input
+   * Strict URL Validation: Rejects plain text, symbols, or unsupported platforms
    * and shows a clear warning without opening MediaResultModal.
    */
   const handleAnalyze = async (targetUrl?: string) => {
@@ -317,6 +382,43 @@ export default function App() {
     }
 
     const cleanUrl = extractUrlFromText(rawCandidate) || rawCandidate;
+
+    if (!isSupportedMediaUrl(cleanUrl)) {
+      setToastNotice({
+        type: 'error',
+        title: isFa
+          ? 'این پلتفرم پشتیبانی نمی‌شود'
+          : isAr
+          ? 'هذه المنصة غير مدعومة'
+          : 'This platform is not supported',
+        message: isFa
+          ? 'لطفاً لینک ویدیو یا موزیک از پلتفرم‌های مجاز (اینستاگرام، یوتیوب، آپارات، تیک‌تاک و...) وارد نمایید.'
+          : isAr
+          ? 'يرجى إدخال رابط فيديو أو موسيقى من المنصات المدعومة.'
+          : 'Please enter a video or audio link from supported platforms (YouTube, Instagram, TikTok, Aparat, etc.).'
+      });
+      setTimeout(() => setToastNotice(null), 4500);
+      return;
+    }
+
+    if (!navigator.onLine) {
+      setToastNotice({
+        type: 'error',
+        title: isFa
+          ? 'خطای اتصال اینترنت یا فیلترشکن (VPN)'
+          : isAr
+          ? 'خطأ في الاتصال بالإنترنت أو VPN'
+          : 'Network or VPN Connection Error',
+        message: isFa
+          ? 'اینترنت قطع است؛ لطفاً اتصال شبکه یا وضعیت فیلترشکن (VPN) خود را بررسی کنید.'
+          : isAr
+          ? 'يرجى التحقق من اتصال الإنترنت أو تفعيل VPN والمحاولة مجدداً.'
+          : 'Please check your internet connection or VPN status and try again.'
+      });
+      setTimeout(() => setToastNotice(null), 4500);
+      return;
+    }
+
     // Automatically clear the URL input box immediately so it is ready for the next link
     setInputUrl('');
     setIsAnalyzing(true);
@@ -325,6 +427,20 @@ export default function App() {
       setParsedMedia(media);
     } catch (err) {
       console.error('Failed to parse media URL:', err);
+      setToastNotice({
+        type: 'error',
+        title: isFa
+          ? 'کندی شبکه یا عدم اتصال VPN'
+          : isAr
+          ? 'بطء الشبكة أو عدم اتصال VPN'
+          : 'Slow Network or VPN Disconnected',
+        message: isFa
+          ? 'پاسخی از سرور دریافت نشد؛ برای پلتفرم‌های خارجی (یوتیوب/اینستاگرام) وضعیت فیلترشکن خود را بررسی نمایید.'
+          : isAr
+          ? 'تعذر الوصول للخادم؛ يرجى التحقق من سرعة الإنترنت أو VPN.'
+          : 'Could not reach media server; please check your internet speed or VPN connection.'
+      });
+      setTimeout(() => setToastNotice(null), 5000);
     } finally {
       setIsAnalyzing(false);
     }
@@ -626,7 +742,15 @@ export default function App() {
     tasks.forEach((t) => downloadEngine.cancelTask(t));
     await clearAllIDBBlobs();
     setTasks([]);
+    const permanentHwId = getOrCreateDeviceId();
+    const permanentRefCode = getMyReferralCode();
     localStorage.clear();
+    try {
+      localStorage.setItem('onedownload_hardware_device_id_v1', permanentHwId);
+      localStorage.setItem('onedownload_my_random_ref_code_v1', permanentRefCode);
+    } catch {
+      // ignore
+    }
     setSettings(DEFAULT_SETTINGS);
   };
 
@@ -672,6 +796,36 @@ export default function App() {
     (t) => t.status === 'downloading' || t.status === 'queued'
   ).length;
   const completedLibraryCount = tasks.filter((t) => t.status === 'completed').length;
+
+  // 1.5-Second Sleek Dark 3D Splash Screen on App Startup
+  if (isSplashVisible) {
+    return (
+      <div className="min-h-screen w-full flex flex-col items-center justify-center p-6 bg-slate-950 text-white relative overflow-hidden">
+        <div className="absolute -top-24 -left-24 w-72 h-72 rounded-full bg-indigo-600/20 blur-3xl pointer-events-none" />
+        <div className="absolute -bottom-24 -right-24 w-72 h-72 rounded-full bg-violet-600/20 blur-3xl pointer-events-none" />
+        <div className="relative z-10 flex flex-col items-center text-center space-y-5 animate-fade-in">
+          <div className="p-4 rounded-3xl bg-slate-900/90 border border-indigo-500/40 shadow-2xl shadow-indigo-500/25 card-3d animate-bounce-subtle">
+            <ODLogo className="w-20 h-20 sm:w-24 sm:h-24" />
+          </div>
+          <div className="space-y-1.5">
+            <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-white text-3d" dir="ltr">
+              OneDownload
+            </h1>
+            <p className="text-xs sm:text-sm font-extrabold text-indigo-300">
+              {isFa
+                ? 'وان دانلود • دانلودر فوق‌سریع ویدیو و موزیک 4K'
+                : isAr
+                ? 'وان داونلود • أسرع برنامج لتحميل الفيديو والموسيقى 4K'
+                : 'Ultra-Fast 4K Video & Music Downloader'}
+            </p>
+          </div>
+          <div className="w-44 h-1.5 rounded-full bg-slate-800 overflow-hidden border border-slate-700">
+            <div className="h-full w-full bg-gradient-to-r from-indigo-500 via-violet-500 to-amber-400 animate-pulse" />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Startup App Security Lock Screen (when enabled in Settings)
   if (isAppLocked) {
@@ -820,10 +974,10 @@ export default function App() {
                 <span>
                   {quotaInfo.isPro
                     ? isFa
-                      ? 'VIP Pro نامحدود'
+                      ? 'VIP فعال (دسترسی نامحدود)'
                       : isAr
-                      ? 'VIP غير محدود'
-                      : 'VIP Unlimited'
+                      ? 'VIP نشط (غير محدود)'
+                      : 'VIP Active (Unlimited)'
                     : isFa
                     ? `${quotaInfo.remainingToday} از ${quotaInfo.maxDaily} دانلود`
                     : isAr
@@ -915,6 +1069,7 @@ export default function App() {
               onOpenUpgradeModal={() => setIsUpgradeModalOpen(true)}
               onOpenShare={handleDirectShareApp}
               onOpenPermissionsModal={() => setIsPermissionsModalOpen(true)}
+              onOpenUpdateModal={() => setIsUpdateModalOpen(true)}
               onBackToHome={() => setActiveTab('downloader')}
             />
           </div>
@@ -1065,6 +1220,21 @@ export default function App() {
         language={settings.language}
         isOpen={isPermissionsModalOpen}
         onAccept={() => setIsPermissionsModalOpen(false)}
+      />
+
+      <InAppUpdateModal
+        language={settings.language}
+        isOpen={isUpdateModalOpen}
+        currentVersion={CURRENT_APP_VERSION}
+        latestVersion={latestServerVersion}
+        onClose={() => {
+          try {
+            sessionStorage.setItem(UPDATE_DISMISSED_SESSION_KEY, 'true');
+          } catch {
+            // ignore
+          }
+          setIsUpdateModalOpen(false);
+        }}
       />
 
       <CoinRewardAnimation language={settings.language} />

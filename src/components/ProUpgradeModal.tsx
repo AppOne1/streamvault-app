@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { Language, UserCountryCode } from '../types';
 import { getDeviceProfile } from '../services/deviceService';
+import { getLockedAccountCurrency } from '../services/storageService';
 import {
   getCoinsBalance,
   getDailyQuota,
@@ -29,8 +30,10 @@ import {
   redeemCoinsForQuotaOrPro,
   submitOneMonthVipRequest,
   subscribeQuotaAndCoins,
+  syncReferralFromCloud,
   verifyAndActivateVipCode
 } from '../services/quotaService';
+import { SupportChannelsBox } from './SupportChannelsBox';
 
 interface ProUpgradeModalProps {
   language: Language;
@@ -99,7 +102,7 @@ const UsdtQrBox: React.FC<{ address: string }> = ({ address }) => {
       ) : (
         <img
           src={qrUrl}
-          alt="USDT BEP20 QR Code"
+          alt="QR Code"
           className="w-full h-full object-contain rounded-lg"
           onError={() => setImgFailed(true)}
         />
@@ -119,19 +122,25 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
   const isAr = language === 'ar';
   const isRtl = isFa || isAr;
 
-  // STRICT REQUIREMENT: Toman is ONLY available when language === 'fa'!
-  // In Arabic ('ar') and English ('en'), Toman is 100% hidden/removed and ONLY USDT (BEP20) is shown.
-  const showTomanOption = isFa;
-
   const deviceProfile = getDeviceProfile();
   const [quota, setQuota] = useState(() => getDailyQuota());
   const [coinsBalance, setCoinsBalance] = useState(() => getCoinsBalance());
   const [referralInfo, setReferralInfo] = useState(() => getReferralInfo());
   const [, setVipEligibility] = useState(() => getVipEligibilityState());
 
-  const [currencyMode, setCurrencyMode] = useState<'toman' | 'usdt'>(() =>
-    isFa && (!userCountry || userCountry === 'IR') ? 'toman' : 'usdt'
-  );
+  // Determine account currency strictly from registration lock (or Persian/IR fallback for guests).
+  // Even if an Iranian/Toman user switches UI language to English or Arabic, they stay on Toman!
+  // And in Persian ('fa') or Toman account mode, USDT/crypto is 100% hidden.
+  const lockedCurrency = getLockedAccountCurrency();
+  const isTomanAccount =
+    lockedCurrency === 'toman'
+      ? true
+      : lockedCurrency === 'usdt'
+      ? isFa // In Persian UI, always hide USDT for CafeBazaar/Myket compliance
+      : userCountry === 'IR' || isFa;
+
+  const activeCurrency: 'toman' | 'usdt' = isTomanAccount ? 'toman' : 'usdt';
+
   const [selectedPlanKey, setSelectedPlanKey] = useState<'1m' | '3m' | '12m'>('3m');
   const [copiedDeviceId, setCopiedDeviceId] = useState(false);
   const [copiedWallet, setCopiedWallet] = useState(false);
@@ -140,16 +149,6 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
     type: 'success' | 'error' | 'info';
     text: string;
   } | null>(null);
-
-  useEffect(() => {
-    if (!showTomanOption) {
-      setCurrencyMode('usdt');
-    } else if (!userCountry || userCountry === 'IR') {
-      setCurrencyMode('toman');
-    } else {
-      setCurrencyMode('usdt');
-    }
-  }, [showTomanOption, userCountry, isOpen]);
 
   useEffect(() => {
     const unsub = subscribeQuotaAndCoins(() => {
@@ -161,9 +160,26 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
     return () => unsub();
   }, []);
 
-  if (!isOpen) return null;
+  useEffect(() => {
+    if (isOpen) {
+      syncReferralFromCloud().then(({ autoActivatedVip }) => {
+        if (autoActivatedVip) {
+          const updated = getDailyQuota();
+          setQuota(updated);
+          onSuccess(
+            updated,
+            isFa
+              ? '🎉 تبریک! با تکمیل ۳ معرفی موفق، اشتراک VIP یک‌ماهه (۳۰ روزه) شما به طور خودکار فعال شد!'
+              : isAr
+              ? '🎉 تهانينا! تم تفعيل اشتراك VIP لمدة شهر تلقائياً بعد ٣ دعوات ناجحة!'
+              : '🎉 Congratulations! 1-Month VIP activated automatically via 3 referrals!'
+          );
+        }
+      });
+    }
+  }, [isOpen]);
 
-  const activeCurrency: 'toman' | 'usdt' = showTomanOption ? currencyMode : 'usdt';
+  if (!isOpen) return null;
 
   const handleCopyDeviceId = async () => {
     try {
@@ -261,8 +277,10 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
       titleFa: 'اشتراک ۱ ماهه (۳۰ روزه)',
       titleAr: 'اشتراك شهر واحد (٣٠ يوم)',
       titleEn: '1-Month VIP (30 Days)',
-      priceToman: '۴۹,۰۰۰ تومان',
-      priceUsdt: '2 USDT ($2)',
+      priceTomanFa: '۳۹,۰۰۰ تومان',
+      priceTomanAr: '٣٩,٠٠٠ تومان',
+      priceTomanEn: '39,000 Toman',
+      priceUsdt: '2 USDT',
       badgeFa: 'اقتصادی',
       badgeAr: 'أساسي',
       badgeEn: 'Starter'
@@ -272,8 +290,10 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
       titleFa: 'اشتراک ۳ ماهه (۹۰ روزه)',
       titleAr: 'اشتراك ٣ أشهر (٩٠ يوم)',
       titleEn: '3-Month VIP (90 Days)',
-      priceToman: '۱۱۹,۰۰۰ تومان',
-      priceUsdt: '4 USDT ($4)',
+      priceTomanFa: '۷۹,۰۰۰ تومان',
+      priceTomanAr: '٧٩,٠٠٠ تومان',
+      priceTomanEn: '79,000 Toman',
+      priceUsdt: '4 USDT',
       badgeFa: 'پرفروش‌ترین 🔥',
       badgeAr: 'الأكثر طلباً 🔥',
       badgeEn: 'Most Popular 🔥',
@@ -284,13 +304,18 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
       titleFa: 'اشتراک ۱ ساله (۱۲ ماهه)',
       titleAr: 'اشتراك سنة كاملة (١٢ شهر)',
       titleEn: '1-Year VIP (12 Months)',
-      priceToman: '۳۴۹,۰۰۰ تومان',
-      priceUsdt: '10 USDT ($10)',
+      priceTomanFa: '۹۹,۰۰۰ تومان',
+      priceTomanAr: '٩٩,٠٠٠ تومان',
+      priceTomanEn: '99,000 Toman',
+      priceUsdt: '10 USDT',
       badgeFa: 'بالاترین صرفه‌جویی 💎',
       badgeAr: 'أفضل توفير 💎',
       badgeEn: 'Best Value 💎'
     }
   ];
+
+  const getLocalizedTomanPrice = (plan: (typeof plans)[0]) =>
+    isFa ? plan.priceTomanFa : isAr ? plan.priceTomanAr : plan.priceTomanEn;
 
   const selectedPlan = plans.find((p) => p.key === selectedPlanKey) || plans[1];
 
@@ -323,10 +348,10 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
               <p className="text-[11px] text-slate-400 truncate">
                 {quota.isPro
                   ? isFa
-                    ? `${quota.proPlanName || 'اشتراک VIP'} • ${toLocalDigits(quota.remainingProDays || 30, 'fa')} روز باقی‌مانده`
+                    ? `VIP فعال (دسترسی نامحدود) • ${toLocalDigits(quota.remainingProDays || 30, 'fa')} روز باقی‌مانده`
                     : isAr
-                    ? `اشتراك VIP مفعل • ${toLocalDigits(quota.remainingProDays || 30, 'ar')} يوم متبقي`
-                    : `VIP Active • ${quota.remainingProDays || 30} days remaining`
+                    ? `VIP مفعل (وصول غير محدود) • ${toLocalDigits(quota.remainingProDays || 30, 'ar')} يوم متبقي`
+                    : `VIP Active (Unlimited Access) • ${quota.remainingProDays || 30} days remaining`
                   : isFa
                   ? `کاربر عادی • سهمیه رایگان امروز: ${toLocalDigits(quota.remainingToday, 'fa')} از ${toLocalDigits(quota.maxDaily, 'fa')} دانلود`
                   : isAr
@@ -363,7 +388,35 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
             </div>
           )}
 
-          {/* VIP Plans & Payment Gateway Box */}
+          {/* VIP Active Badge Banner when user is already VIP */}
+          {quota.isPro && (
+            <div className="p-3.5 rounded-2xl bg-gradient-to-r from-amber-500/20 via-yellow-500/15 to-emerald-500/20 border border-amber-400/50 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-400 text-slate-950 font-black">
+                  <Crown className="w-5 h-5 fill-slate-950" />
+                </div>
+                <div>
+                  <div className="text-xs sm:text-sm font-black text-amber-300">
+                    {isFa
+                      ? 'VIP فعال (دسترسی نامحدود)'
+                      : isAr
+                      ? 'VIP مفعل (وصول غير محدود)'
+                      : 'VIP Active (Unlimited Access)'}
+                  </div>
+                  <div className="text-[11px] text-slate-300">
+                    {isFa
+                      ? `دانلود نامحدود 4K بدون محدودیت روزانه • ${toLocalDigits(quota.remainingProDays || 30, 'fa')} روز اعتبار باقی‌مانده`
+                      : isAr
+                      ? `تحميل 4K غير محدود • متبقي ${toLocalDigits(quota.remainingProDays || 30, 'ar')} يوم`
+                      : `Unlimited 4K Downloads • ${quota.remainingProDays || 30} days remaining`}
+                  </div>
+                </div>
+              </div>
+              <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+            </div>
+          )}
+
+          {/* VIP Plans & Payment Box (Strictly locked by account type: Toman vs International) */}
           <div className="p-4 rounded-2xl bg-slate-900 border border-indigo-500/40 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
@@ -380,51 +433,34 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
                   </h4>
                   <p className="text-[10px] text-slate-400">
                     {activeCurrency === 'toman'
-                      ? 'پرداخت ریالی/تومانی ویژه کاربران ایران'
-                      : isFa
-                      ? 'درگاه تتر (USDT - BEP20) ویژه کاربران غیرایرانی و بین‌المللی'
+                      ? isFa
+                        ? 'تعرفه رسمی ریالی/تومانی ویژه کاربران ایران'
+                        : isAr
+                        ? 'الباقات الرسمية بالتومان الإيراني'
+                        : 'Official Iranian Toman Subscription Plans'
                       : isAr
-                      ? 'الدفع بالعملة الرقمية USDT (شبكة BNB Smart Chain - BEP20)'
-                      : 'Crypto Payment via USDT (BNB Smart Chain - BEP20)'}
+                      ? 'الدفع الدولي بالعملة الرقمية USDT (شبكة BEP20)'
+                      : 'International Payment via USDT (BEP20)'}
                   </p>
                 </div>
               </div>
 
-              {/* Currency Switcher: Toman button is ONLY rendered when language === 'fa' */}
-              {showTomanOption ? (
-                <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-950 border border-slate-800 text-[11px] font-black">
-                  <button
-                    type="button"
-                    onClick={() => setCurrencyMode('toman')}
-                    className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
-                      activeCurrency === 'toman'
-                        ? 'bg-indigo-600 text-white'
-                        : 'text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    🇮🇷 تومان
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setCurrencyMode('usdt')}
-                    className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
-                      activeCurrency === 'usdt'
-                        ? 'bg-emerald-600 text-white'
-                        : 'text-slate-400 hover:text-white'
-                    }`}
-                    dir="ltr"
-                  >
-                    💎 USDT (BEP20)
-                  </button>
-                </div>
-              ) : (
-                <div
-                  className="px-3 py-1 rounded-xl bg-emerald-600/20 border border-emerald-500/40 text-emerald-300 text-[11px] font-black"
-                  dir="ltr"
-                >
-                  💎 USDT (BEP20)
-                </div>
-              )}
+              <div
+                className={`px-3 py-1 rounded-xl text-[11px] font-black border ${
+                  activeCurrency === 'toman'
+                    ? 'bg-indigo-600/25 border-indigo-500/40 text-indigo-200'
+                    : 'bg-emerald-600/20 border-emerald-500/40 text-emerald-300'
+                }`}
+                dir={activeCurrency === 'usdt' ? 'ltr' : 'rtl'}
+              >
+                {activeCurrency === 'toman'
+                  ? isFa
+                    ? '🇮🇷 حساب ایران (تومان)'
+                    : isAr
+                    ? '🇮🇷 تومان إيراني'
+                    : '🇮🇷 Iranian Toman'
+                  : '💎 USDT (BEP20)'}
+              </div>
             </div>
 
             {/* 3 Pricing Cards */}
@@ -455,22 +491,44 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
                       {isFa ? plan.titleFa : isAr ? plan.titleAr : plan.titleEn}
                     </div>
                     <div
-                      dir={activeCurrency === 'usdt' ? 'ltr' : 'rtl'}
+                      dir={activeCurrency === 'usdt' ? 'ltr' : isRtl ? 'rtl' : 'ltr'}
                       className={`text-xs sm:text-sm font-black mt-0.5 ${
                         activeCurrency === 'usdt'
                           ? 'text-emerald-400 font-mono'
                           : 'text-amber-400'
                       }`}
                     >
-                      {activeCurrency === 'toman' ? plan.priceToman : plan.priceUsdt}
+                      {activeCurrency === 'toman'
+                        ? getLocalizedTomanPrice(plan)
+                        : plan.priceUsdt}
                     </div>
                   </button>
                 );
               })}
             </div>
 
-            {/* USDT Gateway vs Toman Gateway */}
-            {activeCurrency === 'usdt' ? (
+            {/* Toman Details vs International USDT Details */}
+            {activeCurrency === 'toman' ? (
+              <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 text-xs text-slate-300 space-y-2">
+                <div className="flex items-center justify-between font-black text-amber-300">
+                  <span>
+                    {isFa
+                      ? `طرح انتخابی: ${selectedPlan.titleFa}`
+                      : isAr
+                      ? `الباقة المختارة: ${selectedPlan.titleAr}`
+                      : `Selected Plan: ${selectedPlan.titleEn}`}
+                  </span>
+                  <span>{getLocalizedTomanPrice(selectedPlan)}</span>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  {isFa
+                    ? 'شناسه سخت‌افزاری دستگاه خود را کپی کرده و از طریق بخش «پشتیبانی و ارتباط با مدیریت» در پایین همین صفحه ارسال نمایید تا کد فعال‌سازی اختصاصی خود را دریافت و در کادر زیر وارد کنید.'
+                    : isAr
+                    ? 'انسخ معرف الجهاز (Hardware ID) وأرسله عبر قسم الدعم الفني بالأسفل للحصول على كود التفعيل الخاص بك.'
+                    : 'Copy your Device Hardware ID below and contact Official Support to receive your personal VIP Activation Code.'}
+                </p>
+              </div>
+            ) : (
               <div className="p-3.5 rounded-2xl bg-slate-950 border border-emerald-500/40 space-y-3 animate-fade-in">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
@@ -479,14 +537,7 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
                     </div>
                     <div>
                       <h5 className="text-xs font-black text-emerald-300">
-                        {isFa ? (
-                          <>
-                            درگاه واریز تتر (USDT) — مبلغ:{' '}
-                            <span dir="ltr" className="inline-block font-mono">
-                              {selectedPlan.priceUsdt}
-                            </span>
-                          </>
-                        ) : isAr ? (
+                        {isAr ? (
                           <>
                             بوابة دفع USDT (BEP20) — المبلغ:{' '}
                             <span dir="ltr" className="inline-block font-mono">
@@ -498,7 +549,7 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
                         )}
                       </h5>
                       <p className="text-[10px] text-slate-400">
-                        {isFa ? 'شبکه: ' : isAr ? 'الشبكة: ' : 'Network: '}
+                        {isAr ? 'الشبكة: ' : 'Network: '}
                         <strong className="text-amber-400" dir="ltr">
                           BNB Smart Chain (BEP20)
                         </strong>
@@ -513,9 +564,7 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
                 <div className="p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/40 flex items-start gap-2 text-[11px] font-bold text-amber-200">
                   <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                   <span>
-                    {isFa
-                      ? 'هشدار بسیار مهم: واریز تتر (USDT) را فقط و فقط بر بستر شبکه BNB Smart Chain (BEP20) به آدرس زیر انجام دهید.'
-                      : isAr
+                    {isAr
                       ? 'تنبيه هام جداً: يرجى إرسال عملة USDT حصرياً عبر شبكة BNB Smart Chain (BEP20) إلى العنوان أدناه.'
                       : 'IMPORTANT: Send USDT strictly via the BNB Smart Chain (BEP20) network to the address below.'}
                   </span>
@@ -523,9 +572,7 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
 
                 <div className="space-y-1.5">
                   <div className="text-[10px] font-bold text-slate-400 text-center">
-                    {isFa
-                      ? 'آدرس کیف پول تتر (USDT - BEP20):'
-                      : isAr
+                    {isAr
                       ? 'عنوان محفظة USDT (شبكة BEP20):'
                       : 'USDT Wallet Address (BNB Smart Chain - BEP20):'}
                   </div>
@@ -547,29 +594,15 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
                     )}
                     <span>
                       {copiedWallet
-                        ? isFa
-                          ? 'آدرس کیف پول BEP20 کپی شد ✓'
-                          : isAr
+                        ? isAr
                           ? 'تم نسخ عنوان المحفظة بنجاح ✓'
                           : 'Wallet Address Copied ✓'
-                        : isFa
-                        ? 'کپی آدرس کیف پول (USDT - BEP20)'
                         : isAr
                         ? 'نسخ عنوان المحفظة (USDT - BEP20)'
                         : 'Copy Wallet Address (BEP20)'}
                     </span>
                   </button>
                 </div>
-              </div>
-            ) : (
-              <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 text-xs text-slate-300 space-y-2">
-                <div className="flex items-center justify-between font-black text-amber-300">
-                  <span>{`طرح انتخابی: ${selectedPlan.titleFa}`}</span>
-                  <span>{selectedPlan.priceToman}</span>
-                </div>
-                <p className="text-[11px] text-slate-400 leading-relaxed">
-                  شناسه سخت‌افزاری دستگاه خود را کپی کرده و پس از دریافت کد اختصاصی، آن را در کادر «کد فعال‌سازی اشتراک VIP» در پایین وارد نمایید تا اشتراک شما به صورت خودکار فعال شود.
-                </p>
               </div>
             )}
           </div>
@@ -612,10 +645,10 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
                   </div>
                   <p className="text-[10px] text-slate-400 mt-0.5">
                     {isFa
-                      ? 'پشتیبانی هوشمند از کدهای اشتراک ۱ ماهه، ۳ ماهه و ۱۲ ماهه بر اساس الگوریتم شناسه دستگاه'
+                      ? 'شناسه ثابت و دائمی دستگاه شما جهت صدور و اعتبارسنجی کدهای اشتراک ۱، ۳ و ۱۲ ماهه'
                       : isAr
-                      ? 'يدعم أكواد التفعيل لباقات شهر، ٣ أشهر، وسنة كاملة تلقائياً'
-                      : 'Algorithmic detection of 1-Month, 3-Month, and 12-Month VIP plans'}
+                      ? 'المعرف الثابت لجهازك لتفعيل باقات شهر، ٣ أشهر، وسنة كاملة'
+                      : 'Permanent device identifier for 1-Month, 3-Month, and 12-Month VIP plans'}
                   </p>
                 </div>
               </div>
@@ -697,154 +730,164 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
             </form>
           </div>
 
-          {/* Coin Wallet & Extra Download Box */}
-          <div className="p-3.5 rounded-2xl bg-slate-800/80 border border-slate-700/80 space-y-2.5">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
-                  <Coins className="w-5 h-5" />
-                </div>
-                <div>
-                  <div className="text-xs font-black text-white">
-                    {isFa
-                      ? `موجودی کیف پول شما: ${toLocalDigits(coinsBalance, 'fa')} سکه`
-                      : isAr
-                      ? `رصيد محفظتك: ${toLocalDigits(coinsBalance, 'ar')} عملة`
-                      : `Your Coin Balance: ${coinsBalance} Coins`}
+          {/* Coin Wallet & 3-Referral Free VIP Box (Only shown when user is NOT already VIP) */}
+          {!quota.isPro && (
+            <>
+              <div className="p-3.5 rounded-2xl bg-slate-800/80 border border-slate-700/80 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
+                      <Coins className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="text-xs font-black text-white">
+                        {isFa
+                          ? `موجودی کیف پول شما: ${toLocalDigits(coinsBalance, 'fa')} سکه`
+                          : isAr
+                          ? `رصيد محفظتك: ${toLocalDigits(coinsBalance, 'ar')} عملة`
+                          : `Your Coin Balance: ${coinsBalance} Coins`}
+                      </div>
+                      <div className="text-[10px] text-slate-400">
+                        {isFa
+                          ? '۳ دانلود رایگان در روز • هر دانلود اضافه = کسر ۵ سکه • ورود روزانه = +۲ سکه'
+                          : isAr
+                          ? '٣ تنزيلات مجانية يومياً • كل تنزيل إضافي = ٥ عملات • الدخول اليومي = +٢ عملة'
+                          : '3 Free Downloads/Day • Extra Download = 5 Coins • Daily Check-in = +2 Coins'}
+                      </div>
+                    </div>
                   </div>
-                  <div className="text-[10px] text-slate-400">
-                    {isFa
-                      ? '۳ دانلود رایگان در روز • هر دانلود اضافه = کسر ۵ سکه • ورود روزانه = +۲ سکه'
-                      : isAr
-                      ? '٣ تنزيلات مجانية يومياً • كل تنزيل إضافي = ٥ عملات • الدخول اليومي = +٢ عملة'
-                      : '3 Free Downloads/Day • Extra Download = 5 Coins • Daily Check-in = +2 Coins'}
-                  </div>
-                </div>
-              </div>
-              <span className="px-3 py-1 rounded-xl text-xs font-black bg-amber-400 text-slate-950 shrink-0">
-                {`${toLocalDigits(coinsBalance, language)} 🪙`}
-              </span>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => handleRedeemExtraDownload('extra_1_download')}
-                className="py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-black text-xs btn-3d-primary flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <Gift className="w-3.5 h-3.5 shrink-0" />
-                <span>
-                  {isFa
-                    ? '+۱ دانلود اضافه (کسر ۵ سکه)'
-                    : isAr
-                    ? '+١ تحميل إضافي (٥ عملات)'
-                    : '+1 Extra Download (5 Coins)'}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() =>
-                  setFeedback({
-                    type: 'info',
-                    text: isFa
-                      ? 'در حال به‌روزرسانی — بخش تماشای تبلیغ (+۵ سکه) در حال به‌روزرسانی است.'
-                      : isAr
-                      ? 'قيد التحديث — ميزة مشاهدة الإعلان (+٥ عملات) قيد التحديث حالياً.'
-                      : 'Updating — Watch Ad (+5 Coins) is currently being updated.'
-                  })
-                }
-                className="py-2.5 px-3 rounded-xl bg-slate-900/90 border border-slate-700 text-slate-400 font-black text-xs flex items-center justify-center gap-1.5 opacity-80 cursor-pointer"
-              >
-                <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <span>
-                  {isFa
-                    ? 'تماشای تبلیغ (در حال به‌روزرسانی)'
-                    : isAr
-                    ? 'مشاهدة إعلان (قيد التحديث)'
-                    : 'Watch Ad (Updating)'}
-                </span>
-              </button>
-            </div>
-          </div>
-
-          {/* 100 Coins or 3 Referrals Free VIP Activation Box */}
-          <div className="p-3.5 rounded-2xl bg-indigo-950/40 border border-indigo-500/35 space-y-2.5">
-            <h4 className="text-xs font-black text-indigo-200 flex items-center gap-1.5">
-              <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
-              <span>
-                {isFa
-                  ? 'فعال‌سازی اشتراک VIP با ۱۰۰ سکه یا ۳ دعوت موفق:'
-                  : isAr
-                  ? 'تفعيل اشتراك VIP مجاناً عبر ١٠٠ عملة أو ٣ دعوات:'
-                  : 'VIP Activation via 100 Coins or 3 Referrals:'}
-              </span>
-            </h4>
-
-            <div className="grid grid-cols-2 gap-2 text-center text-xs">
-              <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800">
-                <div className="text-[10px] text-slate-400 font-bold mb-0.5">
-                  {isFa
-                    ? 'موجودی سکه (هدف: ۱۰۰ سکه)'
-                    : isAr
-                    ? 'العملات (الهدف: ١٠٠ عملة)'
-                    : 'Coins (Target: 100)'}
-                </div>
-                <div className="font-black text-amber-400">
-                  {isFa
-                    ? `${toLocalDigits(coinsBalance, 'fa')} / ۱۰۰ (${toLocalDigits(coinPercent, 'fa')}٪)`
-                    : isAr
-                    ? `${toLocalDigits(coinsBalance, 'ar')} / ١٠٠ (${toLocalDigits(coinPercent, 'ar')}٪)`
-                    : `${coinsBalance} / 100 Coins`}
-                </div>
-              </div>
-
-              <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800">
-                <div className="text-[10px] text-slate-400 font-bold mb-0.5">
-                  {isFa
-                    ? 'دعوت دوستان (هدف: ۳ نفر)'
-                    : isAr
-                    ? 'دعوة الأصدقاء (الهدف: ٣)'
-                    : 'Referrals (Target: 3)'}
-                </div>
-                <div className="font-black text-indigo-400 flex items-center justify-center gap-1">
-                  <Users className="w-3.5 h-3.5" />
-                  <span>
-                    {isFa
-                      ? `${toLocalDigits(invitedProgress, 'fa')} / ۳`
-                      : isAr
-                      ? `${toLocalDigits(invitedProgress, 'ar')} / ٣`
-                      : `${invitedProgress} / 3 Invites`}
+                  <span className="px-3 py-1 rounded-xl text-xs font-black bg-amber-400 text-slate-950 shrink-0">
+                    {`${toLocalDigits(coinsBalance, language)} 🪙`}
                   </span>
                 </div>
-              </div>
-            </div>
 
-            <button
-              type="button"
-              onClick={handleClaimFreeVipByCoinsOrReferrals}
-              className={`w-full py-2.5 px-4 rounded-xl text-xs font-black flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                canActivateFreeVip
-                  ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-white btn-3d-emerald'
-                  : 'bg-slate-800 text-slate-400 border border-slate-700'
-              }`}
-            >
-              <Crown className="w-4 h-4 shrink-0" />
-              <span>
-                {canActivateFreeVip
-                  ? isFa
-                    ? 'فعال‌سازی فوری اشتراک VIP (کسر ۱۰۰ سکه / ۳ دعوت)'
-                    : isAr
-                    ? 'تفعيل اشتراك VIP الآن (١٠٠ عملة / ٣ دعوات)'
-                    : 'Activate VIP Now (100 Coins / 3 Referrals)'
-                  : isFa
-                  ? 'با رسیدن موجودی به ۱۰۰ سکه یا ۳ دعوت موفق، اشتراک VIP فعال می‌شود'
-                  : isAr
-                  ? 'عند الوصول إلى ١٠٠ عملة أو ٣ دعوات يتم تفعيل VIP فوراً'
-                  : 'Reach 100 Coins or 3 Referrals to activate VIP'}
-              </span>
-            </button>
-          </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => handleRedeemExtraDownload('extra_1_download')}
+                    className="py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-black text-xs btn-3d-primary flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Gift className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      {isFa
+                        ? '+۱ دانلود اضافه (کسر ۵ سکه)'
+                        : isAr
+                        ? '+١ تحميل إضافي (٥ عملات)'
+                        : '+1 Extra Download (5 Coins)'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFeedback({
+                        type: 'info',
+                        text: isFa
+                          ? 'در حال به‌روزرسانی — بخش تماشای تبلیغ (+۵ سکه) در حال به‌روزرسانی است.'
+                          : isAr
+                          ? 'قيد التحديث — ميزة مشاهدة الإعلان (+٥ عملات) قيد التحديث حالياً.'
+                          : 'Updating — Watch Ad (+5 Coins) is currently being updated.'
+                      })
+                    }
+                    className="py-2.5 px-3 rounded-xl bg-slate-900/90 border border-slate-700 text-slate-400 font-black text-xs flex items-center justify-center gap-1.5 opacity-80 cursor-pointer"
+                  >
+                    <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span>
+                      {isFa
+                        ? 'تماشای تبلیغ (در حال به‌روزرسانی)'
+                        : isAr
+                        ? 'مشاهدة إعلان (قيد التحديث)'
+                        : 'Watch Ad (Updating)'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-2xl bg-indigo-950/40 border border-indigo-500/35 space-y-2.5">
+                <h4 className="text-xs font-black text-indigo-200 flex items-center gap-1.5">
+                  <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>
+                    {isFa
+                      ? 'فعال‌سازی اشتراک VIP با ۱۰۰ سکه یا ۳ دعوت موفق:'
+                      : isAr
+                      ? 'تفعيل اشتراك VIP مجاناً عبر ١٠٠ عملة أو ٣ دعوات:'
+                      : 'VIP Activation via 100 Coins or 3 Referrals:'}
+                  </span>
+                </h4>
+
+                <div className="grid grid-cols-2 gap-2 text-center text-xs">
+                  <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800">
+                    <div className="text-[10px] text-slate-400 font-bold mb-0.5">
+                      {isFa
+                        ? 'موجودی سکه (هدف: ۱۰۰ سکه)'
+                        : isAr
+                        ? 'العملات (الهدف: ١٠٠ عملة)'
+                        : 'Coins (Target: 100)'}
+                    </div>
+                    <div className="font-black text-amber-400">
+                      {isFa
+                        ? `${toLocalDigits(coinsBalance, 'fa')} / ۱۰۰ (${toLocalDigits(coinPercent, 'fa')}٪)`
+                        : isAr
+                        ? `${toLocalDigits(coinsBalance, 'ar')} / ١٠٠ (${toLocalDigits(coinPercent, 'ar')}٪)`
+                        : `${coinsBalance} / 100 Coins`}
+                    </div>
+                  </div>
+
+                  <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800">
+                    <div className="text-[10px] text-slate-400 font-bold mb-0.5">
+                      {isFa
+                        ? 'دعوت دوستان (هدف: ۳ نفر)'
+                        : isAr
+                        ? 'دعوة الأصدقاء (الهدف: ٣)'
+                        : 'Referrals (Target: 3)'}
+                    </div>
+                    <div className="font-black text-indigo-400 flex items-center justify-center gap-1">
+                      <Users className="w-3.5 h-3.5" />
+                      <span>
+                        {isFa
+                          ? `${toLocalDigits(invitedProgress, 'fa')} / ۳`
+                          : isAr
+                          ? `${toLocalDigits(invitedProgress, 'ar')} / ٣`
+                          : `${invitedProgress} / 3 Invites`}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleClaimFreeVipByCoinsOrReferrals}
+                  className={`w-full py-2.5 px-4 rounded-xl text-xs font-black flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                    canActivateFreeVip
+                      ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-white btn-3d-emerald'
+                      : 'bg-slate-800 text-slate-400 border border-slate-700'
+                  }`}
+                >
+                  <Crown className="w-4 h-4 shrink-0" />
+                  <span>
+                    {canActivateFreeVip
+                      ? isFa
+                        ? 'فعال‌سازی فوری اشتراک VIP (کسر ۱۰۰ سکه / ۳ دعوت)'
+                        : isAr
+                        ? 'تفعيل اشتراك VIP الآن (١٠٠ عملة / ٣ دعوات)'
+                        : 'Activate VIP Now (100 Coins / 3 Referrals)'
+                      : isFa
+                      ? 'با رسیدن موجودی به ۱۰۰ سکه یا ۳ دعوت موفق، اشتراک VIP فعال می‌شود'
+                      : isAr
+                      ? 'عند الوصول إلى ١٠٠ عملة أو ٣ دعوات يتم تفعيل VIP فوراً'
+                      : 'Reach 100 Coins or 3 Referrals to activate VIP'}
+                  </span>
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* Official Support & Contact Management Section (پشتیبانی و ارتباط با مدیریت) */}
+          <SupportChannelsBox
+            language={language}
+            isTomanAccount={isTomanAccount}
+            darkVariant={true}
+          />
         </div>
       </div>
     </div>

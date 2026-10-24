@@ -1498,6 +1498,142 @@ async function startServer() {
     }
   });
 
+  /**
+   * 8. Cloud Referral Sync Store (/api/referral/apply & /api/referral/sync)
+   * Stores successful referral invites by referral code and syncs invite counts to the code owner.
+   */
+  const referralDataDir = path.resolve(__dirname, 'data');
+  const referralDataFile = path.resolve(referralDataDir, 'cloud_referrals.json');
+
+  interface CloudReferralEntry {
+    id: string;
+    codeOrIdentifier: string;
+    refereeHardwareId?: string;
+    timestamp: number;
+  }
+
+  function loadCloudReferrals(): Record<string, CloudReferralEntry[]> {
+    try {
+      if (fs.existsSync(referralDataFile)) {
+        const raw = fs.readFileSync(referralDataFile, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    } catch {
+      // ignore
+    }
+    return {};
+  }
+
+  function saveCloudReferrals(store: Record<string, CloudReferralEntry[]>): void {
+    try {
+      if (!fs.existsSync(referralDataDir)) {
+        fs.mkdirSync(referralDataDir, { recursive: true });
+      }
+      fs.writeFileSync(referralDataFile, JSON.stringify(store, null, 2), 'utf-8');
+    } catch {
+      // ignore
+    }
+  }
+
+  app.post('/api/referral/apply', (req, res) => {
+    try {
+      const { ownerCode, friendIdentifier, refereeHardwareId } = req.body || {};
+      const cleanOwner = String(ownerCode || '').trim().toUpperCase();
+      if (!cleanOwner || cleanOwner.length < 4) {
+        return res.status(400).json({ success: false, error: 'Invalid referral code' });
+      }
+
+      const store = loadCloudReferrals();
+      const list = Array.isArray(store[cleanOwner]) ? store[cleanOwner] : [];
+
+      const identifierLabel = friendIdentifier
+        ? `${friendIdentifier} (${cleanOwner})`
+        : refereeHardwareId || `User-${Date.now().toString(36).toUpperCase()}`;
+
+      // Prevent duplicate registration from the exact same identifier/device
+      const alreadyExists = list.some(
+        (item) =>
+          (refereeHardwareId && item.refereeHardwareId === refereeHardwareId) ||
+          item.codeOrIdentifier === identifierLabel
+      );
+
+      if (!alreadyExists) {
+        list.push({
+          id: `cloud-ref-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          codeOrIdentifier: identifierLabel,
+          refereeHardwareId: refereeHardwareId ? String(refereeHardwareId) : undefined,
+          timestamp: Date.now()
+        });
+        store[cleanOwner] = list;
+        saveCloudReferrals(store);
+      }
+
+      return res.json({
+        success: true,
+        ownerCode: cleanOwner,
+        invitedCount: list.length,
+        invitedUsers: list,
+        unlockedVip: list.length >= 3
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || 'Referral sync error' });
+    }
+  });
+
+  app.get('/api/referral/sync', (req, res) => {
+    try {
+      const code = String(req.query.code || '').trim().toUpperCase();
+      if (!code) {
+        return res.status(400).json({ success: false, invitedCount: 0, invitedUsers: [] });
+      }
+      const store = loadCloudReferrals();
+      const list = Array.isArray(store[code]) ? store[code] : [];
+      return res.json({
+        success: true,
+        code,
+        invitedCount: list.length,
+        invitedUsers: list,
+        unlockedVip: list.length >= 3
+      });
+    } catch {
+      return res.json({ success: false, invitedCount: 0, invitedUsers: [] });
+    }
+  });
+
+  /**
+   * 9. In-App Update Version Checker Endpoint (/api/app/version)
+   */
+  app.get('/api/app/version', (_req, res) => {
+    res.json({
+      currentVersion: '2.6.0',
+      latestVersion: '2.7.0',
+      releaseDate: '1405/08/01',
+      bazaarUrl: 'bazaar://details?id=ir.appone.onedownload',
+      bazaarWebUrl: 'https://cafebazaar.ir/app/ir.appone.onedownload',
+      myketUrl: 'myket://details?id=ir.appone.onedownload',
+      myketWebUrl: 'https://myket.ir/app/ir.appone.onedownload',
+      changelogFa: [
+        'افزایش چشمگیر سرعت دانلود چندبخشی موازی (IDM Style) تا ۸ رشته همزمان',
+        'ارتقای موتور استخراج مستقیم آپارات، اینستاگرام، تیک‌تاک و یوتیوب 4K',
+        'پشتیبانی از فعال‌سازی خودکار اشتراک VIP یک‌ماهه با دعوت ۳ نفر',
+        'بهبود پخش‌کننده داخلی و مدیریت هوشمند حافظه آفلاین'
+      ],
+      changelogAr: [
+        'زيادة سرعة التحميل المتعدد المتوازي (IDM Style) حتى ٨ مسارات متزامنة',
+        'تطوير محرك الاستخراج المباشر من يوتيوب، إنستغرام، تيك توك وأبارات بجودة 4K',
+        'تفعيل تلقائي لاشتراك VIP لمدة شهر عند دعوة ٣ أصدقاء',
+        'تحسين المشغل الداخلي وإدارة الملفات بدون إنترنت'
+      ],
+      changelogEn: [
+        'Boosted multi-threaded parallel chunk download speed (up to 8 concurrent streams)',
+        'Enhanced 4K direct stream extraction for YouTube, Instagram, TikTok & Aparat',
+        'Automatic 1-Month VIP activation upon 3 successful friend referrals',
+        'Improved built-in media player and offline storage stability'
+      ]
+    });
+  });
+
   // Deliver /manifest.json directly
   app.get('/manifest.json', (_req, res) => {
     res.setHeader('Content-Type', 'application/manifest+json');

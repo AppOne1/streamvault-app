@@ -21,6 +21,7 @@ import { getTranslation } from '../i18n/translations';
 import {
   detectPlatform,
   extractUrlFromText,
+  isSupportedMediaUrl,
   isValidHttpUrl,
   SAMPLE_URLS
 } from '../services/platformDetector';
@@ -87,7 +88,7 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
   const [batchText, setBatchText] = useState('');
   const [batchQuality, setBatchQuality] = useState<'1080p' | '720p' | 'mp3'>('1080p');
 
-  // Auto-sniff clipboard on window focus when enabled
+  // Auto-sniff clipboard on app startup, visibility change, and window focus when enabled
   useEffect(() => {
     if (!autoSniffClipboard) return;
 
@@ -96,7 +97,7 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
         if (navigator.clipboard && navigator.clipboard.readText) {
           const text = await navigator.clipboard.readText();
           const candidate = extractUrlFromText(text);
-          if (candidate && isValidHttpUrl(candidate) && candidate !== url) {
+          if (candidate && isValidHttpUrl(candidate) && isSupportedMediaUrl(candidate) && candidate !== url) {
             setSniffedClipboardUrl(candidate);
           }
         }
@@ -105,8 +106,18 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
       }
     };
 
+    checkClipboard();
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        checkClipboard();
+      }
+    };
     window.addEventListener('focus', checkClipboard);
-    return () => window.removeEventListener('focus', checkClipboard);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.removeEventListener('focus', checkClipboard);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, [autoSniffClipboard, url]);
 
   const applyValidUrl = (raw: string): string | null => {
@@ -125,7 +136,7 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
   };
 
   const handleAnalyzeClick = (overrideUrl?: string) => {
-    const candidate = (overrideUrl ?? url).trim();
+    const candidate = extractUrlFromText((overrideUrl ?? url).trim()) || (overrideUrl ?? url).trim();
     if (!candidate || !isValidHttpUrl(candidate)) {
       setValidationError(
         isFa
@@ -136,7 +147,19 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
       );
       return;
     }
+    if (!isSupportedMediaUrl(candidate)) {
+      setValidationError(
+        isFa
+          ? 'این پلتفرم پشتیبانی نمی‌شود! لطفاً لینک ویدیو یا موزیک از پلتفرم‌های مجاز (اینستاگرام، یوتیوب، آپارات، تیک‌تاک و...) وارد کنید.'
+          : isAr
+          ? 'هذه المنصة غير مدعومة! يرجى إدخال رابط من المنصات المدعومة.'
+          : 'This platform is not supported! Please enter a media URL from supported platforms.'
+      );
+      return;
+    }
     setValidationError(null);
+    // Immediately clear the URL input box when starting analysis/download
+    setUrl('');
     onAnalyze(candidate);
   };
 
@@ -150,8 +173,19 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
         if (text && text.trim()) {
           const valid = applyValidUrl(text);
           if (valid) {
+            if (!isSupportedMediaUrl(valid)) {
+              setValidationError(
+                isFa
+                  ? 'این پلتفرم پشتیبانی نمی‌شود!'
+                  : isAr
+                  ? 'هذه المنصة غير مدعومة!'
+                  : 'This platform is not supported!'
+              );
+              return;
+            }
             setPasteSuccess(true);
             setTimeout(() => setPasteSuccess(false), 1800);
+            setUrl('');
             onAnalyze(valid);
           } else {
             setValidationError(
