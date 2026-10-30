@@ -85,11 +85,14 @@ export interface DownloadTask {
   fileName: string;
   createdAt: number;
   completedAt?: number;
+  isSaved?: boolean;
   scheduledTime?: string; // e.g. "14:30" for Scheduled Download
   isStarred?: boolean;
   isVaulted?: boolean;
   folderId?: string;
   errorMessage?: string;
+  chunkCount?: number;
+  chunksProgress?: number[];
 }
 
 export type UserCountryCode = 'IR' | 'IQ' | 'AE' | 'SA' | 'GCC' | 'INT';
@@ -105,6 +108,9 @@ export interface UserSession {
     passwordHash?: string;
     avatarUrl?: string;
     plan: 'Free' | 'VIP Pro';
+    vipExpiry?: number;
+    vipPlan?: string;
+    referralCode?: string;
     quotaUsedMb: number;
     quotaMaxMb: number;
   };

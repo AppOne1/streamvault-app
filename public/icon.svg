@@ -1,42 +1,59 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
   <defs>
-    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+    <!-- 3D Purple & Neon Indigo Background Gradient (Matching Header ODLogo) -->
+    <linearGradient id="odBgGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1e1b4b" />
+      <stop offset="52%" stop-color="#4338ca" />
+      <stop offset="100%" stop-color="#7c3aed" />
+    </linearGradient>
+
+    <!-- 3D Bottom Bevel Lip -->
+    <linearGradient id="odBevelGrad" x1="0%" y1="0%" x2="100%" y2="0%">
       <stop offset="0%" stop-color="#1e1b4b" />
       <stop offset="50%" stop-color="#312e81" />
-      <stop offset="100%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#2e1065" />
     </linearGradient>
-    <linearGradient id="od-gold" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#38bdf8" />
-      <stop offset="50%" stop-color="#818cf8" />
-      <stop offset="100%" stop-color="#c084fc" />
+
+    <!-- Crisp 3D Neon White-to-Ice-Blue Monogram Gradient -->
+    <linearGradient id="odTextGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="60%" stop-color="#e0e7ff" />
+      <stop offset="100%" stop-color="#93c5fd" />
     </linearGradient>
-    <linearGradient id="arrow-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#fbbf24" />
+
+    <!-- Vibrant Golden-Orange 3D Download Arrow Gradient -->
+    <linearGradient id="odArrowGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fde047" />
       <stop offset="50%" stop-color="#f59e0b" />
       <stop offset="100%" stop-color="#ea580c" />
     </linearGradient>
-    <filter id="3d-shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="14" stdDeviation="12" flood-color="#020617" flood-opacity="0.65" />
+
+    <filter id="odDropShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="12" flood-color="#090d16" flood-opacity="0.65" />
     </filter>
   </defs>
 
-  <!-- 3D Rounded App Squircle Base -->
-  <rect width="512" height="512" rx="116" fill="url(#bg-grad)" />
-  <rect x="14" y="14" width="484" height="484" rx="104" stroke="url(#od-gold)" stroke-width="6" stroke-opacity="0.45" fill="none" />
+  <!-- 3D Rounded App Squircle Base with Bottom 3D Lip -->
+  <rect x="16" y="28" width="480" height="472" rx="116" fill="url(#odBevelGrad)" />
+  <rect x="16" y="12" width="480" height="468" rx="116" fill="url(#odBgGrad)" />
 
-  <!-- Subtle Glow Halo -->
-  <circle cx="256" cy="240" r="185" fill="#4f46e5" opacity="0.18" />
+  <!-- Top Specular Highlight Border -->
+  <rect x="20" y="16" width="472" height="460" rx="112" stroke="#ffffff" stroke-opacity="0.32" stroke-width="5" fill="none" />
 
-  <!-- Bold 3D Monogram "O" (Left) & "D" (Right) -->
-  <g filter="url(#3d-shadow)">
-    <!-- Letter O -->
-    <rect x="68" y="118" width="164" height="210" rx="82" stroke="url(#od-gold)" stroke-width="40" fill="none" />
-    <!-- Letter D -->
-    <path d="M284 118 H354 C412 118 446 158 446 223 C446 288 412 328 354 328 H284 Z" stroke="url(#od-gold)" stroke-width="40" stroke-linejoin="round" fill="none" />
+  <!-- Ambient Neon Purple Glow -->
+  <circle cx="256" cy="230" r="185" fill="#8b5cf6" opacity="0.24" />
 
-    <!-- Iconic 3D Download Arrow & Tray Integrated Below / Through OD -->
-    <path d="M256 265 V402" stroke="url(#arrow-grad)" stroke-width="34" stroke-linecap="round" />
-    <path d="M198 352 L256 410 L314 352" stroke="url(#arrow-grad)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" fill="none" />
-    <path d="M132 438 H380" stroke="url(#arrow-grad)" stroke-width="26" stroke-linecap="round" />
+  <!-- 3D "OD" Monogram + Orange Download Indicator -->
+  <g filter="url(#odDropShadow)">
+    <!-- Bold 3D "O" -->
+    <rect x="68" y="96" width="162" height="208" rx="81" stroke="url(#odTextGrad)" stroke-width="42" fill="none" />
+
+    <!-- Bold 3D "D" -->
+    <path d="M284 96 H354 C412 96 446 136 446 200 C446 264 412 304 354 304 H284 Z" stroke="url(#odTextGrad)" stroke-width="42" stroke-linejoin="round" fill="none" />
+
+    <!-- 3D Orange Download Arrow & Tray -->
+    <path d="M256 264 V394" stroke="url(#odArrowGrad)" stroke-width="38" stroke-linecap="round" />
+    <path d="M194 338 L256 402 L318 338" stroke="url(#odArrowGrad)" stroke-width="38" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+    <path d="M132 436 H380" stroke="url(#odArrowGrad)" stroke-width="32" stroke-linecap="round" />
   </g>
 </svg>

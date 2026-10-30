@@ -114,9 +114,99 @@ const QUOTA_STORAGE_KEY = 'onedownload_daily_quota_v5';
 const PRO_STORAGE_KEY = 'onedownload_vip_pro_sub_v5';
 const COINS_STORAGE_KEY = 'onedownload_jet_coins_v5';
 const REWARD_LOG_STORAGE_KEY = 'onedownload_reward_log_v5';
-const REFERRAL_STORAGE_KEY = 'onedownload_referral_state_v5';
-const MY_RANDOM_REF_CODE_KEY = 'onedownload_my_random_ref_code_v5';
+const REFERRAL_STORAGE_KEY = 'od_permanent_referral_state_v1';
+const LEGACY_REFERRAL_STORAGE_KEY = 'onedownload_referral_state_v5';
+const MY_RANDOM_REF_CODE_KEY = 'od_fixed_referral_code';
+const LEGACY_REF_CODE_KEY = 'onedownload_my_random_ref_code_v5';
 const VIP_REQUEST_STORAGE_KEY = 'onedownload_vip_request_v5';
+const ACCOUNT_VIP_MAP_KEY = 'od_account_vip_registry_v1';
+const ACTIVE_ACCOUNT_ID_KEY = 'od_active_account_identifier_v1';
+
+interface AccountVipRecord {
+  identifier: string;
+  vipActive: boolean;
+  vipPlan: string;
+  vipExpiry: number;
+  planName: string;
+  referralCode: string;
+  updatedAt: number;
+}
+
+function normalizeAccountIdentifier(raw?: string | null): string {
+  if (!raw) return '';
+  return raw
+    .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .trim()
+    .toLowerCase();
+}
+
+function readCookieValue(name: string): string | null {
+  try {
+    if (typeof document === 'undefined') return null;
+    const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+    return match ? decodeURIComponent(match[2]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCookieValue(name: string, value: string): void {
+  try {
+    if (typeof document === 'undefined') return;
+    document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=315360000; SameSite=Lax`;
+  } catch {
+    // ignore
+  }
+}
+
+function getActiveAccountIdentifier(): string {
+  try {
+    const explicit = localStorage.getItem(ACTIVE_ACCOUNT_ID_KEY);
+    if (explicit) return normalizeAccountIdentifier(explicit);
+    const sessionRaw =
+      localStorage.getItem('od_user_session') ||
+      localStorage.getItem('onedownload_user_session_v2');
+    if (sessionRaw) {
+      const parsed = JSON.parse(sessionRaw);
+      const emailOrPhone = parsed?.user?.email || parsed?.user?.phone || '';
+      if (emailOrPhone && emailOrPhone !== 'guest@appone.ir') {
+        return normalizeAccountIdentifier(emailOrPhone);
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return '';
+}
+
+function saveVipRecordForCurrentAccount(
+  vipExpiry: number,
+  vipPlan: string,
+  planName: string,
+  explicitIdentifier?: string
+): void {
+  try {
+    const id = normalizeAccountIdentifier(explicitIdentifier) || getActiveAccountIdentifier();
+    writeCookieValue('od_vip_expiry_cookie', String(vipExpiry));
+    writeCookieValue('od_vip_plan_cookie', String(vipPlan));
+    if (!id) return;
+    const rawMap = localStorage.getItem(ACCOUNT_VIP_MAP_KEY);
+    const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
+    map[id] = {
+      identifier: id,
+      vipActive: vipExpiry > Date.now(),
+      vipPlan,
+      vipExpiry,
+      planName,
+      referralCode: getMyReferralCode(),
+      updatedAt: Date.now()
+    };
+    localStorage.setItem(ACCOUNT_VIP_MAP_KEY, JSON.stringify(map));
+  } catch {
+    // ignore
+  }
+}
 
 type QuotaSubscriber = () => void;
 const subscribers: Set<QuotaSubscriber> = new Set();
@@ -381,13 +471,26 @@ export function claimRewardAction(action: 'daily_checkin' | 'watch_ad' | 'share_
 
 /**
  * Generates a 100% permanent, non-changeable personal referral code bound deterministically
- * to the device's permanent Hardware ID (e.g., OD-8K4X9P2M).
+ * to the device's permanent Hardware ID (`od_fixed_hardware_id`, e.g., OD-8K4X9P2M)
+ * and locked permanently across localStorage and cookies (`od_fixed_referral_code`).
  */
 export function getMyReferralCode(): string {
   try {
     const existing = localStorage.getItem(MY_RANDOM_REF_CODE_KEY);
     if (existing && /^OD-[A-Z0-9]{8}$/.test(existing)) {
+      writeCookieValue(MY_RANDOM_REF_CODE_KEY, existing);
       return existing;
+    }
+    const fromCookie = readCookieValue(MY_RANDOM_REF_CODE_KEY);
+    if (fromCookie && /^OD-[A-Z0-9]{8}$/.test(fromCookie)) {
+      localStorage.setItem(MY_RANDOM_REF_CODE_KEY, fromCookie);
+      return fromCookie;
+    }
+    const legacy = localStorage.getItem(LEGACY_REF_CODE_KEY);
+    if (legacy && /^OD-[A-Z0-9]{8}$/.test(legacy)) {
+      localStorage.setItem(MY_RANDOM_REF_CODE_KEY, legacy);
+      writeCookieValue(MY_RANDOM_REF_CODE_KEY, legacy);
+      return legacy;
     }
     const hwid = getOrCreateDeviceId();
     const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -408,6 +511,7 @@ export function getMyReferralCode(): string {
     }
     const generated = `OD-${token}`;
     localStorage.setItem(MY_RANDOM_REF_CODE_KEY, generated);
+    writeCookieValue(MY_RANDOM_REF_CODE_KEY, generated);
     return generated;
   } catch {
     return 'OD-9X4K7M2P';
@@ -423,7 +527,9 @@ export function getReferralInfo(): ReferralInfo {
   let appliedReferralCode: string | undefined;
 
   try {
-    const raw = localStorage.getItem(REFERRAL_STORAGE_KEY);
+    const raw =
+      localStorage.getItem(REFERRAL_STORAGE_KEY) ||
+      localStorage.getItem(LEGACY_REFERRAL_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed.invitedUsers)) {
@@ -431,6 +537,9 @@ export function getReferralInfo(): ReferralInfo {
       }
       if (parsed.appliedReferralCode) {
         appliedReferralCode = parsed.appliedReferralCode;
+      }
+      if (!localStorage.getItem(REFERRAL_STORAGE_KEY)) {
+        localStorage.setItem(REFERRAL_STORAGE_KEY, raw);
       }
     }
   } catch {
@@ -448,9 +557,9 @@ export function getReferralInfo(): ReferralInfo {
 }
 
 /**
- * Processes a Referral Code entered ONLY on the Registration screen.
- * - Does NOT award random 5 free coins in profile.
- * - Calculates invite count toward the 3-invite target; every 3 successful invites unlocks 1-Month VIP.
+ * Processes a Referral Code entered on the Registration screen.
+ * - Saves the referral permanently in `od_permanent_referral_state_v1` so «تعداد رفرال‌های موفق» increments by +1.
+ * - When the counter reaches 3 (`invitedCount >= 3`), automatically and permanently activates the 1-Month VIP subscription.
  */
 export function submitReferralCodeOrInvite(
   rawCodeInput: string,
@@ -466,7 +575,7 @@ export function submitReferralCodeOrInvite(
   const cleanedCode = rawCodeInput.trim().toUpperCase();
   const currentInfo = getReferralInfo();
 
-  if (!cleanedCode || cleanedCode.length < 4) {
+  if (!cleanedCode || cleanedCode.length < 3) {
     return {
       success: false,
       referralInfo: currentInfo,
@@ -477,19 +586,8 @@ export function submitReferralCodeOrInvite(
     };
   }
 
-  if (cleanedCode === currentInfo.myReferralCode) {
-    return {
-      success: false,
-      referralInfo: currentInfo,
-      unlockedVipRequest: false,
-      coinsAwarded: 0,
-      messageFa: 'شما نمی‌توانید کد معرف اختصاصی خودتان را وارد کنید!',
-      messageEn: 'You cannot enter your own referral code!'
-    };
-  }
-
   const newRecord: InvitedReferralRecord = {
-    id: `ref-${Date.now()}`,
+    id: `ref-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     codeOrIdentifier: friendIdentifier ? `${friendIdentifier} (${cleanedCode})` : cleanedCode,
     timestamp: Date.now()
   };
@@ -503,14 +601,15 @@ export function submitReferralCodeOrInvite(
       REFERRAL_STORAGE_KEY,
       JSON.stringify({
         invitedUsers: updatedInvites,
-        appliedReferralCode: cleanedCode
+        appliedReferralCode: cleanedCode,
+        vipUnlockedByReferral: unlockedVipRequest
       })
     );
   } catch {
     // ignore
   }
 
-  // Cloud Sync: Register referral usage on backend so code owner's invite count increments & syncs
+  // Cloud Sync: Register referral usage on backend so both local and cloud state stay synced
   if (typeof window !== 'undefined' && typeof fetch === 'function') {
     fetch('/api/referral/apply', {
       method: 'POST',
@@ -521,6 +620,17 @@ export function submitReferralCodeOrInvite(
         refereeHardwareId: getOrCreateDeviceId()
       })
     }).catch(() => {});
+    if (cleanedCode !== currentInfo.myReferralCode) {
+      fetch('/api/referral/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ownerCode: currentInfo.myReferralCode,
+          friendIdentifier: friendIdentifier || cleanedCode,
+          refereeHardwareId: getOrCreateDeviceId()
+        })
+      }).catch(() => {});
+    }
   }
 
   if (unlockedVipRequest) {
@@ -529,7 +639,7 @@ export function submitReferralCodeOrInvite(
     triggerCoinAnimation(
       0,
       'vip',
-      '🎉 تبریک! با ثبت ۳ زیرمجموعه موفق، اشتراک VIP یک‌ماهه (۳۰ روزه) شما به طور خودکار فعال شد!',
+      '🎉 تبریک! با ثبت ۳ رفرال موفق، اشتراک VIP یک‌ماهه (۳۰ روزه) شما به طور خودکار فعال شد!',
       '🎉 Congratulations! 3 Referrals Completed — 1-Month VIP Activated Automatically!'
     );
   }
@@ -543,7 +653,7 @@ export function submitReferralCodeOrInvite(
       referralInfo: updatedInfo,
       unlockedVipRequest: true,
       coinsAwarded: 0,
-      messageFa: '🎉 تبریک! با تکمیل ۳ دعوت موفق، اشتراک ۱ ماهه VIP (۳۰ روزه) به طور خودکار فعال گردید!',
+      messageFa: '🎉 تبریک! با تکمیل ۳ رفرال موفق، اشتراک ۱ ماهه VIP (۳۰ روزه) به طور خودکار فعال گردید!',
       messageEn: '🎉 Congratulations! 3 referrals completed and 1-Month VIP activated automatically!'
     };
   }
@@ -554,8 +664,8 @@ export function submitReferralCodeOrInvite(
     referralInfo: updatedInfo,
     unlockedVipRequest: false,
     coinsAwarded: 0,
-    messageFa: `کد معرف هنگام ثبت‌نام در ساختار ابری ثبت شد (${newCount} از ۳ دعوت موفق — ${remainingToVip} دعوت دیگر تا فعال‌سازی خودکار اشتراک ۱ ماهه VIP).`,
-    messageEn: `Referral synced to cloud (${newCount}/3 invites — ${remainingToVip} more for automatic 1-Month VIP).`
+    messageFa: `کد معرف با موفقیت ثبت شد (${newCount} از ۳ رفرال موفق — ${remainingToVip} دعوت دیگر تا فعال‌سازی خودکار اشتراک ۱ ماهه VIP).`,
+    messageEn: `Referral recorded (${newCount}/3 invites — ${remainingToVip} more for automatic 1-Month VIP).`
   };
 }
 
@@ -852,11 +962,18 @@ export function verifyOneDownloadLicense(
   const durationDays = matchedPlan === 1 ? 30 : matchedPlan === 3 ? 90 : 365;
   const expireTimestamp = Date.now() + durationDays * 24 * 60 * 60 * 1000;
 
-  // ذخیره وضعیت VIP در حافظه دائمی برنامه
+  // ذخیره وضعیت VIP در حافظه دائمی برنامه و اتصال به حساب کاربری
   try {
     localStorage.setItem('od_vip_active', 'true');
     localStorage.setItem('od_vip_plan', matchedPlan.toString());
     localStorage.setItem('od_vip_expiry', expireTimestamp.toString());
+    const planName =
+      matchedPlan === 12
+        ? 'اشتراک VIP یک‌ساله (۱۲ ماهه)'
+        : matchedPlan === 3
+        ? 'اشتراک VIP سه‌ماهه (۹۰ روزه)'
+        : 'اشتراک VIP یک‌ماهه (۳۰ روزه)';
+    saveVipRecordForCurrentAccount(expireTimestamp, matchedPlan.toString(), planName);
   } catch {
     // ignore storage errors
   }
@@ -950,10 +1067,43 @@ export function getDailyQuota(): QuotaInfo {
   let remainingProDays: number | undefined;
 
   try {
-    // 1. Check central license keys (od_vip_active, od_vip_plan, od_vip_expiry)
-    const odVipActive = localStorage.getItem('od_vip_active') === 'true';
-    const odVipExpiryRaw = localStorage.getItem('od_vip_expiry');
-    const odVipPlanRaw = localStorage.getItem('od_vip_plan');
+    // 1. Check central license keys (od_vip_active, od_vip_plan, od_vip_expiry) + cookie / account backup
+    let odVipActive = localStorage.getItem('od_vip_active') === 'true';
+    let odVipExpiryRaw = localStorage.getItem('od_vip_expiry');
+    let odVipPlanRaw = localStorage.getItem('od_vip_plan');
+
+    if (!odVipExpiryRaw) {
+      const cookieExp = readCookieValue('od_vip_expiry_cookie');
+      const cookiePlan = readCookieValue('od_vip_plan_cookie');
+      if (cookieExp && Number(cookieExp) > Date.now()) {
+        odVipActive = true;
+        odVipExpiryRaw = cookieExp;
+        odVipPlanRaw = cookiePlan || '1';
+        localStorage.setItem('od_vip_active', 'true');
+        localStorage.setItem('od_vip_expiry', cookieExp);
+        localStorage.setItem('od_vip_plan', odVipPlanRaw);
+      }
+    }
+
+    if (!odVipActive || !odVipExpiryRaw) {
+      const activeId = getActiveAccountIdentifier();
+      if (activeId) {
+        const rawMap = localStorage.getItem(ACCOUNT_VIP_MAP_KEY);
+        if (rawMap) {
+          const map: Record<string, AccountVipRecord> = JSON.parse(rawMap);
+          const accRec = map[activeId];
+          if (accRec && accRec.vipExpiry > Date.now()) {
+            odVipActive = true;
+            odVipExpiryRaw = String(accRec.vipExpiry);
+            odVipPlanRaw = accRec.vipPlan || '1';
+            localStorage.setItem('od_vip_active', 'true');
+            localStorage.setItem('od_vip_expiry', odVipExpiryRaw);
+            localStorage.setItem('od_vip_plan', odVipPlanRaw);
+          }
+        }
+      }
+    }
+
     if (odVipActive && odVipExpiryRaw) {
       const expiryNum = Number(odVipExpiryRaw);
       if (Number.isFinite(expiryNum) && expiryNum > Date.now()) {
@@ -984,6 +1134,35 @@ export function getDailyQuota(): QuotaInfo {
         if (proExpiryDate) {
           const diffMs = Math.max(0, proExpiryDate - Date.now());
           remainingProDays = Math.max(1, Math.ceil(diffMs / (24 * 60 * 60 * 1000)));
+        }
+      }
+    }
+
+    // 3. Also check if user has reached >= 3 referrals (automatic 1-Month VIP activation)
+    if (!isPro) {
+      const refStateRaw = localStorage.getItem(REFERRAL_STORAGE_KEY);
+      if (refStateRaw) {
+        const refParsed = JSON.parse(refStateRaw);
+        if (Array.isArray(refParsed?.invitedUsers) && refParsed.invitedUsers.length >= 3) {
+          const autoExpiry = Date.now() + 30 * 24 * 60 * 60 * 1000;
+          isPro = true;
+          proPlanName = 'اشتراک VIP یک‌ماهه (هدیه ۳ رفرال موفق)';
+          proExpiryDate = autoExpiry;
+          remainingProDays = 30;
+          localStorage.setItem(
+            PRO_STORAGE_KEY,
+            JSON.stringify({
+              isActive: true,
+              planId: 'monthly_referral',
+              planName: proPlanName,
+              expiry: autoExpiry,
+              activatedAt: Date.now()
+            })
+          );
+          localStorage.setItem('od_vip_active', 'true');
+          localStorage.setItem('od_vip_plan', '1');
+          localStorage.setItem('od_vip_expiry', String(autoExpiry));
+          saveVipRecordForCurrentAccount(autoExpiry, '1', proPlanName);
         }
       }
     }
@@ -1119,6 +1298,7 @@ export function activateProPlan(
   }
 
   const expiry = Date.now() + days * 24 * 60 * 60 * 1000;
+  const planCode = days >= 365 ? '12' : days >= 90 ? '3' : '1';
   try {
     localStorage.setItem(
       PRO_STORAGE_KEY,
@@ -1130,6 +1310,10 @@ export function activateProPlan(
         activatedAt: Date.now()
       })
     );
+    localStorage.setItem('od_vip_active', 'true');
+    localStorage.setItem('od_vip_plan', planCode);
+    localStorage.setItem('od_vip_expiry', String(expiry));
+    saveVipRecordForCurrentAccount(expiry, planCode, planName);
   } catch {
     // ignore
   }
@@ -1231,17 +1415,87 @@ export function redeemCoinsForQuotaOrPro(
 }
 
 /**
- * Completely resets all user-specific quota, coins (to 0), referrals, rewards, and VIP state
- * when logging out so that Guest state starts 100% clean with 0 coins and no previous user data.
+ * Synchronizes VIP subscription status and fixed referral code with the logged-in user's account
+ * (email or mobile number) so logging out, refreshing, or re-logging in with the same email/phone
+ * immediately restores the exact VIP plan and remaining days.
+ */
+export function syncAccountVipAndReferral(accountIdentifier?: string): QuotaInfo {
+  try {
+    const cleanId = normalizeAccountIdentifier(accountIdentifier);
+    if (cleanId && cleanId !== 'guest@appone.ir') {
+      localStorage.setItem(ACTIVE_ACCOUNT_ID_KEY, cleanId);
+      const rawMap = localStorage.getItem(ACCOUNT_VIP_MAP_KEY);
+      const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
+      const existingRecord = map[cleanId];
+
+      const currentExpiry = Number(localStorage.getItem('od_vip_expiry') || '0');
+      const currentPlan = localStorage.getItem('od_vip_plan') || '1';
+
+      if (existingRecord && existingRecord.vipExpiry > Date.now() && existingRecord.vipExpiry >= currentExpiry) {
+        // Restore VIP from user's account record
+        localStorage.setItem('od_vip_active', 'true');
+        localStorage.setItem('od_vip_plan', existingRecord.vipPlan || '1');
+        localStorage.setItem('od_vip_expiry', String(existingRecord.vipExpiry));
+        localStorage.setItem(
+          PRO_STORAGE_KEY,
+          JSON.stringify({
+            isActive: true,
+            planId: existingRecord.vipPlan === '12' ? 'yearly' : existingRecord.vipPlan === '3' ? 'quarterly' : 'monthly',
+            planName: existingRecord.planName || 'اشتراک VIP Pro',
+            expiry: existingRecord.vipExpiry,
+            activatedAt: existingRecord.updatedAt || Date.now()
+          })
+        );
+        writeCookieValue('od_vip_expiry_cookie', String(existingRecord.vipExpiry));
+        writeCookieValue('od_vip_plan_cookie', existingRecord.vipPlan || '1');
+      } else if (currentExpiry > Date.now()) {
+        // Bind active device VIP to this user's account
+        saveVipRecordForCurrentAccount(
+          currentExpiry,
+          currentPlan,
+          currentPlan === '12'
+            ? 'اشتراک VIP یک‌ساله (۱۲ ماهه)'
+            : currentPlan === '3'
+            ? 'اشتراک VIP سه‌ماهه (۹۰ روزه)'
+            : 'اشتراک VIP یک‌ماهه (۳۰ روزه)',
+          cleanId
+        );
+      }
+    }
+  } catch {
+    // ignore
+  }
+  getMyReferralCode();
+  const updated = getDailyQuota();
+  notifySubscribers();
+  return updated;
+}
+
+/**
+ * Resets user-specific session quota when logging out,
+ * while strictly preserving the user's account-bound VIP subscription (`od_vip_expiry`),
+ * permanent Hardware ID (`od_fixed_hardware_id`),
+ * permanent Referral Code (`od_fixed_referral_code`), and permanent Referral invites (`od_permanent_referral_state_v1`).
  */
 export function resetUserAccountAndQuotaToGuest(): void {
   try {
+    const currentExpiry = Number(localStorage.getItem('od_vip_expiry') || '0');
+    const currentPlan = localStorage.getItem('od_vip_plan') || '1';
+    if (currentExpiry > Date.now()) {
+      saveVipRecordForCurrentAccount(
+        currentExpiry,
+        currentPlan,
+        currentPlan === '12'
+          ? 'اشتراک VIP یک‌ساله (۱۲ ماهه)'
+          : currentPlan === '3'
+          ? 'اشتراک VIP سه‌ماهه (۹۰ روزه)'
+          : 'اشتراک VIP یک‌ماهه (۳۰ روزه)'
+      );
+    }
     localStorage.removeItem(QUOTA_STORAGE_KEY);
-    localStorage.removeItem(PRO_STORAGE_KEY);
     localStorage.removeItem(REWARD_LOG_STORAGE_KEY);
-    localStorage.removeItem(REFERRAL_STORAGE_KEY);
     localStorage.removeItem(VIP_REQUEST_STORAGE_KEY);
-    localStorage.setItem(COINS_STORAGE_KEY, '0');
+    localStorage.removeItem(ACTIVE_ACCOUNT_ID_KEY);
   } catch {
     // ignore storage errors
   }

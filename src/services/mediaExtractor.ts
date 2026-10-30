@@ -1,11 +1,24 @@
 import { MediaType } from '../types';
 import {
-  extractAparatHash,
   extractInstagramShortcode,
   extractTwitterStatusId,
   extractYouTubeVideoId,
-  isCapacitorOrNative
+  fetchBackendApi,
+  fetchTikWmCached,
+  getApiUrl,
+  getSafeThumbnail,
+  isAparatUrl,
+  isCapacitorOrNative,
+  smartFetchJson
 } from './platformDetector';
+import {
+  AparatResolvedStream,
+  resolveViaAparat
+} from './aparatExtractor';
+import { MIN_VALID_AUDIO_BYTES, MIN_VALID_VIDEO_BYTES } from './nativeStorage';
+
+export type { AparatResolvedStream };
+export { resolveViaAparat };
 
 const PIPED_INSTANCES = [
   'https://api.piped.private.coffee',
@@ -32,9 +45,13 @@ const COBALT_INSTANCES = [
   'https://co.eepy.today'
 ];
 
+/**
+ * Unwraps any `/api/media/proxy-stream` or `/api/media/file/:taskId` or `/api/media/audio/:taskId`
+ * into the underlying raw upstream binary stream URL.
+ */
 export function unwrapRawMediaUrl(url: string): string {
   if (!url) return '';
-  if (url.startsWith('/api/media/proxy-stream')) {
+  if (url.includes('/api/media/proxy-stream')) {
     try {
       const qsIndex = url.indexOf('?');
       if (qsIndex !== -1) {
@@ -48,37 +65,71 @@ export function unwrapRawMediaUrl(url: string): string {
       // ignore
     }
   }
+  const fileMatch = url.match(/\/api\/media\/file\/([A-Za-z0-9_-]+)(\?.*)?$/i);
+  if (fileMatch && fileMatch[1]) {
+    const taskId = fileMatch[1];
+    let token = '';
+    try {
+      const qsIndex = url.indexOf('?');
+      if (qsIndex !== -1) {
+        const params = new URLSearchParams(url.slice(qsIndex + 1));
+        token = params.get('t') || '';
+      }
+    } catch {
+      // ignore
+    }
+    return `https://savevideo.uz/api/file/${taskId}?t=${encodeURIComponent(token)}`;
+  }
+
+  const audioMatch = url.match(/\/api\/media\/audio\/([A-Za-z0-9_-]+)(\?.*)?$/i);
+  if (audioMatch && audioMatch[1]) {
+    const taskId = audioMatch[1];
+    let token = '';
+    try {
+      const qsIndex = url.indexOf('?');
+      if (qsIndex !== -1) {
+        const params = new URLSearchParams(url.slice(qsIndex + 1));
+        token = params.get('t') || '';
+      }
+    } catch {
+      // ignore
+    }
+    return `https://savevideo.uz/api/audio/${taskId}?t=${encodeURIComponent(token)}`;
+  }
+
   return url;
 }
 
+export function isCorsDirectCdnUrl(url: string): boolean {
+  if (!url || !url.startsWith('http')) return false;
+  if (url.includes('/api/media/')) return false;
+  return /(?:tiktokcdn|tikwm\.com\/video\/media|cdn\.asset\.aparat\.com|aparat\.com\/v\/|twimg\.com)/i.test(
+    url
+  );
+}
+
+/**
+ * Active CORS Header-Rewriting Proxy Pool (Web / WebView / Native Fallback Pool)
+ */
 export const CORS_PROXIES = [
   (targetUrl: string) => {
-    if (isCapacitorOrNative() || targetUrl.startsWith('/api/')) return targetUrl;
-    return `/api/media/proxy-stream?url=${encodeURIComponent(targetUrl)}`;
-  },
-  (targetUrl: string) => unwrapRawMediaUrl(targetUrl),
-  (targetUrl: string) => {
+    if (!targetUrl) return '';
+    if (targetUrl.startsWith('/api/media/')) {
+      return getApiUrl(targetUrl);
+    }
+    if (targetUrl.includes('/api/media/')) {
+      return targetUrl;
+    }
     const raw = unwrapRawMediaUrl(targetUrl);
     return raw.startsWith('http')
-      ? `https://corsproxy.io/?${encodeURIComponent(raw)}`
-      : targetUrl;
-  },
-  (targetUrl: string) => {
-    const raw = unwrapRawMediaUrl(targetUrl);
-    return raw.startsWith('http')
-      ? `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(raw)}`
-      : targetUrl;
-  },
-  (targetUrl: string) => {
-    const raw = unwrapRawMediaUrl(targetUrl);
-    return raw.startsWith('http')
-      ? `https://api.allorigins.win/raw?url=${encodeURIComponent(raw)}`
-      : targetUrl;
+      ? getApiUrl(`/api/media/proxy-stream?url=${encodeURIComponent(raw)}`)
+      : '';
   }
 ];
 
 export interface ResolvedStreamInfo {
   url: string;
+  fallbackUrls?: string[];
   isRealExtracted: boolean;
   mimeType: string;
   estimatedBytes?: number;
@@ -100,7 +151,7 @@ function parseRequestedHeight(qualityLabel?: string): number {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function wrapStreamUrl(
+export function wrapStreamUrl(
   rawUrl: string,
   title?: string,
   isAudio?: boolean,
@@ -108,12 +159,23 @@ function wrapStreamUrl(
   quality?: string
 ): string {
   if (!rawUrl) return '';
-  if (
-    isCapacitorOrNative() ||
-    rawUrl.startsWith('/api/') ||
-    rawUrl.startsWith('blob:')
-  ) {
-    return rawUrl;
+  if (rawUrl.startsWith('blob:')) return rawUrl;
+  if (rawUrl.startsWith('/api/media/') || rawUrl.includes('/api/media/')) {
+    let updated = rawUrl;
+    if (
+      sourceUrl &&
+      !updated.includes('sourceUrl=') &&
+      (updated.includes('/api/media/file/') ||
+        updated.includes('/api/media/audio/') ||
+        updated.includes('/api/media/proxy-stream'))
+    ) {
+      const sep = updated.includes('?') ? '&' : '?';
+      updated += `${sep}sourceUrl=${encodeURIComponent(sourceUrl)}`;
+    }
+    return getApiUrl(updated);
+  }
+  if (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://')) {
+    return '';
   }
   let built = `/api/media/proxy-stream?url=${encodeURIComponent(rawUrl)}&title=${encodeURIComponent(
     title || 'media'
@@ -124,152 +186,12 @@ function wrapStreamUrl(
   if (quality) {
     built += `&quality=${encodeURIComponent(quality)}`;
   }
-  return built;
-}
-
-export interface AparatResolvedStream {
-  url: string;
-  rawUrl: string;
-  title?: string;
-  thumbnail?: string;
-  duration?: number;
-  estimatedSize?: number;
-  formatsMap?: Record<string, string>;
-}
-
-/**
- * Direct Aparat Resolver via Official v1 API:
- * https://www.aparat.com/api/fa/v1/video/video/show/videohash/[UID]
- * Extracts json.data.attributes.file_link_all (360p, 480p, 720p, 1080p) with automatic CORS proxy fallback.
- */
-export async function resolveViaAparat(
-  originalUrl: string,
-  qualityLabel?: string,
-  isAudio = false
-): Promise<AparatResolvedStream | null> {
-  const aparatHash = extractAparatHash(originalUrl);
-  if (!aparatHash) return null;
-
-  const requestedHeight = String(parseRequestedHeight(qualityLabel));
-
-  // 1. On Web/Server mode, try our Express /api/media/start endpoint first (zero-CORS, sets Referer: https://www.aparat.com/)
-  if (!isCapacitorOrNative()) {
-    try {
-      const startRes = await fetch('/api/media/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: originalUrl,
-          height: Number(requestedHeight) || 720,
-          audio: isAudio
-        })
-      });
-      if (startRes.ok) {
-        const startData = await startRes.json();
-        if (startData && startData.direct_url) {
-          const rawUrl = String(startData.direct_url);
-          return {
-            url: wrapStreamUrl(
-              rawUrl,
-              startData.title || `aparat_${aparatHash}`,
-              isAudio,
-              originalUrl,
-              requestedHeight
-            ),
-            rawUrl,
-            title: startData.title,
-            thumbnail: startData.thumbnail,
-            estimatedSize: startData.file_size
-          };
-        }
-      }
-    } catch {
-      // Fall through to direct v1 API with CORS proxy fallback
-    }
-  }
-
-  // 2. Direct Official v1 API + Stable CORS Proxy Fallback
-  const v1Api = `https://www.aparat.com/api/fa/v1/video/video/show/videohash/${aparatHash}`;
-  const legacyApi = `https://www.aparat.com/etc/api/video/videohash/${aparatHash}`;
-  const candidateApis = [
-    v1Api,
-    `https://corsproxy.io/?${encodeURIComponent(v1Api)}`,
-    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(v1Api)}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(v1Api)}`,
-    legacyApi,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(legacyApi)}`
-  ];
-
-  for (const ep of candidateApis) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 7500);
-      const res = await fetch(ep, {
-        headers: { Accept: 'application/json' },
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
-      if (!res.ok) continue;
-
-      const json = await res.json();
-      const attrs = json?.data?.attributes || json?.video;
-      if (!attrs) continue;
-
-      const formatsMap: Record<string, string> = {};
-      if (Array.isArray(attrs.file_link_all)) {
-        for (const item of attrs.file_link_all) {
-          const hMatch = String(item.profile || item.text || '').match(/(\d{3,4})/);
-          const u = Array.isArray(item.urls) ? item.urls[0] : item.url;
-          if (hMatch && u) {
-            formatsMap[hMatch[1]] = u;
-          }
-        }
-      }
-
-      const safeFileLink =
-        typeof attrs.file_link === 'string' && attrs.file_link.includes('.mp4')
-          ? attrs.file_link
-          : undefined;
-
-      const chosenRaw =
-        formatsMap[requestedHeight] ||
-        formatsMap['1080'] ||
-        formatsMap['720'] ||
-        formatsMap['480'] ||
-        formatsMap['360'] ||
-        formatsMap['240'] ||
-        formatsMap['144'] ||
-        safeFileLink;
-
-      if (chosenRaw) {
-        const dur = Number(attrs.duration) || 120;
-        const estBytes = Math.round(dur * (Number(requestedHeight) >= 720 ? 220000 : 120000));
-        return {
-          url: wrapStreamUrl(
-            chosenRaw,
-            attrs.title || `aparat_${aparatHash}`,
-            isAudio,
-            originalUrl,
-            requestedHeight
-          ),
-          rawUrl: chosenRaw,
-          title: attrs.title,
-          thumbnail: attrs.big_poster || attrs.medium_poster || attrs.med_poster || attrs.small_poster,
-          duration: dur,
-          estimatedSize: estBytes,
-          formatsMap
-        };
-      }
-    } catch {
-      // Try next endpoint
-    }
-  }
-
-  return null;
+  return getApiUrl(built);
 }
 
 export interface TikWMResolvedStream {
   url: string;
+  fallbackUrls: string[];
   title?: string;
   thumbnail?: string;
   duration?: number;
@@ -277,32 +199,53 @@ export interface TikWMResolvedStream {
 }
 
 /**
- * Direct No-Watermark TikTok Stream Resolver via TikWM API
+ * Direct No-Watermark TikTok Stream Resolver via TikWM API (with Cached Rate-Limit Protection)
  */
 export async function resolveViaTikWM(
   originalUrl: string,
   mediaType: MediaType
 ): Promise<TikWMResolvedStream | null> {
   try {
-    const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(originalUrl)}&hd=1`;
-    const res = await fetch(apiUrl, {
-      method: 'GET',
-      headers: { Accept: 'application/json' }
-    });
-    if (!res.ok) return null;
-    const json = await res.json();
-    if (json && json.code === 0 && json.data) {
-      const data = json.data;
+    const data = await fetchTikWmCached(originalUrl);
+    if (data) {
       const isAudio = mediaType === 'audio';
-      const directMediaUrl = isAudio
-        ? data.music || `https://www.tikwm.com/video/media/play/${data.id}.mp4`
-        : data.id
-        ? `https://www.tikwm.com/video/media/play/${data.id}.mp4`
-        : data.hdplay || data.play;
+      const idPlayUrl = data.id ? `https://www.tikwm.com/video/media/play/${data.id}.mp4` : '';
+      const hdPlayUrl = data.hdplay
+        ? String(data.hdplay).startsWith('http')
+          ? String(data.hdplay)
+          : `https://www.tikwm.com${data.hdplay}`
+        : '';
+      const stdPlayUrl = data.play
+        ? String(data.play).startsWith('http')
+          ? String(data.play)
+          : `https://www.tikwm.com${data.play}`
+        : '';
+      const wmPlayUrl = data.wmplay
+        ? String(data.wmplay).startsWith('http')
+          ? String(data.wmplay)
+          : `https://www.tikwm.com${data.wmplay}`
+        : '';
+      const musicUrl = data.music
+        ? String(data.music).startsWith('http')
+          ? String(data.music)
+          : `https://www.tikwm.com${data.music}`
+        : '';
 
-      if (directMediaUrl) {
+      const orderedRawCandidates = isAudio
+        ? [musicUrl, idPlayUrl, stdPlayUrl, hdPlayUrl].filter(Boolean)
+        : [idPlayUrl, stdPlayUrl, hdPlayUrl, wmPlayUrl].filter(Boolean);
+
+      if (orderedRawCandidates.length > 0) {
+        const primaryRaw = orderedRawCandidates[0];
+        const fallbackUrls: string[] = [];
+        for (const candidate of orderedRawCandidates) {
+          const wrapped = wrapStreamUrl(candidate, data.title || 'tiktok_video', isAudio, originalUrl);
+          if (wrapped && !fallbackUrls.includes(wrapped)) fallbackUrls.push(wrapped);
+        }
+
         return {
-          url: wrapStreamUrl(directMediaUrl, data.title || 'tiktok_video', isAudio),
+          url: primaryRaw,
+          fallbackUrls,
           title: data.title || `TikTok Video (@${data.author?.unique_id || 'tiktok'})`,
           thumbnail: data.cover || data.origin_cover,
           duration: data.duration,
@@ -382,83 +325,261 @@ export async function extractVideoFrameThumbnail(videoBlob: Blob): Promise<strin
 }
 
 /**
- * Resolves the real downloadable media stream for YouTube, Shorts, Aparat, Instagram, TikTok, Twitter/X, Facebook, and global platforms.
- * Zero mock or dummy fallback videos are used.
+ * Resolves additional fallback stream URLs from alternate engines (Piped, Invidious, Cobalt, SaveVideo 720p/360p)
+ * when a primary stream URL fails or returns a blocked < 500 KB response.
+ */
+export async function resolveFallbackMediaStreams(
+  originalUrl: string,
+  mediaType: MediaType,
+  qualityLabel?: string
+): Promise<string[]> {
+  const isAudio = mediaType === 'audio';
+  const requestedHeight = parseRequestedHeight(qualityLabel);
+  const ytId = extractYouTubeVideoId(originalUrl);
+  const results: string[] = [];
+
+  const addCandidate = (rawOrWrapped: string) => {
+    if (!rawOrWrapped) return;
+    const wrapped = wrapStreamUrl(rawOrWrapped, 'media', isAudio, originalUrl, String(requestedHeight));
+    if (wrapped && !results.includes(wrapped)) results.push(wrapped);
+  };
+
+  // 1. Backend /api/media/stream with explicit quality fallbacks (720p, 360p)
+  addCandidate(
+    getApiUrl(
+      `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${requestedHeight}&audio=${
+        isAudio ? '1' : '0'
+      }`
+    )
+  );
+  if (requestedHeight > 720) {
+    addCandidate(
+      getApiUrl(
+        `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=720&audio=${isAudio ? '1' : '0'}`
+      )
+    );
+  }
+
+  // 2. If YouTube, query Piped & Invidious instances for direct progressive MP4 streams
+  if (ytId) {
+    for (const instance of PIPED_INSTANCES.slice(0, 3)) {
+      try {
+        const data = await smartFetchJson(`${instance}/streams/${ytId}`, {
+          method: 'GET',
+          timeoutMs: 5000
+        });
+        if (!data) continue;
+        if (isAudio && Array.isArray(data.audioStreams)) {
+          for (const s of data.audioStreams) {
+            if (s?.url) addCandidate(s.url);
+          }
+        } else if (!isAudio && Array.isArray(data.videoStreams)) {
+          const prog = data.videoStreams.filter((s: any) => s.videoOnly === false && s.url);
+          for (const s of prog) {
+            addCandidate(s.url);
+          }
+        }
+        if (results.length >= 4) break;
+      } catch {
+        // continue
+      }
+    }
+
+    for (const instance of INVIDIOUS_INSTANCES.slice(0, 2)) {
+      try {
+        const data = await smartFetchJson(`${instance}/api/v1/videos/${ytId}`, {
+          method: 'GET',
+          timeoutMs: 5000
+        });
+        if (data && Array.isArray(data.formatStreams)) {
+          for (const s of data.formatStreams) {
+            if (s?.url) addCandidate(s.url);
+          }
+        }
+        if (results.length >= 5) break;
+      } catch {
+        // continue
+      }
+    }
+  }
+
+  // 3. Cobalt API fallback
+  for (const cobaltBase of COBALT_INSTANCES.slice(0, 2)) {
+    try {
+      const data = await smartFetchJson(`${cobaltBase}/`, {
+        method: 'POST',
+        body: {
+          url: originalUrl,
+          videoQuality: String(requestedHeight),
+          downloadMode: isAudio ? 'audio' : 'auto',
+          audioFormat: 'mp3'
+        },
+        timeoutMs: 5000
+      });
+      const streamUrl = data?.url || data?.audio;
+      if (streamUrl && typeof streamUrl === 'string' && streamUrl.startsWith('http')) {
+        addCandidate(streamUrl);
+        break;
+      }
+    } catch {
+      // continue
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Resolves the real downloadable media stream for YouTube (Shorts & Long), Instagram, TikTok, Twitter/X, Facebook, and Aparat.
  */
 export async function resolveDirectMediaStream(
   originalUrl: string,
   mediaType: MediaType,
   qualityLabel?: string,
-  preResolvedDirectUrl?: string
+  preResolvedDirectUrl?: string,
+  onProgress?: (percent: number) => void
 ): Promise<ResolvedStreamInfo> {
   const isAudio = mediaType === 'audio';
   const requestedHeight = parseRequestedHeight(qualityLabel);
 
-  // 0. If the format already has a real extracted direct stream URL (e.g. from /api/media/probe for Aparat, Instagram, TikTok, X)
-  if (preResolvedDirectUrl && preResolvedDirectUrl.trim()) {
-    return {
-      url: wrapStreamUrl(preResolvedDirectUrl.trim(), 'media', isAudio),
-      isRealExtracted: true,
-      mimeType: isAudio ? 'audio/mpeg' : 'video/mp4'
-    };
-  }
-
-  // 0b. If the user pasted a direct .mp4 / .mp3 / .webm file link
+  // 0a. Direct media file link (.mp4 / .mp3 / .webm)
   if (/\.(mp4|mp3|m4a|webm|wav|ogg|mov)(\?.*)?$/i.test(originalUrl)) {
+    const isDirectCors = isCorsDirectCdnUrl(originalUrl);
+    const wrapped = wrapStreamUrl(originalUrl, 'direct_media', isAudio);
     return {
-      url: wrapStreamUrl(originalUrl, 'direct_media', isAudio),
+      url: isDirectCors ? originalUrl : wrapped,
+      fallbackUrls: isDirectCors ? [wrapped] : [originalUrl],
       isRealExtracted: true,
       mimeType: isAudio ? 'audio/mpeg' : 'video/mp4'
     };
   }
 
-  // 1. Primary Engine: Our Full-Stack Express Backend (/api/media/start + /api/media/status)
-  if (!isCapacitorOrNative()) {
-    try {
-      const startRes = await fetch('/api/media/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: originalUrl,
-          height: requestedHeight,
-          audio: isAudio
-        })
-      });
+  // 0b. Isolated Aparat Module (Only if URL is Aparat — zero interference with global platforms)
+  if (isAparatUrl(originalUrl)) {
+    const aparatStream = await resolveViaAparat(originalUrl, qualityLabel, isAudio);
+    if (aparatStream && aparatStream.url) {
+      return {
+        url: aparatStream.rawUrl || aparatStream.url,
+        fallbackUrls: aparatStream.rawUrl ? [aparatStream.url] : undefined,
+        isRealExtracted: true,
+        mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
+        estimatedBytes: aparatStream.estimatedSize,
+        title: aparatStream.title,
+        thumbnail: aparatStream.thumbnail
+      };
+    }
+  }
 
-      if (startRes.ok) {
-        const startData = await startRes.json();
+  // 0c. For TikTok, try fast client-side cached TikWM first if available, or backend /api/media/start
+  const isTikTok = /(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/i.test(originalUrl);
 
-        // Direct instant resolution (Aparat, Instagram, Twitter/X, TikTok, yt-dlp, OpenGraph)
-        if (startData.status === 'done' && startData.direct_url) {
-          return {
-            url: wrapStreamUrl(startData.direct_url, startData.title || 'media', isAudio),
-            isRealExtracted: true,
-            mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
-            estimatedBytes: startData.file_size,
-            title: startData.title,
-            thumbnail: startData.thumbnail
-          };
+  // 1. Primary Full-Stack Express Backend (/api/media/start + /api/media/status) on both Web and Native APK
+  try {
+    onProgress?.(4);
+    const startRes = await fetchBackendApi('/api/media/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: originalUrl,
+        height: requestedHeight,
+        audio: isAudio
+      })
+    });
+
+    if (startRes.ok) {
+      const startData = await startRes.json();
+
+      if (startData.status === 'done' && startData.direct_url) {
+        onProgress?.(12);
+        const rawUrl = unwrapRawMediaUrl(String(startData.direct_url));
+        const wrappedPrimary = wrapStreamUrl(
+          String(startData.direct_url),
+          startData.title || 'media',
+          isAudio,
+          originalUrl,
+          String(requestedHeight)
+        );
+        const extraFallbacks: string[] = [];
+        if (Array.isArray(startData.fallback_urls)) {
+          for (const u of startData.fallback_urls) {
+            const rawF = unwrapRawMediaUrl(String(u));
+            if (isCorsDirectCdnUrl(rawF) && !extraFallbacks.includes(rawF)) {
+              extraFallbacks.push(rawF);
+            }
+            const wrappedF = wrapStreamUrl(
+              String(u),
+              startData.title || 'media',
+              isAudio,
+              originalUrl,
+              String(requestedHeight)
+            );
+            if (wrappedF && !extraFallbacks.includes(wrappedF)) {
+              extraFallbacks.push(wrappedF);
+            }
+          }
         }
+        const streamFallback = getApiUrl(
+          `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${requestedHeight}&audio=${
+            isAudio ? '1' : '0'
+          }`
+        );
 
-        const taskId = startData.task_id;
-        if (taskId) {
-          for (let attempt = 0; attempt < 25; attempt++) {
-            await sleep(1200);
-            const statusRes = await fetch(`/api/media/status/${taskId}`);
+        // If rawUrl is a CORS-enabled direct CDN (e.g. tiktokcdn-us.com, tikwm.com, aparat.com, twimg.com),
+        // use rawUrl FIRST so the browser downloads directly with 0 Cloud Run container bandwidth!
+        const useRawFirst = isCorsDirectCdnUrl(rawUrl);
+        const primaryUrl = useRawFirst ? rawUrl : wrappedPrimary;
+        const allFallbacks = useRawFirst
+          ? [wrappedPrimary, ...extraFallbacks, streamFallback]
+          : [...extraFallbacks, streamFallback];
+
+        return {
+          url: primaryUrl,
+          fallbackUrls: allFallbacks.filter((u) => u && u !== primaryUrl),
+          isRealExtracted: true,
+          mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
+          estimatedBytes: startData.file_size,
+          title: startData.title,
+          thumbnail: startData.thumbnail
+        };
+      }
+
+      const taskId = startData.task_id;
+      if (taskId) {
+        for (let attempt = 0; attempt < 45; attempt++) {
+          const simulatedPrep = Math.min(14, 5 + Math.round((attempt / 25) * 9));
+          onProgress?.(simulatedPrep);
+          await sleep(2500);
+          try {
+            const statusRes = await fetchBackendApi(`/api/media/status/${taskId}`);
             if (!statusRes.ok) continue;
 
             const statusData = await statusRes.json();
+            if (typeof statusData.progress === 'number' && statusData.progress > 0) {
+              onProgress?.(Math.min(14, Math.max(simulatedPrep, Math.round(statusData.progress * 0.14))));
+            }
             if (statusData.status === 'done') {
+              onProgress?.(15);
+              const resolvedTaskId = statusData.task_id || taskId;
               const token = statusData.file_token || '';
               const ext = isAudio ? 'mp3' : statusData.ext || 'mp4';
-              const streamEndpoint = isAudio
-                ? `/api/media/audio/${taskId}?t=${encodeURIComponent(token)}`
-                : `/api/media/file/${taskId}?t=${encodeURIComponent(token)}&ext=${ext}&title=${encodeURIComponent(
-                    statusData.title || 'video'
-                  )}`;
+              const streamEndpoint = getApiUrl(
+                isAudio
+                  ? `/api/media/audio/${resolvedTaskId}?t=${encodeURIComponent(token)}&quality=${requestedHeight}&sourceUrl=${encodeURIComponent(
+                      originalUrl
+                    )}`
+                  : `/api/media/file/${resolvedTaskId}?t=${encodeURIComponent(token)}&ext=${ext}&quality=${requestedHeight}&title=${encodeURIComponent(
+                      statusData.title || 'video'
+                    )}&sourceUrl=${encodeURIComponent(originalUrl)}`
+              );
+              const streamFallback = getApiUrl(
+                `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${requestedHeight}&audio=${
+                  isAudio ? '1' : '0'
+                }`
+              );
 
               return {
                 url: streamEndpoint,
+                fallbackUrls: [streamFallback],
                 isRealExtracted: true,
                 mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
                 estimatedBytes: statusData.file_size,
@@ -468,130 +589,195 @@ export async function resolveDirectMediaStream(
             } else if (statusData.status === 'error') {
               break;
             }
+          } catch {
+            // continue polling
           }
         }
       }
-    } catch (err) {
-      console.warn('Backend media resolver fallback:', err);
+    }
+  } catch {
+    // fall through to client-side / native resolvers below
+  }
+
+  // 2. TikTok Direct No-Watermark API Fallback (Client/Native)
+  if (isTikTok) {
+    const tikResolved = await resolveViaTikWM(originalUrl, mediaType);
+    if (tikResolved && tikResolved.url) {
+      return {
+        url: tikResolved.url,
+        fallbackUrls: tikResolved.fallbackUrls,
+        isRealExtracted: true,
+        mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
+        estimatedBytes: tikResolved.estimatedSize,
+        title: tikResolved.title,
+        thumbnail: tikResolved.thumbnail
+      };
     }
   }
 
-  // 2. Client-Side Engine for Aparat (aparat.com/v/{hash}) via Official v1 API
-  const aparatHash = extractAparatHash(originalUrl);
-  if (aparatHash) {
-    const v1Api = `https://www.aparat.com/api/fa/v1/video/video/show/videohash/${aparatHash}`;
-    const legacyApi = `https://www.aparat.com/etc/api/video/videohash/${aparatHash}`;
-    const endpoints = [
-      v1Api,
-      `https://api.allorigins.win/raw?url=${encodeURIComponent(v1Api)}`,
-      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(v1Api)}`,
-      legacyApi,
-      `https://api.allorigins.win/raw?url=${encodeURIComponent(legacyApi)}`
-    ];
-    for (const ep of endpoints) {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 7500);
-        const res = await fetch(ep, {
-          headers: { Accept: 'application/json' },
-          signal: controller.signal
-        });
-        clearTimeout(timeoutId);
-        if (!res.ok) continue;
-        const json = await res.json();
-        const v = json?.data?.attributes || json?.video;
-        if (v && (v.file_link_all || v.file_link || v.hls_link)) {
-          const formatsMap: Record<string, string> = {};
-          if (Array.isArray(v.file_link_all)) {
-            for (const item of v.file_link_all) {
-              const hMatch = String(item.profile || item.text || '').match(/(\d{3,4})/);
-              const u = Array.isArray(item.urls) ? item.urls[0] : item.url;
-              if (hMatch && u) formatsMap[hMatch[1]] = u;
+  // 2b. If preResolvedDirectUrl is already a concrete permanent CDN link (not a generic /api/media/stream wrapper or single-use SaveVideo token), use it with fallbacks
+  if (
+    preResolvedDirectUrl &&
+    preResolvedDirectUrl.trim() &&
+    !preResolvedDirectUrl.includes('/api/media/stream') &&
+    !preResolvedDirectUrl.includes('/api/media/file/') &&
+    !preResolvedDirectUrl.includes('/api/media/audio/') &&
+    !preResolvedDirectUrl.includes('savevideo.uz')
+  ) {
+    const raw = unwrapRawMediaUrl(preResolvedDirectUrl.trim());
+    const wrapped = wrapStreamUrl(
+      preResolvedDirectUrl.trim(),
+      'media',
+      isAudio,
+      originalUrl,
+      String(requestedHeight)
+    );
+    const streamFallback = getApiUrl(
+      `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${requestedHeight}&audio=${
+        isAudio ? '1' : '0'
+      }`
+    );
+    const useRawFirst = isCorsDirectCdnUrl(raw);
+    return {
+      url: useRawFirst ? raw : wrapped,
+      fallbackUrls: useRawFirst ? [wrapped, streamFallback] : [raw, streamFallback].filter(Boolean),
+      isRealExtracted: true,
+      mimeType: isAudio ? 'audio/mpeg' : 'video/mp4'
+    };
+  }
+
+  // 3. Direct SaveVideo Engine via smartFetchJson (with automatic 1080p -> 720p -> 360p fallback)
+  const ytId = extractYouTubeVideoId(originalUrl);
+  const igShortcode = extractInstagramShortcode(originalUrl);
+  const isInstagram = Boolean(igShortcode || /(?:instagram\.com|instagr\.am)/i.test(originalUrl));
+  const isFacebook = /(?:facebook\.com|fb\.watch|fb\.com)/i.test(originalUrl);
+  const tweetId = extractTwitterStatusId(originalUrl);
+
+  if (ytId || isInstagram || isFacebook || tweetId) {
+    const normalizedTargetUrl = ytId
+      ? `https://www.youtube.com/watch?v=${ytId}`
+      : isInstagram && igShortcode && !/\/stories\//i.test(originalUrl)
+      ? `https://www.instagram.com/reel/${igShortcode}/`
+      : originalUrl.split('?')[0] || originalUrl;
+
+    const heightsToTry = ytId
+      ? Array.from(new Set([requestedHeight, 720, 360]))
+      : [requestedHeight];
+
+    for (const tryHeight of heightsToTry) {
+      const startEndpoint = ytId
+        ? 'https://savevideo.uz/api/yt/start'
+        : 'https://savevideo.uz/api/download';
+      const startPayload = ytId
+        ? { url: normalizedTargetUrl, height: tryHeight, audio: isAudio }
+        : { url: normalizedTargetUrl };
+
+      const data = await smartFetchJson(startEndpoint, {
+        method: 'POST',
+        headers: { Referer: 'https://savevideo.uz/' },
+        body: startPayload,
+        timeoutMs: 11000
+      });
+
+      if (data && data.task_id) {
+        for (let attempt = 0; attempt < 25; attempt++) {
+          await sleep(1800);
+          const stData = await smartFetchJson(`https://savevideo.uz/api/status/${data.task_id}`, {
+            method: 'GET',
+            headers: { Referer: 'https://savevideo.uz/' },
+            timeoutMs: 7000
+          });
+          if (!stData) continue;
+          if (stData.status === 'done') {
+            const fileSize = typeof stData.file_size === 'number' ? stData.file_size : 0;
+            const minRequired = isAudio ? MIN_VALID_AUDIO_BYTES : MIN_VALID_VIDEO_BYTES;
+            if (fileSize > 0 && fileSize < minRequired) {
+              break; // Reject corrupt/tiny file and try next resolution
             }
-          }
-          const chosenUrl =
-            formatsMap[String(requestedHeight)] ||
-            formatsMap['1080'] ||
-            formatsMap['720'] ||
-            formatsMap['480'] ||
-            formatsMap['360'] ||
-            v.file_link ||
-            v.hls_link;
-          if (chosenUrl) {
+            const token = stData.file_token || '';
+            const proxiedUrl = getApiUrl(
+              isAudio
+                ? `/api/media/audio/${data.task_id}?t=${encodeURIComponent(token)}&sourceUrl=${encodeURIComponent(
+                    originalUrl
+                  )}`
+                : `/api/media/file/${data.task_id}?t=${encodeURIComponent(token)}&ext=${
+                    stData.ext || 'mp4'
+                  }&title=${encodeURIComponent(stData.title || 'video')}&sourceUrl=${encodeURIComponent(
+                    originalUrl
+                  )}`
+            );
+
             return {
-              url: wrapStreamUrl(chosenUrl, v.title || 'aparat_video', isAudio),
+              url: proxiedUrl,
+              fallbackUrls: [
+                getApiUrl(
+                  `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${tryHeight}&audio=${
+                    isAudio ? '1' : '0'
+                  }`
+                )
+              ],
               isRealExtracted: true,
               mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
-              title: v.title,
-              thumbnail: v.big_poster || v.medium_poster || v.med_poster || v.small_poster
+              estimatedBytes: fileSize > 0 ? fileSize : undefined,
+              title: stData.title,
+              thumbnail: ytId
+                ? getSafeThumbnail('', ytId)
+                : igShortcode
+                ? getSafeThumbnail(`/api/media/thumbnail?ig=${igShortcode}`)
+                : undefined
             };
           }
+          if (stData.status === 'error') break;
         }
-      } catch {
-        // try next endpoint
       }
     }
   }
 
-  // 3. Client-Side Engine for Instagram (instagram.com/reel/..., /p/..., /tv/...)
-  const igShortcode = extractInstagramShortcode(originalUrl);
-  if (igShortcode) {
-    // 3a. Try DDInstagram JSON/OpenGraph via CORS proxy
-    const ddEmbedUrl = `https://www.instagram.com/p/${igShortcode}/embed/captioned/`;
-    const scrapeUrls = [
-      `https://api.allorigins.win/raw?url=${encodeURIComponent(ddEmbedUrl)}`,
-      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(ddEmbedUrl)}`
-    ];
-    for (const ep of scrapeUrls) {
-      try {
-        const res = await fetch(ep);
-        if (!res.ok) continue;
-        const html = await res.text();
-        const videoMatch =
-          html.match(/"video_url"\s*:\s*"([^"]+)"/i) ||
-          html.match(/\\"video_url\\"\s*:\s*\\"([^\\"]+)\\"/i) ||
-          html.match(/class="EmbeddedMediaVideo"[^>]*src="([^"]+)"/i);
-        if (videoMatch && videoMatch[1]) {
-          const decodedUrl = videoMatch[1]
-            .replace(/\\u0026/g, '&')
-            .replace(/\\\//g, '/')
-            .replace(/&amp;/g, '&');
-          return {
-            url: wrapStreamUrl(decodedUrl, `instagram_${igShortcode}`, isAudio),
-            isRealExtracted: true,
-            mimeType: isAudio ? 'audio/mpeg' : 'video/mp4'
-          };
-        }
-      } catch {
-        // continue
-      }
-    }
-  }
-
-  // 4. Client-Side Engine for Twitter / X (twitter.com / x.com)
-  const tweetId = extractTwitterStatusId(originalUrl);
+  // 4. Client/Native Engine for Twitter / X (FXTwitter & VXTwitter highest bitrate .mp4)
   if (tweetId) {
     for (const apiUrl of [
-      `https://api.vxtwitter.com/Twitter/status/${tweetId}`,
-      `https://api.fxtwitter.com/status/${tweetId}`
+      `https://api.fxtwitter.com/status/${tweetId}`,
+      `https://api.vxtwitter.com/Twitter/status/${tweetId}`
     ]) {
       try {
-        const res = await fetch(apiUrl, { headers: { Accept: 'application/json' } });
-        if (!res.ok) continue;
-        const data = await res.json();
+        const data = await smartFetchJson(apiUrl, { method: 'GET', timeoutMs: 7000 });
+        if (!data) continue;
         const tweet = data?.tweet || data;
-        const mediaList = tweet?.media_extended || tweet?.media?.videos || [];
+        const mediaList = tweet?.media?.videos || tweet?.media_extended || tweet?.media?.all || [];
         const videoItem = Array.isArray(mediaList)
-          ? mediaList.find((m: any) => m.type === 'video' || m.type === 'gif' || (m.url && m.url.includes('.mp4')))
+          ? mediaList.find(
+              (m: any) =>
+                m &&
+                (m.type === 'video' ||
+                  m.type === 'gif' ||
+                  (typeof m.url === 'string' && m.url.includes('.mp4')))
+            )
           : null;
-        if (videoItem && videoItem.url) {
-          return {
-            url: wrapStreamUrl(videoItem.url, tweet.text || `x_${tweetId}`, isAudio),
-            isRealExtracted: true,
-            mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
-            title: tweet.text,
-            thumbnail: videoItem.thumbnail_url
-          };
+        if (videoItem) {
+          const variants: Array<{ url: string; bitrate: number }> = [];
+          if (Array.isArray(videoItem.variants)) {
+            for (const v of videoItem.variants) {
+              if (v && typeof v.url === 'string' && v.url.includes('.mp4') && !v.url.includes('.m3u8')) {
+                variants.push({ url: v.url, bitrate: Number(v.bitrate) || 1500000 });
+              }
+            }
+          }
+          if (typeof videoItem.url === 'string' && videoItem.url.includes('.mp4')) {
+            variants.push({ url: videoItem.url, bitrate: Number(videoItem.bitrate) || 9999999 });
+          }
+          variants.sort((a, b) => b.bitrate - a.bitrate);
+          const bestMp4 = variants[0]?.url || videoItem.url;
+          if (bestMp4) {
+            const wrapped = wrapStreamUrl(bestMp4, tweet.text || `x_${tweetId}`, isAudio);
+            return {
+              url: bestMp4,
+              fallbackUrls: [wrapped],
+              isRealExtracted: true,
+              mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
+              title: tweet.text,
+              thumbnail: videoItem.thumbnail_url ? getSafeThumbnail(videoItem.thumbnail_url) : undefined
+            };
+          }
         }
       } catch {
         // continue
@@ -599,158 +785,39 @@ export async function resolveDirectMediaStream(
     }
   }
 
-  // 5. Client-Side Engine for TikTok (TikWM Direct No-Watermark API)
-  const isTikTok = /(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/i.test(originalUrl);
-  if (isTikTok) {
-    try {
-      const tikRes = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(originalUrl)}&hd=1`);
-      if (tikRes.ok) {
-        const tikJson = await tikRes.json();
-        if (tikJson && tikJson.code === 0 && tikJson.data) {
-          const d = tikJson.data;
-          const directMediaUrl = isAudio
-            ? d.music || `https://www.tikwm.com/video/media/play/${d.id}.mp4`
-            : d.id
-            ? `https://www.tikwm.com/video/media/play/${d.id}.mp4`
-            : d.hdplay || d.play;
-          if (directMediaUrl) {
-            return {
-              url: wrapStreamUrl(directMediaUrl, d.title || 'tiktok_video', isAudio),
-              isRealExtracted: true,
-              mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
-              estimatedBytes: d.size || d.hd_size || 4500000,
-              title: d.title,
-              thumbnail: d.cover
-            };
-          }
-        }
-      }
-    } catch {
-      // Fall through
-    }
-  }
-
-  // 6. Client-Side Engine for YouTube: Piped & Invidious APIs
-  const ytId = extractYouTubeVideoId(originalUrl);
+  // 5. Client/Native Engine for YouTube: Piped & Invidious APIs
   if (ytId) {
-    for (const instance of PIPED_INSTANCES) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 5000);
-        const res = await fetch(`${instance}/streams/${ytId}`, { signal: controller.signal });
-        clearTimeout(timeout);
-        if (!res.ok) continue;
-        const data = await res.json();
-
-        if (isAudio && Array.isArray(data.audioStreams) && data.audioStreams.length > 0) {
-          const sorted = [...data.audioStreams].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-          const bestAudio = sorted.find((s) => s.mimeType?.includes('mp4') || s.mimeType?.includes('mpeg')) || sorted[0];
-          if (bestAudio?.url) {
-            return {
-              url: wrapStreamUrl(bestAudio.url, data.title || 'youtube_audio', true),
-              isRealExtracted: true,
-              mimeType: bestAudio.mimeType || 'audio/mp4',
-              estimatedBytes: bestAudio.contentLength ? Number(bestAudio.contentLength) : undefined,
-              title: data.title,
-              thumbnail: data.thumbnailUrl
-            };
-          }
-        }
-
-        if (!isAudio && Array.isArray(data.videoStreams) && data.videoStreams.length > 0) {
-          const progressiveStreams = data.videoStreams.filter((s: any) => s.videoOnly === false && s.url);
-          const pool = progressiveStreams.length > 0 ? progressiveStreams : data.videoStreams.filter((s: any) => s.url);
-          if (pool.length > 0) {
-            const matched =
-              pool.find((s: any) => s.quality?.includes(String(requestedHeight))) ||
-              pool.find((s: any) => s.quality?.includes('720')) ||
-              pool.find((s: any) => s.quality?.includes('480')) ||
-              pool[0];
-            if (matched?.url) {
-              return {
-                url: wrapStreamUrl(matched.url, data.title || 'youtube_video', false),
-                isRealExtracted: true,
-                mimeType: matched.mimeType || 'video/mp4',
-                estimatedBytes: matched.contentLength ? Number(matched.contentLength) : undefined,
-                title: data.title,
-                thumbnail: data.thumbnailUrl
-              };
-            }
-          }
-        }
-      } catch {
-        // try next Piped instance
-      }
-    }
-
-    for (const instance of INVIDIOUS_INSTANCES) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 5000);
-        const res = await fetch(`${instance}/api/v1/videos/${ytId}`, { signal: controller.signal });
-        clearTimeout(timeout);
-        if (!res.ok) continue;
-        const data = await res.json();
-
-        if (!isAudio && Array.isArray(data.formatStreams) && data.formatStreams.length > 0) {
-          const best =
-            data.formatStreams.find((s: any) => s.qualityLabel?.includes(String(requestedHeight))) ||
-            data.formatStreams.find((s: any) => s.qualityLabel?.includes('720')) ||
-            data.formatStreams[0];
-          if (best?.url) {
-            return {
-              url: wrapStreamUrl(best.url, data.title || 'youtube_video', false),
-              isRealExtracted: true,
-              mimeType: 'video/mp4',
-              title: data.title
-            };
-          }
-        }
-
-        if (isAudio && Array.isArray(data.adaptiveFormats) && data.adaptiveFormats.length > 0) {
-          const audioTracks = data.adaptiveFormats.filter((f: any) => f.type?.startsWith('audio/'));
-          if (audioTracks.length > 0 && audioTracks[0].url) {
-            return {
-              url: wrapStreamUrl(audioTracks[0].url, data.title || 'youtube_audio', true),
-              isRealExtracted: true,
-              mimeType: 'audio/mp4',
-              title: data.title
-            };
-          }
-        }
-      } catch {
-        // try next Invidious instance
-      }
+    const extraFallbacks = await resolveFallbackMediaStreams(originalUrl, mediaType, qualityLabel);
+    if (extraFallbacks.length > 0) {
+      return {
+        url: extraFallbacks[0],
+        fallbackUrls: extraFallbacks.slice(1),
+        isRealExtracted: true,
+        mimeType: isAudio ? 'audio/mpeg' : 'video/mp4'
+      };
     }
   }
 
-  // 7. Universal Multi-Platform Engine: Cobalt API (Instagram, TikTok, X/Twitter, Facebook, Vimeo, SoundCloud)
+  // 6. Universal Multi-Platform Engine: Cobalt API
   for (const cobaltBase of COBALT_INSTANCES) {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(`${cobaltBase}/`, {
+      const data = await smartFetchJson(`${cobaltBase}/`, {
         method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
+        body: {
           url: originalUrl,
           videoQuality: String(requestedHeight),
           downloadMode: isAudio ? 'audio' : 'auto',
           audioFormat: 'mp3'
-        }),
-        signal: controller.signal
+        },
+        timeoutMs: 5500
       });
-      clearTimeout(timeout);
 
-      if (res.ok) {
-        const data = await res.json();
+      if (data) {
         const streamUrl = data.url || data.audio;
         if (streamUrl && typeof streamUrl === 'string' && streamUrl.startsWith('http')) {
           return {
             url: wrapStreamUrl(streamUrl, data.filename || 'media', isAudio),
+            fallbackUrls: [streamUrl],
             isRealExtracted: true,
             mimeType: isAudio ? 'audio/mpeg' : 'video/mp4'
           };
@@ -761,25 +828,68 @@ export async function resolveDirectMediaStream(
     }
   }
 
+  // 7. Universal Backend Stream Fallback
+  const universalStreamUrl = getApiUrl(
+    `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${requestedHeight}&audio=${
+      isAudio ? '1' : '0'
+    }`
+  );
   return {
-    url: '',
-    isRealExtracted: false,
-    mimeType: isAudio ? 'audio/mpeg' : 'video/mp4'
+    url: universalStreamUrl,
+    fallbackUrls:
+      requestedHeight > 720
+        ? [
+            getApiUrl(
+              `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=720&audio=${
+                isAudio ? '1' : '0'
+              }`
+            )
+          ]
+        : undefined,
+    isRealExtracted: true,
+    mimeType: isAudio
+      ? qualityLabel?.toLowerCase().includes('m4a')
+        ? 'audio/mp4'
+        : 'audio/mpeg'
+      : 'video/mp4'
   };
 }
 
 /**
- * Validates that a response has a genuine media Content-Type (video/*, audio/*, application/octet-stream)
- * and is NOT an HTML webpage or JSON error payload.
+ * Validates that a response is a genuine binary media response (NEVER HTML, XML, JSON, or < 120 KB error payload).
  */
-function isGenuineMediaResponse(res: Response, isRangeRequest = false): boolean {
+function isGenuineMediaResponse(
+  res: Response,
+  isAudio: boolean = false,
+  isRangeSlice: boolean = false
+): boolean {
+  if (!res.ok && res.status !== 206) return false;
   const ct = (res.headers.get('content-type') || '').toLowerCase();
-  if (ct.includes('text/html') || ct.includes('application/json') || ct.includes('text/plain')) {
+  if (
+    ct.includes('text/html') ||
+    ct.includes('application/xhtml') ||
+    ct.includes('application/json') ||
+    ct.includes('text/plain') ||
+    ct.includes('text/xml') ||
+    ct.includes('application/xml')
+  ) {
     return false;
   }
-  if (!isRangeRequest && res.status !== 206) {
-    const cl = Number(res.headers.get('content-length') || 0);
-    if (cl > 0 && cl < 15000) {
+
+  const minBytes = isAudio ? MIN_VALID_AUDIO_BYTES : MIN_VALID_VIDEO_BYTES;
+  const cr = res.headers.get('content-range') || '';
+  if (cr.includes('/')) {
+    const totalStr = cr.split('/')[1];
+    const totalNum = Number(totalStr || '0');
+    if (totalNum > 0 && totalNum < minBytes) {
+      return false;
+    }
+    return true;
+  }
+
+  if (!isRangeSlice && res.status !== 206) {
+    const cl = Number(res.headers.get('content-length') || '0');
+    if (cl > 0 && cl < minBytes) {
       return false;
     }
   }
@@ -787,115 +897,68 @@ function isGenuineMediaResponse(res: Response, isRangeRequest = false): boolean 
 }
 
 /**
- * Probes the media stream with a HEAD request first to check `Accept-Ranges: bytes`
- * and `Content-Length` before splitting into 4 to 8 parallel Range chunks.
- */
-export async function probeHeadAndRangeSupport(
-  targetUrl: string,
-  signal?: AbortSignal
-): Promise<{ acceptsRanges: boolean; contentLength: number }> {
-  if (!targetUrl) {
-    return { acceptsRanges: false, contentLength: 0 };
-  }
-
-  const candidates =
-    targetUrl.startsWith('/api/media/') && !isCapacitorOrNative()
-      ? [targetUrl, unwrapRawMediaUrl(targetUrl)]
-      : CORS_PROXIES.map((fn) => fn(targetUrl));
-
-  for (const candidateUrl of candidates) {
-    if (!candidateUrl) continue;
-    if (signal?.aborted) {
-      throw new DOMException('Aborted', 'AbortError');
-    }
-    try {
-      const headRes = await fetch(candidateUrl, {
-        method: 'HEAD',
-        signal,
-        credentials: 'omit'
-      });
-      if (headRes.ok || headRes.status === 206) {
-        const acceptRanges = (headRes.headers.get('accept-ranges') || '').toLowerCase();
-        const exposeHeaders = (headRes.headers.get('access-control-expose-headers') || '').toLowerCase();
-        const contentLength = parseInt(headRes.headers.get('content-length') || '0', 10);
-        const contentRange = headRes.headers.get('content-range') || '';
-        const crMatch = contentRange.match(/\/(\d+)$/);
-        const totalSize = crMatch ? parseInt(crMatch[1], 10) : contentLength;
-
-        if (totalSize > 0) {
-          const supportsRange =
-            acceptRanges.includes('bytes') ||
-            exposeHeaders.includes('range') ||
-            headRes.status === 206 ||
-            Boolean(crMatch) ||
-            candidateUrl.startsWith('/api/media/') ||
-            candidateUrl.includes('cdn.asset.aparat.com');
-
-          return {
-            acceptsRanges: supportsRange,
-            contentLength: totalSize
-          };
-        }
-      }
-    } catch (err: any) {
-      if (err?.name === 'AbortError') throw err;
-    }
-  }
-
-  return { acceptsRanges: false, contentLength: 0 };
-}
-
-/**
- * Fetches the resolved real media stream with automatic CORS proxy fallback
- * Supports HTTP Range headers (`Range: bytes=start-end`) for parallel multi-segment downloads.
+ * TubeMate Direct Stream Fetcher (Supports both full stream and sequential Range slices):
+ * Keeps the primary `/api/media/...` endpoint first and supports `rangeHeader` via both
+ * HTTP `Range` header and `&range=` query parameter so proxy timeouts never interrupt large downloads.
  */
 export async function fetchMediaStreamWithCorsFallback(
   targetUrl: string,
   signal?: AbortSignal,
-  customHeaders?: Record<string, string>
+  isAudio: boolean = false,
+  rangeHeader?: string
 ): Promise<Response> {
   if (!targetUrl) {
-    throw new Error('لینک مستقیم ویدیو استخراج نشد. لطفاً از صحت لینک اطمینان حاصل کنید.');
+    throw new Error('لینک مستقیم ویدیو استخراج نشد.');
   }
 
-  const isRange = Boolean(customHeaders && (customHeaders['Range'] || customHeaders['range']));
+  const isBackendTarget =
+    targetUrl.startsWith('/api/media/') || targetUrl.includes('/api/media/');
 
-  if (targetUrl.startsWith('/api/media/') && !isCapacitorOrNative()) {
-    try {
-      const res = await fetch(targetUrl, {
-        signal,
-        headers: customHeaders,
-        credentials: 'omit'
-      });
-      if ((res.ok || res.status === 206) && res.body && isGenuineMediaResponse(res, isRange)) {
-        return res;
-      }
-    } catch (err: any) {
-      if (err?.name === 'AbortError') throw err;
-    }
+  const candidateUrls: string[] = [];
+
+  if (isBackendTarget) {
+    candidateUrls.push(getApiUrl(targetUrl));
+  } else {
+    candidateUrls.push(targetUrl);
   }
 
   let lastError: unknown;
-  for (const buildProxyUrl of CORS_PROXIES) {
+  for (const baseCandidateUrl of candidateUrls) {
+    if (!baseCandidateUrl) continue;
     if (signal?.aborted) {
       throw new DOMException('Aborted', 'AbortError');
     }
-    const candidateUrl = buildProxyUrl(targetUrl);
-    if (!candidateUrl || (isCapacitorOrNative() && candidateUrl.startsWith('/api/'))) continue;
     try {
-      const res = await fetch(candidateUrl, {
+      let fetchUrl = baseCandidateUrl;
+      const reqHeaders: Record<string, string> = {};
+      if (rangeHeader) {
+        reqHeaders['Range'] = rangeHeader;
+        if (fetchUrl.includes('/api/media/') && !fetchUrl.includes('range=')) {
+          const sep = fetchUrl.includes('?') ? '&' : '?';
+          fetchUrl = `${fetchUrl}${sep}range=${encodeURIComponent(rangeHeader)}`;
+        }
+      }
+
+      const isSameOriginBackend =
+        fetchUrl.startsWith('/') ||
+        (typeof window !== 'undefined' && fetchUrl.startsWith(window.location.origin));
+
+      const res = await fetch(fetchUrl, {
+        method: 'GET',
+        headers: Object.keys(reqHeaders).length > 0 ? reqHeaders : undefined,
         signal,
-        headers: customHeaders,
-        credentials: 'omit'
+        credentials: isSameOriginBackend ? 'include' : 'omit',
+        referrerPolicy: isSameOriginBackend ? undefined : 'no-referrer'
       });
-      if ((res.ok || res.status === 206) && res.body && isGenuineMediaResponse(res, isRange)) {
+      if (isGenuineMediaResponse(res, isAudio, Boolean(rangeHeader))) {
         return res;
       }
+      lastError = new Error(`Invalid media response (${res.status})`);
     } catch (err: any) {
-      if (err?.name === 'AbortError') throw err;
+      if (signal?.aborted || err?.name === 'AbortError') throw err;
       lastError = err;
     }
   }
 
-  throw lastError || new Error('خطا در دریافت استریم مستقیم مدیا از سرور مبدأ');
+  throw lastError || new Error('خطا در دریافت استریم مدیا');
 }

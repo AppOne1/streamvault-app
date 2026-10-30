@@ -8,11 +8,13 @@ const config: CapacitorConfig = {
     androidScheme: 'https'
   },
   android: {
-    allowMixedContent: true
+    allowMixedContent: true,
+    overrideUserAgent:
+      'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36'
   },
   plugins: {
     CapacitorHttp: {
-      enabled: true
+      enabled: false
     }
   }
 };

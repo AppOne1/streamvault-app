@@ -3,6 +3,7 @@ import { CustomMediaFolder, DownloadTask, Language } from '../types';
 import { PlatformIcon } from './PlatformIcon';
 import { getTranslation } from '../i18n/translations';
 import { getSafeThumbnail } from '../services/platformDetector';
+import { formatDownloadTimestamp } from '../services/downloadEngine';
 import { getAllOfflineMedia, deleteOfflineMedia, OfflineMediaRecord } from '../services/storageService';
 import { shareDownloadedMediaFile } from '../services/deviceService';
 import { DEFAULT_LOCK_PASSWORD, MASTER_KEYWORD } from '../services/quotaService';
@@ -28,7 +29,8 @@ import {
   X,
   Check,
   Share2,
-  ArrowRight
+  ArrowRight,
+  Clock
 } from 'lucide-react';
 
 interface MediaLibraryProps {
@@ -1003,9 +1005,19 @@ export const MediaLibrary: React.FC<MediaLibraryProps> = ({
                           </span>
                         )}
                       </div>
-                      <p className="text-[11px] text-slate-400 truncate mb-3">
+                      <p className="text-[11px] text-slate-400 truncate mb-1.5">
                         {item.fileName}
                       </p>
+                      <div className="flex flex-wrap items-center gap-2 text-[10px] font-bold text-slate-500 dark:text-slate-400 mb-2.5 font-mono">
+                        <span className="text-indigo-600 dark:text-indigo-400">{item.format.qualityLabel}</span>
+                        <span>•</span>
+                        <span dir="ltr">{item.totalSizeFormatted}</span>
+                        <span>•</span>
+                        <span className="inline-flex items-center gap-1 text-slate-500 dark:text-slate-400" dir="ltr">
+                          <Clock className="w-2.5 h-2.5 text-emerald-500 shrink-0" />
+                          <span>{formatDownloadTimestamp(item.completedAt || item.createdAt, language)}</span>
+                        </span>
+                      </div>
                     </div>
 
                     <div className="flex items-center justify-between pt-2.5 border-t border-slate-100 dark:border-slate-800 text-xs gap-1.5">
@@ -1013,17 +1025,31 @@ export const MediaLibrary: React.FC<MediaLibraryProps> = ({
                         <button
                           type="button"
                           onClick={() => onPlayMedia(item)}
-                          className="flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-black text-[11px] btn-3d-primary"
+                          className="flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-black text-[11px] btn-3d-primary cursor-pointer"
                         >
                           <Play className="w-3 h-3 fill-current" />
                           <span>{isFa ? 'پخش' : isAr ? 'تشغيل' : 'Play'}</span>
                         </button>
 
+                        {onSaveToDisk && (
+                          <button
+                            type="button"
+                            onClick={() => onSaveToDisk(item)}
+                            className="flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-[11px] btn-3d-amber cursor-pointer"
+                            title={isFa ? 'ذخیره در دستگاه' : isAr ? 'حفظ في الجهاز' : 'Save to Device'}
+                          >
+                            <HardDrive className="w-3 h-3" />
+                            <span>
+                              {isFa ? 'ذخیره در دستگاه' : isAr ? 'حفظ في الجهاز' : 'Save to Device'}
+                            </span>
+                          </button>
+                        )}
+
                         {/* Dedicated Share Downloaded Media File Button */}
                         <button
                           type="button"
                           onClick={() => shareDownloadedMediaFile(item)}
-                          className="flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-[11px] btn-3d-emerald"
+                          className="flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-[11px] btn-3d-emerald cursor-pointer"
                           title={isFa ? 'اشتراک‌گذاری' : isAr ? 'مشاركة' : 'Share'}
                         >
                           <Share2 className="w-3 h-3" />

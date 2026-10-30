@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import { Language } from '../types';
 
-export const PERMISSIONS_DISCLOSURE_STORAGE_KEY = 'onedownload_privacy_accepted_v3';
+export const PERMISSIONS_DISCLOSURE_STORAGE_KEY = 'onedownload_privacy_accepted_v4';
 
 interface PermissionsDisclosureModalProps {
   language: Language;
@@ -80,7 +80,7 @@ export const PermissionsDisclosureModal: React.FC<PermissionsDisclosureModalProp
           <div className="p-3.5 rounded-2xl bg-indigo-50/90 dark:bg-indigo-950/50 border-2 border-indigo-500/40 dark:border-indigo-500/40">
             <p className="text-xs sm:text-[13px] font-black text-slate-800 dark:text-slate-100 leading-relaxed text-justify">
               {isFa
-                ? '«دسترسی به حافظه دستگاه صرفاً جهت ذخیره‌سازی ویدیوها و فایل‌های صوتی دانلودشده توسط شما استفاده می‌شود و این نرم‌افزار به هیچ‌گونه اطلاعات شخصی، مخاطبین یا داده‌های دیگر دستگاه شما دسترسی ندارد.»'
+                ? '«کاربر گرامی، دسترسی به حافظه دستگاه صرفاً به منظور ذخیره‌سازی ویدیوها و فایل‌های صوتی دانلودشده توسط شما استفاده می‌شود. وان دانلود به هیچ‌یک از اطلاعات شخصی، تصاویر خصوصی یا مخاطبین دستگاه شما دسترسی ندارد.»'
                 : isAr
                 ? '«يُستخدم إذن الوصول إلى ذاكرة الجهاز حصرياً لحفظ مقاطع الفيديو والملفات الصوتية التي تقوم بتحميلها، ولا يصل هذا التطبيق إلى أي معلومات شخصية أو جهات اتصال أو بيانات أخرى على جهازك.»'
                 : '"Access to device storage is used strictly for saving videos and audio files downloaded by you, and this application does not access any personal information, contacts, or other data on your device."'}
@@ -179,10 +179,10 @@ export const PermissionsDisclosureModal: React.FC<PermissionsDisclosureModalProp
             <CheckCircle2 className="w-4 h-4" />
             <span>
               {isFa
-                ? 'پذیرش و ادامه'
+                ? 'پذیرش و ورود به برنامه'
                 : isAr
-                ? 'موافقة ومتابعة'
-                : 'Accept & Continue'}
+                ? 'موافقة والدخول إلى التطبيق'
+                : 'Accept & Enter App'}
             </span>
           </button>
         </div>

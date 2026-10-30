@@ -1,4 +1,12 @@
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { FormatOption, ParsedMediaInfo, PlatformId } from '../types';
+import {
+  extractAparatHash,
+  isAparatUrl,
+  probeAparatIsolated
+} from './aparatExtractor';
+
+export { extractAparatHash, isAparatUrl };
 
 export const SAMPLE_URLS: { label: string; platform: PlatformId; url: string }[] = [
   {
@@ -19,9 +27,189 @@ export const SAMPLE_URLS: { label: string; platform: PlatformId; url: string }[]
   {
     label: 'Instagram Reel',
     platform: 'instagram',
-    url: 'https://www.instagram.com/reel/C5X9_abc123/'
+    url: 'https://www.instagram.com/reel/DWwz7U6DcVx/'
   }
 ];
+
+/**
+ * Detects whether the app is running inside a native Android APK (Capacitor) or file:// origin
+ * where relative `/api/...` server routes do not exist on localhost.
+ */
+export function isCapacitorOrNative(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    if (Capacitor.isNativePlatform()) return true;
+  } catch {
+    // ignore
+  }
+  if ((window as any).Capacitor?.isNativePlatform?.()) return true;
+  const proto = window.location.protocol;
+  const host = window.location.hostname;
+  if (proto === 'capacitor:' || proto === 'file:') return true;
+  if (host === 'localhost' && !window.location.port) return true;
+  return false;
+}
+
+export const CLOUD_BACKEND_URLS = [
+  'https://ais-pre-bp7ohi7vpvm6mgmp5wbo3w-79764360167.asia-east1.run.app',
+  'https://ais-dev-bp7ohi7vpvm6mgmp5wbo3w-79764360167.asia-east1.run.app'
+];
+
+/**
+ * Resolves a `/api/...` path for both Web and Native Android APK.
+ * On Native Android APK, prefixes relative `/api/...` paths with the live Cloud Run backend origin.
+ */
+export function getApiUrl(apiPath: string): string {
+  if (!apiPath) return '';
+  if (apiPath.startsWith('http://') || apiPath.startsWith('https://')) {
+    return apiPath;
+  }
+  const normalized = apiPath.startsWith('/') ? apiPath : `/${apiPath}`;
+  if (!isCapacitorOrNative()) {
+    return normalized;
+  }
+  return `${CLOUD_BACKEND_URLS[0]}${normalized}`;
+}
+
+/**
+ * Performs a fetch to our backend `/api/...` endpoint on both Web/PWA and Native Android APK.
+ */
+export async function fetchBackendApi(
+  apiPath: string,
+  init?: RequestInit
+): Promise<Response> {
+  const normalized = apiPath.startsWith('/') ? apiPath : `/${apiPath}`;
+  if (!isCapacitorOrNative()) {
+    let lastWebErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (attempt > 0) {
+          await new Promise((r) => setTimeout(r, 1400 * attempt));
+        }
+        const res = await fetch(normalized, {
+          ...init,
+          credentials: 'include'
+        });
+        const ct = (res.headers.get('content-type') || '').toLowerCase();
+        if (ct.includes('text/html') && normalized.startsWith('/api/')) {
+          throw new Error(`Invalid HTML response from ${normalized}`);
+        }
+        return res;
+      } catch (e) {
+        lastWebErr = e;
+      }
+    }
+    throw lastWebErr || new Error(`Failed to fetch ${normalized}`);
+  }
+
+  let lastErr: unknown;
+  for (const base of CLOUD_BACKEND_URLS) {
+    try {
+      const res = await fetch(`${base}${normalized}`, init);
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (ct.includes('text/html') && normalized.startsWith('/api/')) {
+        continue;
+      }
+      if (res.ok) {
+        return res;
+      }
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('Backend API unreachable');
+}
+
+const tikWmClientCache = new Map<string, { data: any; ts: number }>();
+
+/**
+ * Cached TikWM API resolver to prevent TikWM's 1-request-per-second rate limit
+ * when parseMediaUrl (link analysis) is immediately followed by download start.
+ */
+export async function fetchTikWmCached(url: string): Promise<any | null> {
+  const key = url.trim();
+  const cached = tikWmClientCache.get(key);
+  if (cached && Date.now() - cached.ts < 10 * 60 * 1000) {
+    return cached.data;
+  }
+  const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(key)}&hd=1`;
+  let json = await smartFetchJson(apiUrl, { method: 'GET', timeoutMs: 9000 });
+  if (!json || json.code !== 0 || !json.data) {
+    await new Promise((r) => setTimeout(r, 1150));
+    json = await smartFetchJson(apiUrl, { method: 'GET', timeoutMs: 9000 });
+  }
+  if (json && json.code === 0 && json.data) {
+    tikWmClientCache.set(key, { data: json.data, ts: Date.now() });
+    return json.data;
+  }
+  return null;
+}
+
+/**
+ * Cross-platform JSON requester that uses native Java HttpURLConnection (`CapacitorHttp`) on Android APK
+ * (completely bypassing CORS restrictions on savevideo.uz, instagram.com, tikwm.com, etc.)
+ * and standard `fetch` on Web.
+ */
+export async function smartFetchJson(
+  url: string,
+  options?: {
+    method?: 'GET' | 'POST';
+    headers?: Record<string, string>;
+    body?: any;
+    timeoutMs?: number;
+  }
+): Promise<any | null> {
+  const method = options?.method || 'GET';
+  const timeoutMs = options?.timeoutMs || 11000;
+
+  if (isCapacitorOrNative()) {
+    try {
+      const response = await CapacitorHttp.request({
+        url,
+        method,
+        headers: {
+          Accept: 'application/json',
+          'User-Agent':
+            'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+          ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
+          ...(options?.headers || {})
+        },
+        data: options?.body,
+        connectTimeout: timeoutMs,
+        readTimeout: timeoutMs
+      });
+      if (response.status >= 200 && response.status < 300 && response.data) {
+        return typeof response.data === 'string'
+          ? JSON.parse(response.data)
+          : response.data;
+      }
+    } catch {
+      // Fall through to standard fetch below
+    }
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const SafeHeaders: Record<string, string> = {
+      Accept: 'application/json',
+      ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {})
+    };
+    const res = await fetch(url, {
+      method,
+      headers: SafeHeaders,
+      body: options?.body ? JSON.stringify(options.body) : undefined,
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
 
 /**
  * Extracts the first HTTP/HTTPS URL found inside arbitrary shared text
@@ -130,7 +318,8 @@ export function formatDuration(seconds: number): string {
 
 export function extractYouTubeVideoId(url: string): string | null {
   try {
-    const regExp = /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/))([\w-]{11})/i;
+    const regExp =
+      /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/|live\/))([\w-]{11})/i;
     const match = url.match(regExp);
     if (match && match[1]) {
       return match[1];
@@ -146,25 +335,17 @@ export function extractYouTubeVideoId(url: string): string | null {
   return null;
 }
 
-export function extractAparatHash(url: string): string | null {
-  if (!url) return null;
-  const cleaned = url.trim();
-  const match =
-    cleaned.match(/aparat\.com\/(?:v|embed)\/([A-Za-z0-9]{4,16})(?:[/?#&]|$)/i) ||
-    cleaned.match(/aparat\.com\/video\/video\/embed\/videohash\/([A-Za-z0-9]{4,16})(?:[/?#&]|$)/i) ||
-    cleaned.match(/videohash\/([A-Za-z0-9]{4,16})(?:[/?#&]|$)/i) ||
-    cleaned.match(/aparat\.com\/(?:v|embed)\/([A-Za-z0-9_-]+)/i) ||
-    cleaned.match(/aparat\.com\/.*\/([A-Za-z0-9]{4,12})(?:[/?#]|$)/i);
-  return match ? match[1] : null;
-}
-
 export function extractInstagramShortcode(url: string): string | null {
-  const match = url.match(/(?:instagram\.com|instagr\.am)\/(?:[^/]+\/)?(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/i);
+  const match =
+    url.match(
+      /(?:instagram\.com|instagr\.am)\/(?:share\/)?(?:[^/]+\/)?(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/i
+    ) ||
+    url.match(/(?:instagram\.com|instagr\.am)\/stories\/[^/?#]+\/(\d+)/i);
   return match ? match[1] : null;
 }
 
 export function extractTwitterStatusId(url: string): string | null {
-  const match = url.match(/(?:twitter\.com|x\.com)\/(?:[^/]+)\/status\/(\d+)/i);
+  const match = url.match(/(?:twitter\.com|x\.com)\/(?:[^/]+\/)?(?:status|statuses|videos)\/(\d+)/i);
   return match ? match[1] : null;
 }
 
@@ -182,6 +363,12 @@ function deriveTitleFromUrl(url: string, platform: PlatformId): string {
     if (platform === 'twitter') {
       const id = extractTwitterStatusId(url);
       if (id) return `ویدیو ایکس / توییتر (${id})`;
+    }
+    if (platform === 'youtube') {
+      const ytId = extractYouTubeVideoId(url);
+      if (ytId) {
+        return url.includes('/shorts/') ? `YouTube Shorts (${ytId})` : `YouTube Video (${ytId})`;
+      }
     }
     const pathSegments = parsed.pathname.split('/').filter(Boolean);
     if (pathSegments.length > 0) {
@@ -206,19 +393,21 @@ function deriveTitleFromUrl(url: string, platform: PlatformId): string {
 
 function generateFormatOptions(
   durationSeconds: number,
-  probedHeights?: number[],
+  _probedHeights?: number[],
   probedEst?: Record<string, number>,
   audioEst?: number,
   formatsMap?: Record<string, string>,
   directVideoUrl?: string,
   directAudioUrl?: string
 ): FormatOption[] {
-  const calcBytes = (kbps: number) => Math.round(((kbps * 1000) / 8) * Math.max(durationSeconds, 30));
+  const safeDuration = Math.max(durationSeconds || 120, 20);
+  const calcBytes = (kbps: number) => Math.round(((kbps * 1000) / 8) * safeDuration);
 
-  const allVideoDefinitions: {
+  // TubeMate Standard Progressive Video Resolutions: 1080p Full HD, 720p HD, 480p, 360p
+  const tubeMateVideoDefinitions: {
     height: number;
     id: string;
-    format: 'mp4' | 'webm';
+    format: 'mp4';
     qualityLabel: string;
     resolution: string;
     fps: number;
@@ -229,32 +418,6 @@ function generateFormatOptions(
     defaultKbps: number;
   }[] = [
     {
-      height: 2160,
-      id: 'v-4k-60',
-      format: 'mp4',
-      qualityLabel: '4K Ultra HD (2160p)',
-      resolution: '3840x2160',
-      fps: 60,
-      vCodec: 'AV01 (AV1 10-bit)',
-      aCodec: 'AAC-LC 320k',
-      bitrate: '24.5 Mbps',
-      isHdr: true,
-      defaultKbps: 18500
-    },
-    {
-      height: 1440,
-      id: 'v-2k-60',
-      format: 'mp4',
-      qualityLabel: '2K QHD (1440p)',
-      resolution: '2560x1440',
-      fps: 60,
-      vCodec: 'VP9.2 HDR',
-      aCodec: 'Opus 256k',
-      bitrate: '12.0 Mbps',
-      isHdr: true,
-      defaultKbps: 9800
-    },
-    {
       height: 1080,
       id: 'v-1080p',
       format: 'mp4',
@@ -263,78 +426,58 @@ function generateFormatOptions(
       fps: 60,
       vCodec: 'AVC1 (H.264 High)',
       aCodec: 'AAC-LC 256k',
-      bitrate: '5.8 Mbps',
+      bitrate: '4.5 Mbps',
       isHdr: false,
-      defaultKbps: 4800
+      defaultKbps: 4200
     },
     {
       height: 720,
       id: 'v-720p',
       format: 'mp4',
-      qualityLabel: '720p HD Ready',
+      qualityLabel: '720p HD',
       resolution: '1280x720',
       fps: 30,
       vCodec: 'AVC1 (H.264 Main)',
       aCodec: 'AAC-LC 192k',
-      bitrate: '2.6 Mbps',
+      bitrate: '2.4 Mbps',
       isHdr: false,
-      defaultKbps: 2400
+      defaultKbps: 2200
     },
     {
       height: 480,
       id: 'v-480p',
       format: 'mp4',
-      qualityLabel: '480p Standard',
+      qualityLabel: '480p',
       resolution: '854x480',
       fps: 30,
       vCodec: 'AVC1 (H.264)',
       aCodec: 'AAC-LC 128k',
-      bitrate: '1.2 Mbps',
+      bitrate: '1.1 Mbps',
       isHdr: false,
-      defaultKbps: 1150
+      defaultKbps: 1100
     },
     {
       height: 360,
       id: 'v-360p',
       format: 'mp4',
-      qualityLabel: '360p Eco Saver',
+      qualityLabel: '360p',
       resolution: '640x360',
       fps: 30,
       vCodec: 'AVC1 (H.264)',
       aCodec: 'AAC-LC 96k',
-      bitrate: '700 kbps',
+      bitrate: '650 kbps',
       isHdr: false,
       defaultKbps: 650
-    },
-    {
-      height: 240,
-      id: 'v-240p',
-      format: 'mp4',
-      qualityLabel: '240p Low Data',
-      resolution: '426x240',
-      fps: 30,
-      vCodec: 'AVC1 (H.264)',
-      aCodec: 'AAC-LC 64k',
-      bitrate: '400 kbps',
-      isHdr: false,
-      defaultKbps: 380
     }
   ];
 
-  const filteredDefs =
-    probedHeights && probedHeights.length > 0
-      ? allVideoDefinitions.filter((d) => probedHeights.includes(d.height))
-      : allVideoDefinitions.filter((d) => [1080, 720, 480, 360].includes(d.height));
-
-  const finalVideoDefs =
-    filteredDefs.length > 0
-      ? filteredDefs
-      : allVideoDefinitions.filter((d) => [1080, 720, 480, 360].includes(d.height));
-
-  const videoFormats: FormatOption[] = finalVideoDefs.map((def) => {
-    const estSize = probedEst?.[String(def.height)] || calcBytes(def.defaultKbps);
+  const videoFormats: FormatOption[] = tubeMateVideoDefinitions.map((def) => {
+    const rawEst = probedEst?.[String(def.height)];
+    const estSize = rawEst && rawEst > 30000 ? rawEst : calcBytes(def.defaultKbps);
     const matchedDirectUrl =
       formatsMap?.[String(def.height)] ||
+      formatsMap?.['720'] ||
+      formatsMap?.['480'] ||
       directVideoUrl;
 
     return {
@@ -354,46 +497,47 @@ function generateFormatOptions(
     };
   });
 
-  const mp3Size320 = audioEst || calcBytes(320);
-  const m4aSize256 = calcBytes(256);
+  // TubeMate Dedicated Audio Extraction Options: MP3 (256k), MP3 (128k), and M4A/AAC
+  const mp3Size256 = audioEst && audioEst > 15000 ? audioEst : calcBytes(256);
   const mp3Size128 = calcBytes(128);
+  const m4aSize192 = calcBytes(192);
   const resolvedAudioDirect = directAudioUrl || directVideoUrl;
 
   const audioFormats: FormatOption[] = [
     {
-      id: 'a-mp3-320',
+      id: 'a-mp3-256',
       type: 'audio',
       format: 'mp3',
-      qualityLabel: '320 kbps Studio Master',
-      aCodec: 'LAME MP3 CBR',
-      bitrate: '320 kbps',
-      channels: 'Stereo 2.0 (48kHz)',
-      estimatedSizeBytes: mp3Size320,
-      estimatedSizeFormatted: formatBytes(mp3Size320),
-      directUrl: resolvedAudioDirect
-    },
-    {
-      id: 'a-m4a-256',
-      type: 'audio',
-      format: 'm4a',
-      qualityLabel: '256 kbps Apple AAC',
-      aCodec: 'AAC-LC VBR',
+      qualityLabel: 'MP3 (256k HQ)',
+      aCodec: 'LAME MP3 256k',
       bitrate: '256 kbps',
-      channels: 'Stereo 2.0 (44.1kHz)',
-      estimatedSizeBytes: m4aSize256,
-      estimatedSizeFormatted: formatBytes(m4aSize256),
+      channels: 'Stereo 2.0 (48kHz)',
+      estimatedSizeBytes: mp3Size256,
+      estimatedSizeFormatted: formatBytes(mp3Size256),
       directUrl: resolvedAudioDirect
     },
     {
       id: 'a-mp3-128',
       type: 'audio',
       format: 'mp3',
-      qualityLabel: '128 kbps Standard Audio',
-      aCodec: 'MP3 Joint Stereo',
+      qualityLabel: 'MP3 (128k)',
+      aCodec: 'MP3 Joint Stereo 128k',
       bitrate: '128 kbps',
-      channels: 'Stereo 2.0',
+      channels: 'Stereo 2.0 (44.1kHz)',
       estimatedSizeBytes: mp3Size128,
       estimatedSizeFormatted: formatBytes(mp3Size128),
+      directUrl: resolvedAudioDirect
+    },
+    {
+      id: 'a-m4a-192',
+      type: 'audio',
+      format: 'm4a',
+      qualityLabel: 'M4A / AAC (192k)',
+      aCodec: 'AAC-LC Audio',
+      bitrate: '192 kbps',
+      channels: 'Stereo 2.0 (44.1kHz)',
+      estimatedSizeBytes: m4aSize192,
+      estimatedSizeFormatted: formatBytes(m4aSize192),
       directUrl: resolvedAudioDirect
     }
   ];
@@ -436,114 +580,7 @@ export function createSvgCoverDataUri(platform: PlatformId, label: string): stri
 }
 
 /**
- * Helper: Client-side Aparat API resolver using official v1 API
- * (`https://www.aparat.com/api/fa/v1/video/video/show/videohash/[UID]`)
- */
-async function probeAparatClientSide(url: string): Promise<{
-  title: string;
-  author: string;
-  duration: number;
-  thumbnail: string;
-  viewsCount?: string;
-  heights: number[];
-  est: Record<string, number>;
-  formatsMap: Record<string, string>;
-  directVideoUrl: string;
-} | null> {
-  const hash = extractAparatHash(url);
-  if (!hash) return null;
-
-  const v1Api = `https://www.aparat.com/api/fa/v1/video/video/show/videohash/${hash}`;
-  const legacyApi = `https://www.aparat.com/etc/api/video/videohash/${hash}`;
-  const endpoints = [
-    v1Api,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(v1Api)}`,
-    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(v1Api)}`,
-    legacyApi,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(legacyApi)}`
-  ];
-
-  for (const ep of endpoints) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 7500);
-      const res = await fetch(ep, {
-        headers: { Accept: 'application/json' },
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
-      if (!res.ok) continue;
-      const json = await res.json();
-      const v = json?.data?.attributes || json?.video;
-      if (v && (v.file_link_all || v.file_link || v.hls_link)) {
-        const formatsMap: Record<string, string> = {};
-        const heights: number[] = [];
-        const est: Record<string, number> = {};
-        const duration = Number(v.duration) || 120;
-
-        if (Array.isArray(v.file_link_all)) {
-          for (const item of v.file_link_all) {
-            const profileStr = String(item.profile || item.text || '');
-            const hMatch = profileStr.match(/(\d{3,4})/);
-            const urlCandidate = Array.isArray(item.urls) ? item.urls[0] : item.url;
-            if (hMatch && urlCandidate) {
-              const h = parseInt(hMatch[1], 10);
-              if (!heights.includes(h)) heights.push(h);
-              formatsMap[String(h)] = urlCandidate;
-              const bitrateKbps = h >= 1080 ? 2800 : h >= 720 ? 1500 : h >= 480 ? 850 : 520;
-              est[String(h)] = Math.round(((bitrateKbps * 1000) / 8) * duration);
-            }
-          }
-        }
-
-        heights.sort((a, b) => a - b);
-        const safeFileLink =
-          typeof v.file_link === 'string' && v.file_link.includes('.mp4')
-            ? v.file_link
-            : undefined;
-        const bestVideoUrl =
-          formatsMap['1080'] ||
-          formatsMap['720'] ||
-          formatsMap['480'] ||
-          formatsMap['360'] ||
-          formatsMap['240'] ||
-          formatsMap['144'] ||
-          formatsMap[String(heights[heights.length - 1])] ||
-          safeFileLink;
-
-        if (bestVideoUrl) {
-          if (heights.length === 0) {
-            heights.push(480, 720);
-            formatsMap['720'] = bestVideoUrl;
-            formatsMap['480'] = bestVideoUrl;
-          }
-          const rawPoster =
-            v.big_poster || v.medium_poster || v.med_poster || v.small_poster || '';
-          return {
-            title: v.title || `ویدیو آپارات (${hash})`,
-            author: v.sender_name || v.owner_username || v.username || 'Aparat',
-            duration,
-            thumbnail: rawPoster,
-            viewsCount:
-              v.visit_cnt_non_formatted || v.visit_cnt
-                ? String(v.visit_cnt_non_formatted || v.visit_cnt)
-                : undefined,
-            heights,
-            est,
-            formatsMap,
-            directVideoUrl: bestVideoUrl
-          };
-        }
-      }
-    } catch {
-      // try next
-    }
-  }
-  return null;
-}
-
-/**
- * Helper: Client-side Twitter/X API resolver
+ * Helper: Client-side Twitter/X API resolver (Selects highest bitrate direct .mp4 variant)
  */
 async function probeTwitterClientSide(url: string): Promise<{
   title: string;
@@ -551,31 +588,53 @@ async function probeTwitterClientSide(url: string): Promise<{
   duration: number;
   thumbnail: string;
   directVideoUrl: string;
+  formatsMap?: Record<string, string>;
 } | null> {
   const tweetId = extractTwitterStatusId(url);
   if (!tweetId) return null;
 
   for (const apiUrl of [
-    `https://api.vxtwitter.com/Twitter/status/${tweetId}`,
-    `https://api.fxtwitter.com/status/${tweetId}`
+    `https://api.fxtwitter.com/status/${tweetId}`,
+    `https://api.vxtwitter.com/Twitter/status/${tweetId}`
   ]) {
     try {
-      const res = await fetch(apiUrl, { headers: { Accept: 'application/json' } });
-      if (!res.ok) continue;
-      const data = await res.json();
+      const data = await smartFetchJson(apiUrl, { method: 'GET', timeoutMs: 7000 });
+      if (!data) continue;
       const tweet = data?.tweet || data;
-      const mediaList = tweet?.media_extended || tweet?.media?.videos || [];
+      const mediaList = tweet?.media?.videos || tweet?.media_extended || tweet?.media?.all || [];
       const videoItem = Array.isArray(mediaList)
-        ? mediaList.find((m: any) => m.type === 'video' || m.type === 'gif' || (m.url && m.url.includes('.mp4')))
+        ? mediaList.find(
+            (m: any) =>
+              m &&
+              (m.type === 'video' ||
+                m.type === 'gif' ||
+                (typeof m.url === 'string' && m.url.includes('.mp4')))
+          )
         : null;
-      if (videoItem && videoItem.url) {
-        return {
-          title: (tweet.text || `X Video (${tweetId})`).replace(/\s+/g, ' ').trim().slice(0, 95),
-          author: tweet.user_name ? `${tweet.user_name} (@${tweet.user_screen_name || 'x'})` : 'X / Twitter',
-          duration: videoItem.duration_millis ? Math.round(videoItem.duration_millis / 1000) : 35,
-          thumbnail: videoItem.thumbnail_url || '',
-          directVideoUrl: videoItem.url
-        };
+      if (videoItem) {
+        const variants: Array<{ url: string; bitrate: number }> = [];
+        if (Array.isArray(videoItem.variants)) {
+          for (const v of videoItem.variants) {
+            if (v && typeof v.url === 'string' && v.url.includes('.mp4') && !v.url.includes('.m3u8')) {
+              variants.push({ url: v.url, bitrate: Number(v.bitrate) || 1500000 });
+            }
+          }
+        }
+        if (typeof videoItem.url === 'string' && videoItem.url.includes('.mp4')) {
+          variants.push({ url: videoItem.url, bitrate: Number(videoItem.bitrate) || 9999999 });
+        }
+        variants.sort((a, b) => b.bitrate - a.bitrate);
+        const bestMp4 = variants[0]?.url || videoItem.url;
+        if (bestMp4) {
+          return {
+            title: (tweet.text || `X Video (${tweetId})`).replace(/\s+/g, ' ').trim().slice(0, 95),
+            author: tweet.user_name ? `${tweet.user_name} (@${tweet.user_screen_name || 'x'})` : 'X / Twitter',
+            duration: videoItem.duration_millis ? Math.round(videoItem.duration_millis / 1000) : 35,
+            thumbnail: videoItem.thumbnail_url ? getSafeThumbnail(videoItem.thumbnail_url) : '',
+            directVideoUrl: bestMp4,
+            formatsMap: { '1080': bestMp4, '720': bestMp4 }
+          };
+        }
       }
     } catch {
       // ignore
@@ -585,19 +644,171 @@ async function probeTwitterClientSide(url: string): Promise<{
 }
 
 /**
- * Fetches real video metadata & stream formats via backend `/api/media/probe` and multi-platform resolvers
+ * Helper: Client-side Instagram & Facebook & YouTube resolver via SaveVideo API
+ */
+async function probeViaSaveVideoClientSide(
+  url: string,
+  platform: PlatformId
+): Promise<{
+  title: string;
+  author: string;
+  duration: number;
+  thumbnail: string;
+  directVideoUrl: string;
+  fileSize?: number;
+  heights?: number[];
+  est?: Record<string, number>;
+  audioEst?: number;
+} | null> {
+  const isNative = isCapacitorOrNative();
+  const shortcode = platform === 'instagram' ? extractInstagramShortcode(url) : null;
+  const ytId = platform === 'youtube' ? extractYouTubeVideoId(url) : null;
+
+  const realThumb = ytId
+    ? getSafeThumbnail('', ytId)
+    : shortcode
+    ? getSafeThumbnail(`/api/media/thumbnail?ig=${shortcode}`)
+    : '';
+
+  // For YouTube (both standard watch?v= and Shorts /shorts/), use canonical watch URL with /api/yt/probe
+  if (platform === 'youtube') {
+    const canonicalYtUrl = ytId ? `https://www.youtube.com/watch?v=${ytId}` : url;
+    const ytProbe = await smartFetchJson('https://savevideo.uz/api/yt/probe', {
+      method: 'POST',
+      headers: { Referer: 'https://savevideo.uz/' },
+      body: { url: canonicalYtUrl },
+      timeoutMs: 9000
+    });
+    if (ytProbe && (ytProbe.title || ytProbe.heights)) {
+      const cleanedEst: Record<string, number> = {};
+      if (ytProbe.est && typeof ytProbe.est === 'object') {
+        for (const [k, v] of Object.entries(ytProbe.est)) {
+          if (typeof v === 'number' && v > 30000) {
+            cleanedEst[k] = v;
+          }
+        }
+      }
+      return {
+        title: ytProbe.title || (ytId ? `YouTube Video (${ytId})` : 'YouTube Video'),
+        author: 'YouTube Creator',
+        duration: Number(ytProbe.duration) || (url.includes('/shorts/') ? 45 : 120),
+        thumbnail: realThumb,
+        directVideoUrl: '',
+        heights: Array.isArray(ytProbe.heights) ? ytProbe.heights : [360, 480, 720, 1080],
+        est: cleanedEst,
+        audioEst: typeof ytProbe.audio_est === 'number' && ytProbe.audio_est > 15000 ? ytProbe.audio_est : undefined
+      };
+    }
+    return {
+      title: url.includes('/shorts/') ? `YouTube Shorts (${ytId || 'HD'})` : `YouTube Video (${ytId || 'HD'})`,
+      author: 'YouTube Creator',
+      duration: url.includes('/shorts/') ? 45 : 120,
+      thumbnail: realThumb,
+      directVideoUrl: '',
+      heights: [360, 480, 720, 1080]
+    };
+  }
+
+  const cleanTargetUrl =
+    platform === 'instagram' && shortcode && !/\/stories\//i.test(url)
+      ? `https://www.instagram.com/reel/${shortcode}/`
+      : url.split('?')[0] || url;
+
+  const startData = await smartFetchJson('https://savevideo.uz/api/download', {
+    method: 'POST',
+    headers: { Referer: 'https://savevideo.uz/' },
+    body: { url: cleanTargetUrl },
+    timeoutMs: 10000
+  });
+
+  if (startData && startData.task_id) {
+    for (let attempt = 0; attempt < 15; attempt++) {
+      await new Promise((r) => setTimeout(r, 950));
+      const stData = await smartFetchJson(`https://savevideo.uz/api/status/${startData.task_id}`, {
+        method: 'GET',
+        headers: { Referer: 'https://savevideo.uz/' },
+        timeoutMs: 7000
+      });
+      if (!stData) continue;
+      if (stData.status === 'done') {
+        const token = stData.file_token || '';
+        const ext = stData.ext || 'mp4';
+        const fileUrl = isNative
+          ? `https://savevideo.uz/api/file/${startData.task_id}?t=${encodeURIComponent(token)}`
+          : `/api/media/file/${startData.task_id}?t=${encodeURIComponent(token)}&ext=${ext}&title=${encodeURIComponent(
+              stData.title || 'video'
+            )}`;
+        return {
+          title:
+            stData.title ||
+            (shortcode ? `Instagram Reel (${shortcode})` : 'Social Media Video (HD)'),
+          author:
+            platform === 'instagram'
+              ? 'Instagram Creator'
+              : platform === 'facebook'
+              ? 'Facebook Creator'
+              : 'Creator',
+          duration: 45,
+          thumbnail: realThumb,
+          directVideoUrl: fileUrl,
+          fileSize: typeof stData.file_size === 'number' ? stData.file_size : undefined
+        };
+      }
+      if (stData.status === 'error') break;
+    }
+  }
+
+  // Fallback for Instagram: Embed via allorigins CORS proxy
+  if (shortcode) {
+    const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
+    try {
+      const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(embedUrl)}`);
+      if (res.ok) {
+        const html = await res.text();
+        const videoMatch =
+          html.match(/"video_url"\s*:\s*"([^"]+)"/i) ||
+          html.match(/\\"video_url\\"\s*:\s*\\"([^\\"]+)\\"/i) ||
+          html.match(/class="EmbeddedMediaVideo"[^>]*src="([^"]+)"/i);
+        if (videoMatch && videoMatch[1]) {
+          const decodedUrl = videoMatch[1]
+            .replace(/\\u0026/g, '&')
+            .replace(/\\\//g, '/')
+            .replace(/&amp;/g, '&');
+          return {
+            title: `Instagram Reel (${shortcode})`,
+            author: 'Instagram Creator',
+            duration: 45,
+            thumbnail: realThumb,
+            directVideoUrl: decodedUrl
+          };
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Fetches real video metadata & stream formats via backend `/api/media/probe` (on Web)
+ * and native CapacitorHttp / multi-platform resolvers (on Android APK & Web fallback).
  */
 export async function parseMediaUrl(url: string): Promise<ParsedMediaInfo> {
   const cleanUrl = url.trim();
   const platform = detectPlatform(cleanUrl);
   const ytVideoId = platform === 'youtube' ? extractYouTubeVideoId(cleanUrl) : null;
+  const igShortcode = platform === 'instagram' ? extractInstagramShortcode(cleanUrl) : null;
 
   let resolvedTitle = deriveTitleFromUrl(cleanUrl, platform);
   let resolvedAuthor = `${platform.charAt(0).toUpperCase() + platform.slice(1)} Creator`;
   let resolvedThumbnail = ytVideoId
-    ? `/api/media/thumbnail?yt=${ytVideoId}`
+    ? getSafeThumbnail('', ytVideoId)
+    : igShortcode
+    ? getSafeThumbnail(`/api/media/thumbnail?ig=${igShortcode}`)
     : createSvgCoverDataUri(platform, resolvedTitle);
-  let durationSeconds = 120;
+  let durationSeconds = cleanUrl.includes('/shorts/') || cleanUrl.includes('/reel') ? 45 : 120;
   let viewsCount: string | undefined = undefined;
   let probedHeights: number[] | undefined;
   let probedEst: Record<string, number> | undefined;
@@ -606,65 +817,15 @@ export async function parseMediaUrl(url: string): Promise<ParsedMediaInfo> {
   let directVideoUrl: string | undefined;
   let directAudioUrl: string | undefined;
 
-  // 1. Primary Probe: Our Full-Stack Backend `/api/media/probe`
-  try {
-    const probeRes = await fetch('/api/media/probe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: cleanUrl })
-    });
-
-    if (probeRes.ok) {
-      const data = await probeRes.json();
-      if (data && data.success) {
-        if (data.title && data.title !== 'Media Stream' && data.title !== 'YouTube Media') {
-          resolvedTitle = data.title;
-        }
-        if (data.author) {
-          resolvedAuthor = data.author;
-        }
-        if (typeof data.duration === 'number' && data.duration > 0) {
-          durationSeconds = data.duration;
-        }
-        if (data.viewsCount) {
-          viewsCount = String(data.viewsCount);
-        }
-        if (Array.isArray(data.heights) && data.heights.length > 0) {
-          probedHeights = data.heights;
-        }
-        if (data.est && typeof data.est === 'object') {
-          probedEst = data.est;
-        }
-        if (typeof data.audio_est === 'number') {
-          audioEst = data.audio_est;
-        }
-        if (data.thumbnail) {
-          resolvedThumbnail = data.thumbnail;
-        }
-        if (data.formats_map && typeof data.formats_map === 'object') {
-          formatsMap = data.formats_map;
-        }
-        if (data.direct_video_url) {
-          directVideoUrl = data.direct_video_url;
-        }
-        if (data.direct_audio_url) {
-          directAudioUrl = data.direct_audio_url;
-        }
-      }
-    }
-  } catch {
-    // Fallback to client-side resolvers below (e.g., on standalone Android APK)
-  }
-
-  // 2. Client-side Aparat resolver if directVideoUrl not yet populated
-  if (platform === 'aparat' && !directVideoUrl) {
-    const aparatInfo = await probeAparatClientSide(cleanUrl);
+  // 0. Isolated Aparat Module: If URL is Aparat, run inside isolated aparatExtractor
+  if (platform === 'aparat' || isAparatUrl(cleanUrl)) {
+    const aparatInfo = await probeAparatIsolated(cleanUrl);
     if (aparatInfo) {
       resolvedTitle = aparatInfo.title;
       resolvedAuthor = aparatInfo.author;
       durationSeconds = aparatInfo.duration;
       if (aparatInfo.thumbnail) {
-        resolvedThumbnail = getSafeThumbnail(aparatInfo.thumbnail);
+        resolvedThumbnail = aparatInfo.thumbnail;
       }
       viewsCount = aparatInfo.viewsCount;
       probedHeights = aparatInfo.heights;
@@ -675,35 +836,144 @@ export async function parseMediaUrl(url: string): Promise<ParsedMediaInfo> {
     }
   }
 
-  // 3. Client-side TikTok TikWM resolver if needed
-  if (platform === 'tiktok' && !directVideoUrl) {
+  // 1. Primary Probe: Our Full-Stack Express Backend `/api/media/probe`
+  if (!directVideoUrl || platform !== 'aparat') {
     try {
-      const tikRes = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(cleanUrl)}&hd=1`);
-      if (tikRes.ok) {
-        const tikJson = await tikRes.json();
-        if (tikJson && tikJson.code === 0 && tikJson.data) {
-          const d = tikJson.data;
-          if (d.title) resolvedTitle = d.title;
-          if (d.author?.nickname) resolvedAuthor = `${d.author.nickname} (@${d.author.unique_id || 'tiktok'})`;
-          if (d.duration) durationSeconds = Number(d.duration);
-          if (d.cover) resolvedThumbnail = getSafeThumbnail(d.cover);
-          if (d.play_count) viewsCount = String(d.play_count);
-          const playUrl = d.id ? `https://www.tikwm.com/video/media/play/${d.id}.mp4` : (d.hdplay || d.play);
-          if (playUrl) {
-            directVideoUrl = playUrl;
-            formatsMap = { '1080': playUrl, '720': playUrl };
+      const probeRes = await fetchBackendApi('/api/media/probe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: cleanUrl })
+      });
+
+      if (probeRes.ok) {
+        const data = await probeRes.json();
+        if (data && data.success) {
+          if (data.title && data.title !== 'Media Stream' && data.title !== 'YouTube Media') {
+            resolvedTitle = data.title;
           }
-          if (d.music) {
-            directAudioUrl = d.music;
+          if (data.author) {
+            resolvedAuthor = data.author;
+          }
+          if (typeof data.duration === 'number' && data.duration > 0) {
+            durationSeconds = data.duration;
+          }
+          if (data.viewsCount) {
+            viewsCount = String(data.viewsCount);
+          }
+          if (Array.isArray(data.heights) && data.heights.length > 0) {
+            probedHeights = data.heights;
+          }
+          if (data.est && typeof data.est === 'object') {
+            probedEst = data.est;
+          }
+          if (typeof data.audio_est === 'number' && data.audio_est > 15000) {
+            audioEst = data.audio_est;
+          }
+          if (data.thumbnail && !String(data.thumbnail).startsWith('data:image/svg')) {
+            resolvedThumbnail = getSafeThumbnail(data.thumbnail, ytVideoId || undefined);
+          }
+          if (data.formats_map && typeof data.formats_map === 'object') {
+            const normalizedMap: Record<string, string> = {};
+            for (const [k, v] of Object.entries(data.formats_map)) {
+              if (typeof v === 'string' && v) {
+                normalizedMap[k] = getApiUrl(v);
+              }
+            }
+            formatsMap = normalizedMap;
+          }
+          if (data.direct_video_url) {
+            directVideoUrl = getApiUrl(String(data.direct_video_url));
+          }
+          if (data.direct_audio_url) {
+            directAudioUrl = getApiUrl(String(data.direct_audio_url));
           }
         }
       }
     } catch {
-      // ignore
+      // Fall back to direct / CapacitorHttp resolvers below
     }
   }
 
-  // 4. Client-side Twitter/X resolver if needed
+  // 2. TikTok TikWM Direct No-Watermark Resolver (Cached to avoid 1-req/sec rate limit)
+  if (platform === 'tiktok') {
+    const d = await fetchTikWmCached(cleanUrl);
+    if (d) {
+      if (d.title) resolvedTitle = d.title;
+      if (d.author?.nickname) resolvedAuthor = `${d.author.nickname} (@${d.author.unique_id || 'tiktok'})`;
+      if (d.duration) durationSeconds = Number(d.duration);
+      if (d.cover) resolvedThumbnail = getSafeThumbnail(d.cover);
+      if (d.play_count) viewsCount = String(d.play_count);
+      const playUrl = d.id ? `https://www.tikwm.com/video/media/play/${d.id}.mp4` : (d.hdplay || d.play);
+      if (playUrl && !directVideoUrl) {
+        directVideoUrl = playUrl;
+        formatsMap = { '1080': playUrl, '720': playUrl, '480': playUrl, '360': playUrl };
+      }
+      if (d.size || d.hd_size) {
+        probedEst = {
+          '720': d.size || 4500000,
+          '1080': d.hd_size || d.size || 6500000
+        };
+      }
+      if (d.music && !directAudioUrl) {
+        directAudioUrl = d.music;
+      }
+    }
+  }
+
+  // 3. Instagram, Facebook & YouTube Native APK Resolver via SaveVideo API (CapacitorHttp)
+  if (
+    isCapacitorOrNative() &&
+    (platform === 'instagram' || platform === 'facebook' || platform === 'youtube') &&
+    !directVideoUrl
+  ) {
+    const svInfo = await probeViaSaveVideoClientSide(cleanUrl, platform);
+    if (svInfo) {
+      if (svInfo.title) resolvedTitle = svInfo.title;
+      if (svInfo.author) resolvedAuthor = svInfo.author;
+      if (svInfo.duration) durationSeconds = svInfo.duration;
+      if (svInfo.thumbnail) resolvedThumbnail = svInfo.thumbnail;
+      if (svInfo.heights) probedHeights = svInfo.heights;
+      if (svInfo.est) probedEst = svInfo.est;
+      if (svInfo.audioEst) audioEst = svInfo.audioEst;
+      if (svInfo.directVideoUrl) {
+        directVideoUrl = svInfo.directVideoUrl;
+        directAudioUrl = svInfo.directVideoUrl;
+        formatsMap = {
+          '1080': svInfo.directVideoUrl,
+          '720': svInfo.directVideoUrl,
+          '480': svInfo.directVideoUrl
+        };
+      }
+      if (svInfo.fileSize && svInfo.fileSize > 30000) {
+        probedEst = {
+          '1080': svInfo.fileSize,
+          '720': Math.round(svInfo.fileSize * 0.8),
+          '480': Math.round(svInfo.fileSize * 0.55)
+        };
+      }
+    }
+  }
+
+  // Ensure YouTube always has signed direct muxed MP4 stream URLs ready for every resolution
+  if (platform === 'youtube') {
+    const canonicalYtUrl = ytVideoId ? `https://www.youtube.com/watch?v=${ytVideoId}` : cleanUrl;
+    if (!formatsMap || Object.keys(formatsMap).length === 0) {
+      formatsMap = {
+        '1080': getApiUrl(`/api/media/stream?url=${encodeURIComponent(canonicalYtUrl)}&quality=1080&audio=0`),
+        '720': getApiUrl(`/api/media/stream?url=${encodeURIComponent(canonicalYtUrl)}&quality=720&audio=0`),
+        '480': getApiUrl(`/api/media/stream?url=${encodeURIComponent(canonicalYtUrl)}&quality=480&audio=0`),
+        '360': getApiUrl(`/api/media/stream?url=${encodeURIComponent(canonicalYtUrl)}&quality=360&audio=0`)
+      };
+    }
+    if (!directVideoUrl) {
+      directVideoUrl = formatsMap['720'];
+    }
+    if (!directAudioUrl) {
+      directAudioUrl = getApiUrl(`/api/media/stream?url=${encodeURIComponent(canonicalYtUrl)}&quality=720&audio=1`);
+    }
+  }
+
+  // 4. Twitter/X Resolver if needed
   if (platform === 'twitter' && !directVideoUrl) {
     const twInfo = await probeTwitterClientSide(cleanUrl);
     if (twInfo) {
@@ -717,21 +987,26 @@ export async function parseMediaUrl(url: string): Promise<ParsedMediaInfo> {
     }
   }
 
-  // 5. Public oEmbed metadata enrichment (author name / title if still default)
+  // 5. Public oEmbed metadata enrichment (author name / title / real thumbnail for YouTube, Twitter, Facebook, TikTok)
   try {
-    const oembedRes = await fetch(`https://noembed.com/embed?url=${encodeURIComponent(cleanUrl)}`);
-    if (oembedRes.ok) {
-      const data = await oembedRes.json();
-      if (data && !data.error) {
-        if (data.title && (resolvedTitle.startsWith('ویدیو') || resolvedTitle.includes(' - '))) {
-          resolvedTitle = data.title;
-        }
-        if (data.author_name) {
-          resolvedAuthor = data.author_name;
-        }
-        if (!ytVideoId && data.thumbnail_url && resolvedThumbnail.startsWith('data:image')) {
-          resolvedThumbnail = getSafeThumbnail(data.thumbnail_url);
-        }
+    const data = await smartFetchJson(
+      `https://noembed.com/embed?url=${encodeURIComponent(cleanUrl)}`,
+      { method: 'GET', timeoutMs: 5000 }
+    );
+    if (data && !data.error) {
+      if (
+        data.title &&
+        (resolvedTitle.startsWith('ویدیو') ||
+          resolvedTitle.startsWith('YouTube ') ||
+          resolvedTitle.includes(' - '))
+      ) {
+        resolvedTitle = data.title;
+      }
+      if (data.author_name) {
+        resolvedAuthor = data.author_name;
+      }
+      if (!ytVideoId && data.thumbnail_url && resolvedThumbnail.startsWith('data:image')) {
+        resolvedThumbnail = getSafeThumbnail(data.thumbnail_url);
       }
     }
   } catch {
@@ -767,47 +1042,56 @@ export async function parseMediaUrl(url: string): Promise<ParsedMediaInfo> {
 }
 
 /**
- * Detects whether the app is running inside a native Android APK (Capacitor) or file:// origin
- * where relative `/api/...` server routes do not exist.
- */
-export function isCapacitorOrNative(): boolean {
-  if (typeof window === 'undefined') return false;
-  if ((window as any).Capacitor?.isNativePlatform?.()) return true;
-  const proto = window.location.protocol;
-  const host = window.location.hostname;
-  if (proto === 'capacitor:' || proto === 'file:') return true;
-  if (host === 'localhost' && !window.location.port) return true;
-  return false;
-}
-
-/**
- * Ensures any thumbnail URL is routed safely on Web or loaded directly on Native Android APK
+ * Ensures any thumbnail URL loads reliably on both Web and Native Android APK
  */
 export function getSafeThumbnail(thumbnailUrl: string, ytVideoId?: string): string {
-  const isNative = isCapacitorOrNative();
-
   if (ytVideoId && /^[\w-]{11}$/.test(ytVideoId)) {
-    return isNative
-      ? `https://i.ytimg.com/vi/${ytVideoId}/hqdefault.jpg`
-      : `/api/media/thumbnail?yt=${ytVideoId}`;
+    return `https://i.ytimg.com/vi/${ytVideoId}/hqdefault.jpg`;
   }
   if (!thumbnailUrl) return '';
   if (thumbnailUrl.startsWith('data:image') || thumbnailUrl.startsWith('blob:')) {
     return thumbnailUrl;
   }
-  if (thumbnailUrl.startsWith('/api/media/thumbnail')) {
-    if (isNative) {
-      const matchYt = thumbnailUrl.match(/yt=([\w-]{11})/);
-      if (matchYt) return `https://i.ytimg.com/vi/${matchYt[1]}/hqdefault.jpg`;
-      const matchUrl = thumbnailUrl.match(/url=([^&]+)/);
-      if (matchUrl) return decodeURIComponent(matchUrl[1]);
+
+  // Unwrap any /api/media/thumbnail URLs to direct CDN / wsrv.nl so thumbnails use 0 server QPS/bandwidth
+  if (thumbnailUrl.includes('/api/media/thumbnail')) {
+    try {
+      const qIndex = thumbnailUrl.indexOf('?');
+      if (qIndex !== -1) {
+        const params = new URLSearchParams(thumbnailUrl.slice(qIndex + 1));
+        const yt = params.get('yt');
+        if (yt) return `https://i.ytimg.com/vi/${yt}/hqdefault.jpg`;
+        const ig = params.get('ig');
+        if (ig) {
+          return `https://wsrv.nl/?url=${encodeURIComponent(
+            `https://www.instagram.com/p/${ig}/media/?size=l`
+          )}&w=480&output=jpg`;
+        }
+        const innerUrl = params.get('url');
+        if (innerUrl) {
+          if (innerUrl.includes('i.ytimg.com') || innerUrl.includes('aparat.com')) {
+            return innerUrl;
+          }
+          return `https://wsrv.nl/?url=${encodeURIComponent(innerUrl)}&w=480&output=jpg`;
+        }
+      }
+    } catch {
+      // ignore
     }
-    return thumbnailUrl;
   }
+
   if (thumbnailUrl.startsWith('http://') || thumbnailUrl.startsWith('https://')) {
-    if (isNative) return thumbnailUrl;
-    return `/api/media/thumbnail?url=${encodeURIComponent(thumbnailUrl)}`;
+    if (
+      thumbnailUrl.includes('wsrv.nl') ||
+      thumbnailUrl.includes('aparat.com') ||
+      thumbnailUrl.includes('cdn.asset.aparat.com') ||
+      thumbnailUrl.includes('i.ytimg.com')
+    ) {
+      return thumbnailUrl;
+    }
+    return `https://wsrv.nl/?url=${encodeURIComponent(thumbnailUrl)}&w=480&output=jpg`;
   }
+
   return thumbnailUrl;
 }
 
@@ -820,9 +1104,13 @@ export function isWebpageUrl(url?: string | null): boolean {
   if (
     url.startsWith('blob:') ||
     url.startsWith('data:') ||
-    url.startsWith('/api/media/file') ||
-    url.startsWith('/api/media/audio') ||
-    url.startsWith('/api/media/proxy-stream')
+    url.includes('/api/media/file') ||
+    url.includes('/api/media/audio') ||
+    url.includes('/api/media/proxy-stream') ||
+    url.includes('/api/media/stream') ||
+    url.includes('savevideo.uz/api/file/') ||
+    url.includes('savevideo.uz/api/audio/') ||
+    url.includes('tikwm.com/video/media/')
   ) {
     return false;
   }

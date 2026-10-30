@@ -522,10 +522,10 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
                 </div>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
                   {isFa
-                    ? 'شناسه سخت‌افزاری دستگاه خود را کپی کرده و از طریق بخش «پشتیبانی و ارتباط با مدیریت» در پایین همین صفحه ارسال نمایید تا کد فعال‌سازی اختصاصی خود را دریافت و در کادر زیر وارد کنید.'
+                    ? 'شناسه سخت‌افزاری دستگاه خود را کپی کرده و از طریق بخش «پشتیبانی فنی و ارتباط با ما» در پایین همین صفحه ارسال نمایید تا کد فعال‌سازی اختصاصی خود را دریافت و در کادر زیر وارد کنید.'
                     : isAr
                     ? 'انسخ معرف الجهاز (Hardware ID) وأرسله عبر قسم الدعم الفني بالأسفل للحصول على كود التفعيل الخاص بك.'
-                    : 'Copy your Device Hardware ID below and contact Official Support to receive your personal VIP Activation Code.'}
+                    : 'Copy your Device Hardware ID below and contact Technical Support to receive your personal VIP Activation Code.'}
                 </p>
               </div>
             ) : (

@@ -2,7 +2,7 @@ import { AppSettings, DownloadTask, Language, UserSession } from '../types';
 
 const STORAGE_KEYS = {
   TASKS: 'onedownload_tasks_v2',
-  SETTINGS: 'onedownload_settings_v3',
+  SETTINGS: 'onedownload_settings_v4',
   SESSION: 'onedownload_session_v2',
   OD_USER_SESSION: 'od_user_session',
   ACCOUNT_CURRENCY_LOCK: 'onedownload_account_currency_lock_v1'
@@ -193,16 +193,191 @@ export async function clearAllIDBBlobs(): Promise<void> {
   return clearAllOfflineMedia();
 }
 
+function normalizeStoredThumbnail(thumb?: string, videoId?: string): string {
+  if (videoId && /^[\w-]{11}$/.test(videoId)) {
+    return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+  }
+  if (!thumb) return '';
+  if (thumb.includes('/api/media/thumbnail')) {
+    try {
+      const qIndex = thumb.indexOf('?');
+      if (qIndex !== -1) {
+        const params = new URLSearchParams(thumb.slice(qIndex + 1));
+        const yt = params.get('yt');
+        if (yt) return `https://i.ytimg.com/vi/${yt}/hqdefault.jpg`;
+        const ig = params.get('ig');
+        if (ig) {
+          return `https://wsrv.nl/?url=${encodeURIComponent(
+            `https://www.instagram.com/p/${ig}/media/?size=l`
+          )}&w=480&output=jpg`;
+        }
+        const innerUrl = params.get('url');
+        if (innerUrl) {
+          if (innerUrl.includes('i.ytimg.com') || innerUrl.includes('aparat.com')) {
+            return innerUrl;
+          }
+          return `https://wsrv.nl/?url=${encodeURIComponent(innerUrl)}&w=480&output=jpg`;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return thumb;
+}
+
 // LocalStorage helpers for tasks & metadata
 export function loadTasksFromStorage(): DownloadTask[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.TASKS);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((t: DownloadTask) => {
+      const cleanThumb = normalizeStoredThumbnail(t.thumbnail, t.videoId);
+      if (t.status === 'downloading' || t.status === 'queued' || t.status === 'merging') {
+        return {
+          ...t,
+          thumbnail: cleanThumb,
+          status: 'paused',
+          speedBytesPerSec: 0,
+          speedFormatted: 'آماده ادامه دانلود',
+          etaFormatted: '--:--'
+        };
+      }
+      return {
+        ...t,
+        thumbnail: cleanThumb
+      };
+    });
   } catch (err) {
     console.error('Failed to load tasks from localStorage:', err);
     return [];
+  }
+}
+
+/**
+ * Requests Persistent Storage (`navigator.storage.persist()`) on app startup
+ * so the operating system / browser does not evict IndexedDB video Blobs during cache cleanup.
+ */
+export async function ensurePersistentStorage(): Promise<boolean> {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.persist) {
+      const alreadyPersisted = navigator.storage.persisted
+        ? await navigator.storage.persisted()
+        : false;
+      if (alreadyPersisted) return true;
+      return await navigator.storage.persist();
+    }
+  } catch (err) {
+    console.warn('Persistent storage request notice:', err);
+  }
+  return false;
+}
+
+/**
+ * Hydrates completed downloads from the dedicated IndexedDB `offline_media` ObjectStore
+ * on app startup. Ensures that after closing and reopening the app:
+ * 1. Every completed download has its binary `mediaBlob` and `blobUrl` ready for 100% offline playback.
+ * 2. Even if localStorage was cleared, any video saved in IndexedDB is restored with full metadata.
+ */
+export async function hydrateTasksFromIndexedDB(
+  existingTasks: DownloadTask[]
+): Promise<DownloadTask[]> {
+  try {
+    const records = await getAllOfflineMedia();
+    if (!records || records.length === 0) return existingTasks;
+
+    const recordMap = new Map<string, OfflineMediaRecord>();
+    for (const rec of records) {
+      if (rec && rec.id) {
+        recordMap.set(rec.id, rec);
+      }
+    }
+
+    const formatSize = (bytes: number) => {
+      if (!bytes || bytes <= 0) return '0 B';
+      const mb = bytes / (1024 * 1024);
+      return mb >= 1 ? `${mb.toFixed(1)} MB` : `${(bytes / 1024).toFixed(0)} KB`;
+    };
+
+    const updatedTasks = existingTasks.map((task) => {
+      const rec = recordMap.get(task.id);
+      if (rec) {
+        recordMap.delete(task.id);
+        const blobUrl =
+          rec.mediaBlob && typeof window !== 'undefined'
+            ? window.URL.createObjectURL(rec.mediaBlob)
+            : task.blobUrl;
+        return {
+          ...task,
+          status: 'completed' as const,
+          title: task.title || rec.title,
+          thumbnail: normalizeStoredThumbnail(task.thumbnail || rec.thumbnail, task.videoId),
+          fileName: task.fileName || rec.fileName,
+          totalBytes: rec.fileSize || task.totalBytes,
+          downloadedBytes: rec.fileSize || task.downloadedBytes,
+          totalSizeFormatted: formatSize(rec.fileSize || task.totalBytes),
+          downloadedSizeFormatted: formatSize(rec.fileSize || task.downloadedBytes),
+          completedAt: task.completedAt || rec.downloadedAt,
+          mediaBlob: rec.mediaBlob || task.mediaBlob,
+          blobUrl
+        };
+      }
+      return task;
+    });
+
+    // Also restore any IndexedDB records that were not in localStorage
+    const restoredFromIdb: DownloadTask[] = [];
+    recordMap.forEach((rec) => {
+      const isAudio =
+        (rec.mimeType || '').includes('audio') ||
+        rec.format === 'mp3' ||
+        rec.format === 'm4a';
+      const sizeStr = formatSize(rec.fileSize);
+      const blobUrl =
+        rec.mediaBlob && typeof window !== 'undefined'
+          ? window.URL.createObjectURL(rec.mediaBlob)
+          : undefined;
+      restoredFromIdb.push({
+        id: rec.id,
+        originalUrl: rec.sourceUrl || '',
+        title: rec.title || rec.fileName || 'Downloaded Media',
+        platform: (rec.platform as any) || 'youtube',
+        thumbnail: normalizeStoredThumbnail(rec.thumbnail),
+        durationSeconds: rec.duration || 60,
+        format: {
+          id: `${rec.id}-fmt`,
+          type: isAudio ? 'audio' : 'video',
+          format: (rec.format as any) || (isAudio ? 'mp3' : 'mp4'),
+          qualityLabel: rec.quality || (isAudio ? '320kbps' : '720p HD'),
+          codec: isAudio ? 'AAC / MP3' : 'H.264',
+          sizeBytes: rec.fileSize || 0,
+          sizeFormatted: sizeStr
+        },
+        status: 'completed',
+        progressPercent: 100,
+        downloadedBytes: rec.fileSize || 0,
+        totalBytes: rec.fileSize || 0,
+        downloadedSizeFormatted: sizeStr,
+        totalSizeFormatted: sizeStr,
+        speedBytesPerSec: 0,
+        speedFormatted: 'پایان یافت',
+        etaSeconds: 0,
+        chunks: [],
+        createdAt: rec.downloadedAt || Date.now(),
+        completedAt: rec.downloadedAt || Date.now(),
+        fileName: rec.fileName || `${rec.title || 'video'}.${isAudio ? 'mp3' : 'mp4'}`,
+        directUrl: rec.directUrl,
+        mediaBlob: rec.mediaBlob,
+        blobUrl
+      });
+    });
+
+    return [...updatedTasks, ...restoredFromIdb];
+  } catch (err) {
+    console.warn('Hydrate tasks from IndexedDB notice:', err);
+    return existingTasks;
   }
 }
 
@@ -221,10 +396,10 @@ export function saveTasksToStorage(tasks: DownloadTask[]): void {
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  language: 'en', // Default to English (EN) on first installation as required
+  language: 'fa', // Default to Persian (FA) on first installation for Persian markets (CafeBazaar & Myket)
   theme: 'dark',
   autoPlayAfterDownload: false,
-  autoSaveToDevice: true, // Automatically triggers native file download to phone/system Downloads folder
+  autoSaveToDevice: false, // Keep downloaded files in internal IndexedDB vault; user saves to device optionally via button
   autoSniffClipboard: true, // Smart clipboard auto-sniffer controlled from Settings
   downloadPathHint: 'Downloads/OneDownload',
   chunkConcurrency: 4

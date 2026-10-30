@@ -129,17 +129,17 @@ export const SupportChannelsBox: React.FC<SupportChannelsBoxProps> = ({
         <div>
           <h4 className="font-black text-xs sm:text-sm text-white">
             {isFa
-              ? 'پشتیبانی و ارتباط با مدیریت'
+              ? 'پشتیبانی فنی و ارتباط با ما'
               : isAr
-              ? 'الدعم الفني والتواصل مع الإدارة'
-              : 'Official Support & Contact Management'}
+              ? 'الدعم الفني والتواصل معنا'
+              : 'Technical Support & Contact Us'}
           </h4>
           <p className="text-[11px] text-slate-400">
             {isFa
-              ? 'دریافت کد فعال‌سازی VIP، راهنمایی خرید و ارتباط مستقیم با تیم پشتیبانی'
+              ? 'راهنمایی فنی، پاسخگویی به سوالات کاربران و ارتباط مستقیم با تیم پشتیبانی'
               : isAr
               ? 'للحصول على كود تفعيل VIP والدعم المباشر عبر القنوات الرسمية'
-              : 'Get VIP activation codes, billing assistance & direct official support'}
+              : 'Technical assistance, VIP activation & direct support'}
           </p>
         </div>
       </div>

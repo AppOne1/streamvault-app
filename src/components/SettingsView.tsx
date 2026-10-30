@@ -522,7 +522,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 {t.langSelector}
               </h4>
               <p className="text-xs text-slate-400">
-                فارسی 🇮🇷 • العربية (العراق والخليج) 🇮🇶 • English 🌐
+                فارسی | العربية | English
               </p>
             </div>
           </div>
@@ -537,7 +537,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   : 'text-slate-600 dark:text-slate-400'
               }`}
             >
-              فارسی 🇮🇷
+              فارسی
             </button>
             <button
               type="button"
@@ -548,7 +548,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   : 'text-slate-600 dark:text-slate-400'
               }`}
             >
-              العربية 🇮🇶
+              العربية
             </button>
             <button
               type="button"
@@ -559,7 +559,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   : 'text-slate-600 dark:text-slate-400'
               }`}
             >
-              English 🌐
+              English
             </button>
           </div>
         </div>
@@ -809,10 +809,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </h4>
                 <p className="text-xs text-slate-400">
                   {isFa
-                    ? 'توسعه‌داده‌شده توسط گروه appone-علوی (v2.6.0)'
+                    ? 'توسعه‌داده‌شده توسط گروه appone-علوی (v1.0.0)'
                     : isAr
-                    ? 'تطوير مجموعة appone-Alavi (v2.6.0)'
-                    : 'Developed by appone-Alavi Group (v2.6.0)'}
+                    ? 'تطوير مجموعة appone-Alavi (v1.0.0)'
+                    : 'Developed by appone-Alavi Group (v1.0.0)'}
                 </p>
               </div>
             </div>

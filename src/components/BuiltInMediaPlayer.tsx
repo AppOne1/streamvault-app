@@ -5,12 +5,13 @@ import { PlatformIcon } from './PlatformIcon';
 import { getMediaBlobFromIDB, getOfflineMedia } from '../services/storageService';
 import {
   extractYouTubeVideoId,
+  getApiUrl,
   getSafeThumbnail,
-  isCapacitorOrNative,
   isWebpageUrl
 } from '../services/platformDetector';
 import { resolveDirectMediaStream } from '../services/mediaExtractor';
 import { downloadEngine } from '../services/downloadEngine';
+import { MIN_VALID_AUDIO_BYTES, MIN_VALID_VIDEO_BYTES } from '../services/nativeStorage';
 import {
   Play,
   Pause,
@@ -32,7 +33,8 @@ import {
   Timer,
   RotateCw,
   ArrowRight,
-  ArrowLeft
+  ArrowLeft,
+  AlertTriangle
 } from 'lucide-react';
 
 interface BuiltInMediaPlayerProps {
@@ -41,6 +43,23 @@ interface BuiltInMediaPlayerProps {
   onClose: () => void;
   onSaveToDisk: (task: DownloadTask) => void;
 }
+
+const isLikelyVerticalVideo = (task: DownloadTask | null): boolean => {
+  if (!task) return false;
+  const u = (task.originalUrl || '').toLowerCase();
+  if (
+    task.platform === 'tiktok' ||
+    task.platform === 'instagram' ||
+    u.includes('/shorts/') ||
+    u.includes('/reel/') ||
+    u.includes('/reels/') ||
+    u.includes('/stories/') ||
+    u.includes('tiktok.com')
+  ) {
+    return true;
+  }
+  return false;
+};
 
 export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   language,
@@ -53,6 +72,7 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
+  const videoFallbackTriedRef = useRef<boolean>(false);
 
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [currentTime, setCurrentTime] = useState<number>(0);
@@ -62,20 +82,80 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
   const [isLooping, setIsLooping] = useState<boolean>(true);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [isCssFullscreen, setIsCssFullscreen] = useState<boolean>(false);
+  const [isLandscapeRotated, setIsLandscapeRotated] = useState<boolean>(false);
+  const [hasOfflineBlob, setHasOfflineBlob] = useState<boolean>(false);
+  const [videoAspect, setVideoAspect] = useState<'landscape' | 'portrait'>(() =>
+    isLikelyVerticalVideo(task) ? 'portrait' : 'landscape'
+  );
+  const [isViewportPortrait, setIsViewportPortrait] = useState<boolean>(
+    typeof window !== 'undefined' ? window.innerHeight > window.innerWidth : false
+  );
   const [activeMediaUrl, setActiveMediaUrl] = useState<string | null>(null);
   const [sleepTimer, setSleepTimer] = useState<number | null>(null);
   const [showSleepMenu, setShowSleepMenu] = useState<boolean>(false);
 
   // Detect YouTube ID for authentic real video playback
   const ytVideoId = task?.videoId || (task?.originalUrl ? extractYouTubeVideoId(task.originalUrl) : null);
-  const [activeEngine, setActiveEngine] = useState<'server1' | 'server2'>('server1');
+  const [activeEngine] = useState<'server1' | 'server2'>('server1');
 
-  // Default to real stream embed when YouTube video has no local cached Blob, or local file when cached
+  // Default to local file mode so offline blobs play directly in HTML5 <video> without internet
   const [playerMode, setPlayerMode] = useState<'stream' | 'file'>('file');
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveStatusText, setSaveStatusText] = useState<string | null>(null);
   const [useAnimatedCoverPlayer, setUseAnimatedCoverPlayer] = useState<boolean>(false);
+  const [videoRenderError, setVideoRenderError] = useState<string | null>(null);
   const [coverImgFailed, setCoverImgFailed] = useState<boolean>(false);
+
+  // Unlock screen orientation on mount & listen for viewport rotation / fullscreen changes
+  useEffect(() => {
+    setVideoAspect(isLikelyVerticalVideo(task) ? 'portrait' : 'landscape');
+  }, [task]);
+
+  useEffect(() => {
+    try {
+      if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any)?.unlock) {
+        (screen.orientation as any).unlock();
+      }
+    } catch {
+      // ignore if browser does not allow orientation unlock
+    }
+
+    const updateViewportAndFullscreen = () => {
+      if (typeof window !== 'undefined') {
+        const portrait = window.innerHeight > window.innerWidth;
+        setIsViewportPortrait(portrait);
+        // If user physically rotated phone into landscape, turn off artificial CSS rotation
+        if (!portrait) {
+          setIsLandscapeRotated(false);
+        }
+      }
+      const fsEl =
+        document.fullscreenElement ||
+        (document as any).webkitFullscreenElement ||
+        null;
+      setIsFullscreen(Boolean(fsEl));
+    };
+
+    window.addEventListener('resize', updateViewportAndFullscreen);
+    window.addEventListener('orientationchange', updateViewportAndFullscreen);
+    document.addEventListener('fullscreenchange', updateViewportAndFullscreen);
+    document.addEventListener('webkitfullscreenchange', updateViewportAndFullscreen as any);
+
+    return () => {
+      window.removeEventListener('resize', updateViewportAndFullscreen);
+      window.removeEventListener('orientationchange', updateViewportAndFullscreen);
+      document.removeEventListener('fullscreenchange', updateViewportAndFullscreen);
+      document.removeEventListener('webkitfullscreenchange', updateViewportAndFullscreen as any);
+      try {
+        if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any)?.unlock) {
+          (screen.orientation as any).unlock();
+        }
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
 
   // Helper to send commands to YouTube IFrame API (Play, Pause, Seek, Volume, Speed)
   const sendYtCommand = (func: string, args: any[] = []) => {
@@ -158,27 +238,35 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
     }
   };
 
-  // Load / resolve playable Blob URL from memory or IndexedDB offline_media store, or progressive chunked stream
+  // Load / resolve playable Blob URL from memory or IndexedDB offline_media store, or progressive stream
   useEffect(() => {
     if (!task) return;
 
     let isMounted = true;
     let createdObjectUrl: string | null = null;
     const isAudio = task.format.type === 'audio';
-    const minValidBytes = isAudio ? 15 * 1024 : 30 * 1024;
+    const minValidBytes = isAudio ? MIN_VALID_AUDIO_BYTES : MIN_VALID_VIDEO_BYTES;
     const heightMatch = task.format.qualityLabel.match(/\d+/);
     const requestedHeight = heightMatch ? heightMatch[0] : '720';
+    videoFallbackTriedRef.current = false;
 
     const resolveBlob = async () => {
       setUseAnimatedCoverPlayer(false);
+      setVideoRenderError(null);
       setCoverImgFailed(false);
+      setHasOfflineBlob(false);
+      setActiveMediaUrl(null);
 
-      // 1. Fully downloaded in-memory mediaBlob -> Play immediately via URL.createObjectURL(blob)
-      if (task.mediaBlob && task.mediaBlob.size >= minValidBytes) {
-        const url = URL.createObjectURL(task.mediaBlob);
+      // 1. Unified Offline Binary Resolver (Memory + IndexedDB offline_media + CacheStorage, verified >= 120 KB for video)
+      const verifiedOfflineBlob = await downloadEngine.getTaskMediaBlob(task);
+      if (verifiedOfflineBlob && verifiedOfflineBlob.size >= minValidBytes) {
+        const url = URL.createObjectURL(verifiedOfflineBlob);
         createdObjectUrl = url;
         task.blobUrl = url;
+        task.mediaBlob = verifiedOfflineBlob;
         if (isMounted) {
+          setHasOfflineBlob(true);
+          setVideoRenderError(null);
           setActiveMediaUrl(url);
           setPlayerMode('file');
         }
@@ -192,6 +280,7 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
         createdObjectUrl = url;
         task.blobUrl = url;
         task.mediaBlob = offlineRecord.mediaBlob;
+        setHasOfflineBlob(true);
         setActiveMediaUrl(url);
         setPlayerMode('file');
         return;
@@ -204,47 +293,36 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
         createdObjectUrl = url;
         task.blobUrl = url;
         task.mediaBlob = blobFromDB;
+        setHasOfflineBlob(true);
         setActiveMediaUrl(url);
         setPlayerMode('file');
         return;
       }
 
-      // 4. For long YouTube videos (or un-downloaded YouTube videos):
-      // Never buffer the entire huge file into memory before starting playback!
-      // Instead, use progressive chunked streaming (/api/media/stream with HTTP Range 206 Partial Content) + real-time YouTube stream player.
-      if (ytVideoId && !isAudio && isMounted) {
-        const progressiveStreamUrl = !isCapacitorOrNative()
-          ? `/api/media/stream?url=${encodeURIComponent(task.originalUrl)}&quality=${requestedHeight}`
-          : task.directUrl && !isWebpageUrl(task.directUrl)
-          ? task.directUrl
-          : '';
-
-        if (progressiveStreamUrl) {
-          setActiveMediaUrl(progressiveStreamUrl);
+      // 3b. Try Cache API store (onedownload-offline-media-v1) -> URL.createObjectURL(blob)
+      if (typeof window !== 'undefined' && 'caches' in window) {
+        try {
+          const cache = await caches.open('onedownload-offline-media-v1');
+          const cachedResp = await cache.match(`/offline-media/${encodeURIComponent(task.id)}`);
+          if (cachedResp) {
+            const cachedBlob = await cachedResp.blob();
+            if (cachedBlob && cachedBlob.size >= minValidBytes && isMounted) {
+              const url = URL.createObjectURL(cachedBlob);
+              createdObjectUrl = url;
+              task.blobUrl = url;
+              task.mediaBlob = cachedBlob;
+              setHasOfflineBlob(true);
+              setActiveMediaUrl(url);
+              setPlayerMode('file');
+              return;
+            }
+          }
+        } catch {
+          // ignore Cache API error
         }
-        setPlayerMode('stream');
-        setIsPlaying(true);
-        return;
       }
 
-      // 5. Try direct stream URL (progressive HTTP Range streaming without loading full file into RAM)
-      if (task.directUrl && !isWebpageUrl(task.directUrl) && isMounted) {
-        setActiveMediaUrl(task.directUrl);
-        setPlayerMode('file');
-        return;
-      }
-
-      // 6. On Web, use progressive chunked stream endpoint (/api/media/stream) first for instant playback
-      if (!isCapacitorOrNative() && task.originalUrl && isMounted) {
-        const progressiveUrl = `/api/media/stream?url=${encodeURIComponent(
-          task.originalUrl
-        )}&quality=${requestedHeight}&audio=${isAudio ? '1' : '0'}`;
-        setActiveMediaUrl(progressiveUrl);
-        setPlayerMode('file');
-        return;
-      }
-
-      // 7. Resolve live online stream directly (Aparat / TikWM / Piped / Cobalt / Verified HD Stream)
+      // 4. Resolve live online stream directly (Backend / SaveVideo / TikWM / Aparat) so token is always fresh
       try {
         const onlineStream = await resolveDirectMediaStream(
           task.originalUrl,
@@ -261,11 +339,30 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
         // Fallback below
       }
 
+      // 5. Try direct stream URL if already resolved
+      if (task.directUrl && !isWebpageUrl(task.directUrl) && isMounted) {
+        setActiveMediaUrl(task.directUrl);
+        setPlayerMode('file');
+        return;
+      }
+
+      // 6. Use progressive stream endpoint (/api/media/stream)
+      if (task.originalUrl && isMounted) {
+        const progressiveUrl = getApiUrl(
+          `/api/media/stream?url=${encodeURIComponent(
+            task.originalUrl
+          )}&quality=${requestedHeight}&audio=${isAudio ? '1' : '0'}`
+        );
+        setActiveMediaUrl(progressiveUrl);
+        setPlayerMode('file');
+        return;
+      }
+
       if (isMounted) {
-        if (ytVideoId && !isAudio) {
-          setPlayerMode('stream');
-        } else {
+        if (isAudio) {
           setUseAnimatedCoverPlayer(true);
+        } else {
+          setVideoRenderError('خطا در رندر فایل ویدیو');
         }
       }
     };
@@ -284,7 +381,7 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
     };
   }, [task, ytVideoId]);
 
-  // Simulated progress ticker when in animated native cover player mode or YouTube stream fallback
+  // Simulated progress ticker when in audio cover player mode or YouTube stream fallback
   useEffect(() => {
     const isYtStreamActive = Boolean(ytVideoId && playerMode === 'stream');
     if ((!useAnimatedCoverPlayer && !isYtStreamActive) || !isPlaying) return;
@@ -308,26 +405,36 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   const isVideo = task.format.type === 'video';
 
   const handleMediaError = async () => {
-    if (ytVideoId && isVideo) {
-      setPlayerMode('stream');
-      setUseAnimatedCoverPlayer(false);
-      return;
+    if (!videoFallbackTriedRef.current) {
+      videoFallbackTriedRef.current = true;
+      try {
+        const onlineStream = await resolveDirectMediaStream(
+          task.originalUrl,
+          task.format.type,
+          task.format.qualityLabel
+        );
+        if (onlineStream && onlineStream.url && onlineStream.url !== activeMediaUrl) {
+          task.directUrl = onlineStream.url;
+          setActiveMediaUrl(onlineStream.url);
+          setVideoRenderError(null);
+          return;
+        }
+      } catch {
+        // Fall through to explicit error message below
+      }
     }
 
-    try {
-      const onlineStream = await resolveDirectMediaStream(
-        task.originalUrl,
-        task.format.type,
-        task.format.qualityLabel
-      );
-      if (onlineStream && onlineStream.url && onlineStream.url !== activeMediaUrl) {
-        task.directUrl = onlineStream.url;
-        setActiveMediaUrl(onlineStream.url);
-        setUseAnimatedCoverPlayer(false);
+    if (isVideo) {
+      if (ytVideoId) {
+        setVideoRenderError(null);
+        setPlayerMode('stream');
+        setIsPlaying(true);
         return;
       }
-    } catch {
-      // Switch to native animated cover player so user never sees a broken image or error
+      setIsPlaying(false);
+      setUseAnimatedCoverPlayer(false);
+      setVideoRenderError('خطا در رندر فایل ویدیو');
+      return;
     }
 
     setUseAnimatedCoverPlayer(true);
@@ -335,7 +442,11 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   };
 
   const togglePlay = () => {
-    if (isVideo && playerMode === 'stream' && ytVideoId) {
+    if (isVideo && videoRenderError) {
+      return;
+    }
+
+    if (isVideo && playerMode === 'stream' && ytVideoId && !hasOfflineBlob) {
       if (isPlaying) {
         sendYtCommand('pauseVideo');
         setIsPlaying(false);
@@ -346,14 +457,18 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
       return;
     }
 
-    if (useAnimatedCoverPlayer) {
+    if (!isVideo && useAnimatedCoverPlayer) {
       setIsPlaying((prev) => !prev);
       return;
     }
     const mediaEl = isVideo ? videoRef.current : audioRef.current;
     if (!mediaEl) {
-      setUseAnimatedCoverPlayer(true);
-      setIsPlaying((prev) => !prev);
+      if (isVideo) {
+        setVideoRenderError('خطا در رندر فایل ویدیو');
+      } else {
+        setUseAnimatedCoverPlayer(true);
+        setIsPlaying((prev) => !prev);
+      }
       return;
     }
 
@@ -363,11 +478,14 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
     } else {
       mediaEl
         .play()
-        .then(() => setIsPlaying(true))
+        .then(() => {
+          setVideoRenderError(null);
+          setIsPlaying(true);
+        })
         .catch(() => {
-          if (ytVideoId && isVideo) {
-            setPlayerMode('stream');
-            setIsPlaying(true);
+          if (isVideo) {
+            setIsPlaying(false);
+            setVideoRenderError('خطا در رندر فایل ویدیو');
           } else {
             setUseAnimatedCoverPlayer(true);
             setIsPlaying(true);
@@ -382,6 +500,13 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
       setCurrentTime(mediaEl.currentTime);
       if (mediaEl.duration && !isNaN(mediaEl.duration)) {
         setDuration(mediaEl.duration);
+      }
+      if (isVideo && videoRef.current) {
+        const vw = videoRef.current.videoWidth;
+        const vh = videoRef.current.videoHeight;
+        if (vw > 0 && vh > 0) {
+          setVideoAspect(vh > vw ? 'portrait' : 'landscape');
+        }
       }
     }
   };
@@ -462,23 +587,64 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   };
 
   const toggleFullscreen = async () => {
-    if (!playerContainerRef.current) return;
     try {
-      if (!document.fullscreenElement) {
-        await playerContainerRef.current.requestFullscreen();
-        setIsFullscreen(true);
-        if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any).lock) {
-          (screen.orientation as any).lock('any').catch(() => {});
-        }
-      } else {
-        await document.exitFullscreen();
-        setIsFullscreen(false);
-        if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any).unlock) {
+      // Unlock orientation so physical phone rotation works freely
+      if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any)?.unlock) {
+        try {
           (screen.orientation as any).unlock();
+        } catch {
+          // ignore
         }
       }
-    } catch (err) {
-      console.warn('Fullscreen toggle:', err);
+
+      const fsElement =
+        document.fullscreenElement || (document as any).webkitFullscreenElement;
+
+      if (fsElement || isCssFullscreen) {
+        if (fsElement) {
+          if (document.exitFullscreen) {
+            await document.exitFullscreen();
+          } else if ((document as any).webkitExitFullscreen) {
+            await (document as any).webkitExitFullscreen();
+          }
+        }
+        setIsFullscreen(false);
+        setIsCssFullscreen(false);
+        setIsLandscapeRotated(false);
+      } else {
+        const container = playerContainerRef.current;
+        let enteredNativeFs = false;
+        if (container) {
+          if (container.requestFullscreen) {
+            await container
+              .requestFullscreen()
+              .then(() => {
+                enteredNativeFs = true;
+              })
+              .catch(() => {});
+          } else if ((container as any).webkitRequestFullscreen) {
+            try {
+              (container as any).webkitRequestFullscreen();
+              enteredNativeFs = true;
+            } catch {
+              // fallback to CSS fullscreen
+            }
+          }
+        }
+        setIsFullscreen(true);
+        if (!enteredNativeFs) {
+          setIsCssFullscreen(true);
+        }
+        // For widescreen videos on a portrait phone, try locking orientation to landscape or applying cinema mode
+        if (videoAspect === 'landscape' && isViewportPortrait) {
+          if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any)?.lock) {
+            await (screen.orientation as any).lock('landscape').catch(() => {});
+          }
+        }
+      }
+    } catch {
+      setIsCssFullscreen((prev) => !prev);
+      setIsFullscreen((prev) => !prev);
     }
   };
 
@@ -486,7 +652,7 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
     const maxDur = duration || task.durationSeconds || 3600;
     const targetTime = Math.max(0, Math.min(maxDur, currentTime + delta));
     setCurrentTime(targetTime);
-    if (isVideo && playerMode === 'stream' && ytVideoId) {
+    if (isVideo && playerMode === 'stream' && ytVideoId && !hasOfflineBlob) {
       sendYtCommand('seekTo', [targetTime, true]);
       return;
     }
@@ -497,16 +663,40 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
 
   const toggleOrientation = async () => {
     try {
+      if (!isFullscreen && !isCssFullscreen) {
+        setIsCssFullscreen(true);
+        setIsFullscreen(true);
+      }
       if (typeof screen !== 'undefined' && 'orientation' in screen) {
-        const currentType = (screen.orientation as any).type || '';
-        if (currentType.includes('portrait')) {
-          if ((screen.orientation as any).lock) await (screen.orientation as any).lock('landscape');
-        } else {
-          if ((screen.orientation as any).lock) await (screen.orientation as any).lock('portrait');
+        const orient = screen.orientation as any;
+        const currentType = orient?.type || '';
+        if (orient?.lock) {
+          let lockedNative = false;
+          if (currentType.includes('portrait')) {
+            await orient
+              .lock('landscape')
+              .then(() => {
+                lockedNative = true;
+              })
+              .catch(() => {});
+          } else {
+            await orient
+              .lock('portrait')
+              .then(() => {
+                lockedNative = true;
+              })
+              .catch(() => {});
+          }
+          if (lockedNative) {
+            setIsLandscapeRotated(false);
+            return;
+          }
         }
       }
+      // If browser/WebView does not support screen.orientation.lock (or phone rotation lock is on), rotate via CSS Cinema Landscape!
+      setIsLandscapeRotated((prev) => !prev);
     } catch {
-      // Fallback
+      setIsLandscapeRotated((prev) => !prev);
     }
   };
 
@@ -517,14 +707,38 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const activeFullscreen = isFullscreen || isCssFullscreen || isLandscapeRotated;
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/85 backdrop-blur-lg animate-fade-in">
+    <div
+      className={`fixed inset-0 z-50 flex items-center justify-center bg-black/95 backdrop-blur-lg animate-fade-in ${
+        activeFullscreen ? 'p-0' : 'p-2 sm:p-4'
+      }`}
+    >
       <div
         ref={playerContainerRef}
-        className="relative w-full max-w-4xl rounded-2xl bg-slate-950 border border-slate-800 text-white shadow-2xl overflow-hidden flex flex-col my-auto"
+        style={
+          isLandscapeRotated
+            ? {
+                width: '100dvh',
+                height: '100vw',
+                transform: 'rotate(90deg)',
+                transformOrigin: 'center center'
+              }
+            : undefined
+        }
+        className={`relative bg-slate-950 text-white shadow-2xl overflow-hidden flex flex-col ${
+          isLandscapeRotated
+            ? 'max-w-none rounded-none border-0 justify-between'
+            : activeFullscreen
+            ? 'w-screen h-dvh max-w-none rounded-none border-0 justify-between'
+            : videoAspect === 'portrait' && isViewportPortrait
+            ? 'w-full max-w-md rounded-2xl border border-slate-800 my-auto max-h-[96dvh]'
+            : 'w-full max-w-4xl rounded-2xl border border-slate-800 my-auto max-h-[96dvh]'
+        }`}
       >
         {/* Top Header Bar */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between px-4 py-3 bg-slate-900/90 border-b border-slate-800 gap-2 shrink-0">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between px-4 py-2.5 bg-slate-900/90 border-b border-slate-800 gap-2 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
             <PlatformIcon platform={task.platform} size={22} />
             <div className="truncate">
@@ -534,7 +748,7 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
               <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
                 <span className="text-indigo-400 font-bold">{task.format.qualityLabel}</span>
                 <span>•</span>
-                <span>{task.durationFormatted || 'HD'}</span>
+                <span>{videoAspect === 'portrait' ? '9:16 Vertical' : '16:9 Cinema'}</span>
                 <span>•</span>
                 <span>{task.format.format.toUpperCase()}</span>
               </div>
@@ -574,7 +788,12 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
 
             <button
               type="button"
-              onClick={onClose}
+              onClick={() => {
+                setIsLandscapeRotated(false);
+                setIsCssFullscreen(false);
+                setIsFullscreen(false);
+                onClose();
+              }}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-black btn-3d-secondary"
               title={t.closePlayer}
             >
@@ -584,9 +803,55 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
           </div>
         </div>
 
-        {/* Media Screen Area - Never displays broken image icons or raw errors */}
-        <div className="relative w-full aspect-video bg-slate-950 flex items-center justify-center overflow-hidden">
-          {isVideo && playerMode === 'stream' && ytVideoId ? (
+        {/* Media Screen Area - Adapts responsively to both Portrait (9:16) & Landscape (16:9) orientations */}
+        <div
+          className={`relative w-full bg-black flex items-center justify-center overflow-hidden ${
+            activeFullscreen
+              ? 'flex-1 min-h-0 h-full'
+              : videoAspect === 'portrait' && isViewportPortrait
+              ? 'aspect-[9/16] max-h-[66dvh]'
+              : 'aspect-video max-h-[66dvh]'
+          }`}
+        >
+          {/* Floating Quick Fullscreen & Orientation Controls Overlay */}
+          {isVideo && (
+            <div className="absolute top-3 right-3 z-20 flex items-center gap-1.5 pointer-events-auto">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleOrientation();
+                }}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-black/65 hover:bg-indigo-600/90 text-white text-[11px] font-bold backdrop-blur-md border border-white/15 shadow-lg transition-all"
+                title={language === 'fa' ? 'چرخش افقی / عمودی' : 'Rotate Screen'}
+              >
+                <RotateCw className="w-3.5 h-3.5" />
+                <span>{language === 'fa' ? 'چرخش تصویر' : language === 'ar' ? 'تدوير الشاشة' : 'Rotate'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleFullscreen();
+                }}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-black/65 hover:bg-indigo-600/90 text-white text-[11px] font-bold backdrop-blur-md border border-white/15 shadow-lg transition-all"
+                title={t.fullscreen}
+              >
+                {activeFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize className="w-3.5 h-3.5" />}
+                <span>
+                  {activeFullscreen
+                    ? language === 'fa'
+                      ? 'خروج از تمام‌صفحه'
+                      : 'Exit Fullscreen'
+                    : language === 'fa'
+                    ? 'تمام‌صفحه'
+                    : 'Fullscreen'}
+                </span>
+              </button>
+            </div>
+          )}
+
+          {isVideo && playerMode === 'stream' && ytVideoId && !hasOfflineBlob ? (
             <iframe
               ref={iframeRef}
               src={
@@ -609,26 +874,93 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
               allowFullScreen
             />
-          ) : isVideo && activeMediaUrl && !isWebpageUrl(activeMediaUrl) && !useAnimatedCoverPlayer ? (
+          ) : isVideo && videoRenderError ? (
+            <div className="relative w-full h-full flex flex-col items-center justify-center p-6 bg-slate-950 text-center select-none">
+              <div className="w-16 h-16 rounded-2xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400 mb-3 shadow-lg">
+                <AlertTriangle className="w-8 h-8" />
+              </div>
+              <h4 className="text-base sm:text-lg font-black text-rose-400 mb-1.5">
+                خطا در رندر فایل ویدیو
+              </h4>
+              <p className="text-xs text-slate-400 max-w-md mb-4 leading-relaxed">
+                {language === 'fa'
+                  ? 'فایل ویدیو ناقص است یا لینک پخش مستقیم منقضی شده است. لطفاً مجدداً استریم مستقیم را بارگذاری کنید.'
+                  : 'Video file could not be rendered or stream link expired. Please reload the direct stream.'}
+              </p>
+              <div className="flex flex-wrap items-center justify-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setVideoRenderError(null);
+                    videoFallbackTriedRef.current = false;
+                    try {
+                      const onlineStream = await resolveDirectMediaStream(
+                        task.originalUrl,
+                        task.format.type,
+                        task.format.qualityLabel
+                      );
+                      if (onlineStream && onlineStream.url) {
+                        task.directUrl = onlineStream.url;
+                        setActiveMediaUrl(onlineStream.url);
+                        setPlayerMode('file');
+                        return;
+                      }
+                    } catch {
+                      // ignore
+                    }
+                    setVideoRenderError('خطا در رندر فایل ویدیو');
+                  }}
+                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black btn-3d-primary transition-all flex items-center gap-1.5"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>{language === 'fa' ? 'تلاش مجدد پخش ویدیو' : 'Retry Video Playback'}</span>
+                </button>
+                {ytVideoId && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setVideoRenderError(null);
+                      setPlayerMode('stream');
+                    }}
+                    className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-black btn-3d-secondary transition-all flex items-center gap-1.5"
+                  >
+                    <Tv className="w-3.5 h-3.5" />
+                    <span>{language === 'fa' ? 'پخش استریم آنلاین' : 'Online Stream'}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : isVideo && !activeMediaUrl ? (
+            <div className="relative w-full h-full flex flex-col items-center justify-center p-6 bg-slate-950 text-center select-none">
+              <Loader2 className="w-10 h-10 text-indigo-400 animate-spin mb-3" />
+              <p className="text-xs sm:text-sm font-bold text-slate-300">
+                {language === 'fa' ? 'در حال آماده‌سازی و بارگذاری ویدیو...' : 'Loading video stream...'}
+              </p>
+            </div>
+          ) : isVideo ? (
             <video
               ref={videoRef}
-              src={activeMediaUrl}
-              preload="metadata"
+              src={activeMediaUrl || undefined}
+              preload="auto"
               loop={isLooping}
               onTimeUpdate={handleTimeUpdate}
               onLoadedMetadata={handleTimeUpdate}
-              onPlay={() => setIsPlaying(true)}
+              onCanPlay={() => setVideoRenderError(null)}
+              onPlay={() => {
+                setVideoRenderError(null);
+                setIsPlaying(true);
+              }}
               onPause={() => setIsPlaying(false)}
               onEnded={() => setIsPlaying(false)}
               onError={handleMediaError}
               onClick={togglePlay}
-              className="w-full h-full object-contain cursor-pointer"
+              className="w-full h-full max-w-full max-h-full object-contain cursor-pointer bg-black"
               playsInline
               controls
               autoPlay
             />
           ) : (
-            /* Native Built-in Animated Cover Player (Used for Audio & Seamless Video Fallback so zero broken icons ever appear) */
+            /* Native Built-in Audio Cover Player (Exclusively for Audio files) */
             <div
               onClick={togglePlay}
               className="relative w-full h-full flex flex-col items-center justify-center p-4 sm:p-6 bg-gradient-to-br from-slate-950 via-indigo-950/90 to-slate-900 select-none cursor-pointer overflow-hidden"
@@ -637,7 +969,7 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
               <div className="absolute -top-16 -left-16 w-56 h-56 rounded-full bg-indigo-600/25 blur-3xl animate-pulse pointer-events-none" />
               <div className="absolute -bottom-16 -right-16 w-56 h-56 rounded-full bg-purple-600/25 blur-3xl animate-pulse pointer-events-none" />
 
-              {/* Safe Cover Image Backdrop (Automatically hidden if image fails to load - never shows broken image icon) */}
+              {/* Safe Cover Image Backdrop */}
               {!coverImgFailed && (task.thumbnail || ytVideoId) && (
                 <img
                   src={getSafeThumbnail(task.thumbnail, ytVideoId || undefined)}
@@ -663,8 +995,6 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
                       className="w-full h-full object-cover rounded-2xl"
                       onError={() => setCoverImgFailed(true)}
                     />
-                  ) : isVideo ? (
-                    <Film className="w-10 h-10 text-white drop-shadow" />
                   ) : (
                     <Music className="w-10 h-10 text-white drop-shadow" />
                   )}
@@ -692,7 +1022,7 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
                   ))}
                 </div>
 
-                {/* Hidden or Active HTML5 Audio Element when playing audio streams */}
+                {/* Active HTML5 Audio Element when playing audio streams */}
                 {!isVideo && activeMediaUrl && !isWebpageUrl(activeMediaUrl) && !useAnimatedCoverPlayer && (
                   <audio
                     ref={audioRef}
@@ -711,18 +1041,6 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
                 )}
 
                 <div className="flex flex-wrap items-center justify-center gap-2 mt-2" onClick={(e) => e.stopPropagation()}>
-                  {ytVideoId && isVideo && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setUseAnimatedCoverPlayer(false);
-                        setPlayerMode('stream');
-                      }}
-                      className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-black btn-3d-primary transition-all"
-                    >
-                      {language === 'fa' ? 'پخش استریم آنلاین' : 'Online Stream'}
-                    </button>
-                  )}
                   <button
                     type="button"
                     onClick={handleSaveClick}
@@ -900,10 +1218,14 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
 
                 <button
                   onClick={toggleFullscreen}
-                  className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                  className={`p-2 rounded-xl transition-colors ${
+                    activeFullscreen
+                      ? 'bg-indigo-600 text-white'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                  }`}
                   title={t.fullscreen}
                 >
-                  <Maximize className="w-4 h-4" />
+                  {activeFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
                 </button>
               </div>
             </div>

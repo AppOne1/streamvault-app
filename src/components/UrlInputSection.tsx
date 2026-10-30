@@ -14,7 +14,8 @@ import {
   Trash2,
   CheckCircle2,
   AlertCircle,
-  Radar
+  Radar,
+  Zap
 } from 'lucide-react';
 import { DownloadTask, Language } from '../types';
 import { getTranslation } from '../i18n/translations';
@@ -185,8 +186,8 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
             }
             setPasteSuccess(true);
             setTimeout(() => setPasteSuccess(false), 1800);
-            setUrl('');
-            onAnalyze(valid);
+            // Strictly place URL in input box and wait for user's manual click on "تحلیل و دانلود"
+            setUrl(valid);
           } else {
             setValidationError(
               isFa
@@ -210,7 +211,8 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
         const ok = document.execCommand('paste');
         const val = inputRef.current.value?.trim();
         if (ok && val && applyValidUrl(val)) {
-          handleAnalyzeClick(val);
+          setPasteSuccess(true);
+          setTimeout(() => setPasteSuccess(false), 1800);
           return;
         }
       } catch {
@@ -222,7 +224,8 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
       const lastSaved = localStorage.getItem(LAST_COPIED_URL_KEY);
       if (lastSaved && isValidHttpUrl(lastSaved) && !url.trim()) {
         applyValidUrl(lastSaved);
-        onAnalyze(lastSaved);
+        setPasteSuccess(true);
+        setTimeout(() => setPasteSuccess(false), 1800);
         return;
       }
     } catch {
@@ -312,12 +315,12 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
               type="button"
               onClick={() => {
                 setUrl(sniffedClipboardUrl);
-                onAnalyze(sniffedClipboardUrl);
                 setSniffedClipboardUrl(null);
+                inputRef.current?.focus();
               }}
               className="px-3 py-1 rounded-xl bg-emerald-600 text-white font-black text-[11px] btn-3d-emerald"
             >
-              {isFa ? 'دانلود همین لینک' : isAr ? 'تحميل هذا الرابط' : 'Download Link'}
+              {isFa ? 'قرار دادن در کادر لینک' : isAr ? 'وضع في مربع الرابط' : 'Place in Input Box'}
             </button>
             <button
               type="button"
@@ -372,13 +375,14 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
                   if (pasted) {
                     const extracted = extractUrlFromText(pasted) || pasted.trim();
                     if (isValidHttpUrl(extracted)) {
+                      e.preventDefault();
+                      setUrl(extracted);
                       setValidationError(null);
                       try {
                         localStorage.setItem(LAST_COPIED_URL_KEY, extracted);
                       } catch {
                         // ignore
                       }
-                      setTimeout(() => onAnalyze(extracted), 120);
                     } else {
                       setValidationError(
                         isFa
@@ -407,49 +411,59 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
               )}
             </div>
 
-            {/* Paste & Analyze Buttons */}
-            <div className="flex items-center gap-2.5 w-full sm:w-auto shrink-0">
-              <button
-                type="button"
-                onClick={handlePasteClipboard}
-                className="flex items-center justify-center gap-2 px-4 py-3.5 sm:py-4 rounded-2xl text-xs sm:text-sm font-black bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 border-t border-white/40 dark:border-white/15 shadow-[0_4px_0_rgb(148,163,184),0_8px_14px_rgba(15,23,42,0.1)] dark:shadow-[0_4px_0_rgb(15,23,42),0_8px_14px_rgba(0,0,0,0.45)] active:translate-y-[3px] active:shadow-[0_1px_0_rgb(148,163,184)] transition-all duration-150 shrink-0 cursor-pointer"
-                title={t.pasteClipboard}
+            {/* Paste Instruction & Full-Width Contained Analyze Button */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 w-full min-w-0">
+              <div
+                onClick={() => inputRef.current?.focus()}
+                className="flex items-center justify-center sm:justify-start gap-2 px-3.5 py-2.5 rounded-2xl bg-indigo-50/80 dark:bg-indigo-950/40 border border-indigo-500/30 text-indigo-700 dark:text-indigo-300 text-xs font-black cursor-text select-none min-w-0"
               >
-                {pasteSuccess ? (
-                  <Check className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-500 shrink-0" />
-                ) : (
-                  <Clipboard className="w-4 h-4 sm:w-5 sm:h-5 text-indigo-500 shrink-0" />
-                )}
-                <span>
-                  {pasteSuccess
-                    ? isFa
-                      ? 'جای‌گذاری شد'
-                      : isAr
-                      ? 'تم اللصق!'
-                      : 'Pasted!'
-                    : t.pasteClipboard}
+                <Clipboard className="w-4 h-4 text-indigo-500 shrink-0" />
+                <span className="truncate">
+                  {isFa
+                    ? 'لینک را داخل کادر بالا بچسبانید (نگه دارید و Paste بزنید)'
+                    : isAr
+                    ? 'الصق الرابط داخل المربع أعلاه'
+                    : 'Paste the link inside the box above'}
                 </span>
-              </button>
+              </div>
 
               <button
                 type="button"
                 onClick={() => handleAnalyzeClick()}
                 disabled={isLoading}
-                className="flex-1 sm:flex-initial flex items-center justify-center gap-2 px-6 py-3.5 sm:py-4 rounded-2xl text-sm sm:text-base font-black text-white bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 border-t border-white/25 shadow-[0_5px_0_rgb(76,29,149),0_10px_20px_rgba(124,58,237,0.35)] active:translate-y-[3px] active:shadow-[0_2px_0_rgb(76,29,149)] disabled:opacity-55 disabled:cursor-not-allowed transition-all duration-150 cursor-pointer"
+                className="w-full sm:w-auto min-w-0 max-w-full overflow-hidden flex items-center justify-center gap-2 px-5 py-3.5 sm:py-4 rounded-2xl text-sm sm:text-base font-black text-white bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 border-t border-white/25 shadow-[0_5px_0_rgb(76,29,149),0_10px_20px_rgba(124,58,237,0.35)] active:translate-y-[3px] active:shadow-[0_2px_0_rgb(76,29,149)] disabled:opacity-55 disabled:cursor-not-allowed transition-all duration-150 cursor-pointer"
               >
                 {isLoading ? (
                   <>
                     <Loader2 className="w-5 h-5 animate-spin shrink-0" />
-                    <span className="truncate">{t.analyzing}</span>
+                    <span className="truncate max-w-full">
+                      {isFa
+                        ? 'در حال بررسی لینک...'
+                        : isAr
+                        ? 'جاري فحص الرابط...'
+                        : t.analyzing}
+                    </span>
                   </>
                 ) : (
                   <>
-                    <span className="drop-shadow-xs">{t.analyzeButton}</span>
+                    <span className="drop-shadow-xs truncate">{t.analyzeButton}</span>
                     <ArrowRight className={`w-5 h-5 shrink-0 ${isRtl ? 'rotate-180' : ''}`} />
                   </>
                 )}
               </button>
             </div>
+          </div>
+
+          {/* Internet / VPN Speed & Foreground Keep-Alive Notice */}
+          <div className="flex items-start gap-2 px-3.5 py-2.5 rounded-2xl bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/30 text-[11px] sm:text-xs font-bold text-amber-800 dark:text-amber-300 leading-relaxed">
+            <Zap className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+            <span>
+              {isFa
+                ? 'نکته مهم: سرعت دانلود مستقیماً به سرعت اینترنت و کیفیت فیلترشکن (VPN) شما بستگی دارد. برای جلوگیری از کند شدن یا توقف دانلود توسط سیستم‌عامل گوشی، لطفاً تا پایان دانلود در صفحه برنامه بمانید.'
+                : isAr
+                ? 'ملاحظة هامة: تعتمد سرعة التحميل بشكل مباشر على سرعة الإنترنت وجودة الـ VPN لديك. لتجنب بطء أو توقف التحميل، يرجى البقاء داخل التطبيق حتى اكتمال التحميل.'
+                : 'Note: Download speed depends directly on your internet speed and VPN quality. Please stay in the app until the download finishes so your phone OS does not throttle background data.'}
+            </span>
           </div>
 
           {/* Custom File Name & Scheduled Time Row */}

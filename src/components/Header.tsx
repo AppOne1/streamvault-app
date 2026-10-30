@@ -60,15 +60,19 @@ export const Header: React.FC<HeaderProps> = ({
   const vipDaysLabel = quotaInfo.isPro
     ? quotaInfo.remainingProDays && quotaInfo.remainingProDays < 3650
       ? isFa
-        ? `VIP (${toFaDigits(quotaInfo.remainingProDays)} روز)`
+        ? `VIP فعال • ${toFaDigits(quotaInfo.remainingProDays)} روز`
         : isAr
-        ? `VIP (${toFaDigits(quotaInfo.remainingProDays)} يوم)`
-        : `VIP (${quotaInfo.remainingProDays}d)`
-      : 'VIP Pro'
+        ? `VIP نشط • ${toFaDigits(quotaInfo.remainingProDays)} يوم`
+        : `VIP Active • ${quotaInfo.remainingProDays}d`
+      : isFa
+      ? 'VIP فعال'
+      : isAr
+      ? 'VIP نشط'
+      : 'VIP Active'
     : 'VIP';
 
   const langBadgeLabel =
-    language === 'fa' ? 'FA 🇮🇷' : language === 'ar' ? 'AR 🇮🇶' : 'EN 🌐';
+    language === 'fa' ? 'فارسی' : language === 'ar' ? 'العربية' : 'English';
 
   return (
     <header className="sticky top-0 z-40 w-full max-w-[100vw] overflow-x-clip backdrop-blur-xl bg-white/95 dark:bg-slate-900/95 border-b border-slate-200/80 dark:border-slate-800/80 shadow-xs transition-colors">

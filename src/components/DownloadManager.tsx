@@ -3,6 +3,7 @@ import { DownloadTask, Language, TaskStatus } from '../types';
 import { PlatformIcon } from './PlatformIcon';
 import { getTranslation } from '../i18n/translations';
 import { extractUrlFromText, getSafeThumbnail, SAMPLE_URLS } from '../services/platformDetector';
+import { formatDownloadTimestamp } from '../services/downloadEngine';
 import { shareDownloadedMediaFile } from '../services/deviceService';
 import {
   Play,
@@ -128,10 +129,10 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
               {isFa
-                ? `مدیریت صف دانلود نوبتی و دسته‌جمعی • ${toFaDigits(tasks.length)} فایل در صف (${toFaDigits(activeCount)} فعال)`
+                ? `مدیریت صف دانلود نوبتی و پایدار • ${toFaDigits(tasks.length)} فایل (${toFaDigits(activeCount)} در صف فعال)`
                 : isAr
-                ? `إدارة طابور التحميل المتتالي • ${toFaDigits(tasks.length)} ملفات (${toFaDigits(activeCount)} نشط)`
-                : `Advanced Batch Queue Manager • ${tasks.length} tasks (${activeCount} active)`}
+                ? `إدارة قائمة انتظار التحميل المتسلسل • ${toFaDigits(tasks.length)} ملفات (${toFaDigits(activeCount)} نشط)`
+                : `Sequential Queue Download Manager • ${tasks.length} tasks (${activeCount} active)`}
             </p>
           </div>
           {onBackToHome && (
@@ -197,6 +198,18 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
         </div>
       </div>
 
+      {/* Internet / VPN Speed & Foreground Keep-Alive Banner */}
+      <div className="flex items-start gap-2.5 p-3.5 rounded-2xl bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/30 text-xs font-bold text-amber-800 dark:text-amber-300 leading-relaxed">
+        <Gauge className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+        <span>
+          {isFa
+            ? 'سرعت دانلود مستقیماً به سرعت اینترنت و کیفیت فیلترشکن (VPN) شما بستگی دارد. فایل‌های داخل صف به‌نوبت (یکی پس از اتمام دیگری) دانلود می‌شوند. برای جلوگیری از کند شدن یا توقف دانلود توسط سیستم‌عامل گوشی، لطفاً تا پایان دانلود از برنامه خارج نشوید.'
+            : isAr
+            ? 'تعتمد سرعة التحميل على سرعة الإنترنت وجودة الـ VPN لديك. يتم تحميل الملفات في قائمة الانتظار بالتسلسل. يرجى البقاء داخل التطبيق حتى انتهاء التحميل.'
+            : 'Download speed depends directly on your internet speed and VPN quality. Queued files download sequentially one after another. Keep the app open during downloads.'}
+        </span>
+      </div>
+
       {/* Batch Queue Multi-Link Drawer */}
       {isBatchModalOpen && onStartBatchDownload && (
         <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-indigo-500/40 card-3d space-y-3 animate-fade-in">
@@ -208,17 +221,17 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
               <div>
                 <h4 className="text-xs sm:text-sm font-black text-slate-900 dark:text-white">
                   {isFa
-                    ? 'افزودن دسته‌جمعی لینک‌ها به صف دانلود'
+                    ? 'افزودن دسته‌جمعی لینک‌ها برای دانلود همزمان'
                     : isAr
-                    ? 'إضافة روابط متعددة إلى طابور التحميل'
-                    : 'Add Multiple Links to Sequential Queue'}
+                    ? 'إضافة روابط متعددة للتحميل المتزامن'
+                    : 'Add Multiple Links for Parallel Download'}
                 </h4>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400">
                   {isFa
-                    ? 'لینک‌ها را در خطوط جداگانه وارد کنید تا به نوبت دانلود شوند'
+                    ? 'لینک‌ها را در خطوط جداگانه وارد کنید تا همزمان و مستقل از هم دانلود شوند'
                     : isAr
-                    ? 'أدخل كل رابط في سطر منفصل ليتم تحميلها بالتتابع'
-                    : 'Enter one URL per line for managed sequential downloading'}
+                    ? 'أدخل كل رابط في سطر منفصل ليتم تحميلها بالتوازي في نفس الوقت'
+                    : 'Enter one URL per line for simultaneous parallel downloading'}
                 </p>
               </div>
             </div>
@@ -279,10 +292,10 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
               className="px-4 py-2 rounded-xl text-xs font-black text-white bg-gradient-to-r from-indigo-600 to-violet-600 btn-3d-primary disabled:opacity-50"
             >
               {isFa
-                ? 'شروع صف دانلود دسته‌جمعی'
+                ? 'شروع دانلود همزمان لینک‌ها'
                 : isAr
-                ? 'بدء التحميل المتعدد'
-                : 'Start Batch Queue'}
+                ? 'بدء التحميل المتزامن'
+                : 'Start Parallel Downloads'}
             </button>
           </div>
         </div>
@@ -294,7 +307,7 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
           <div className="grid grid-cols-3 gap-2.5 text-center">
             <div className="p-2.5 rounded-2xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200/70 dark:border-slate-800">
               <span className="block text-[10px] font-bold text-slate-400">
-                {isFa ? 'پیشرفت صف' : isAr ? 'تقدم الطابور' : 'Queue Progress'}
+                {isFa ? 'پیشرفت کل' : isAr ? 'التقدم الإجمالي' : 'Total Progress'}
               </span>
               <span className="text-sm sm:text-base font-black text-indigo-600 dark:text-indigo-400 font-mono">
                 {overallQueuePercent}%
@@ -303,7 +316,7 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
 
             <div className="p-2.5 rounded-2xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200/70 dark:border-slate-800">
               <span className="block text-[10px] font-bold text-slate-400">
-                {isFa ? 'سرعت دانلود' : isAr ? 'سرعة التحميل' : 'Queue Speed'}
+                {isFa ? 'مجموع سرعت همزمان' : isAr ? 'سرعة التحميل المتزامن' : 'Combined Speed'}
               </span>
               <span className="text-sm sm:text-base font-black text-emerald-600 dark:text-emerald-400 font-mono">
                 {combinedSpeedFormatted}
@@ -312,7 +325,7 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
 
             <div className="p-2.5 rounded-2xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200/70 dark:border-slate-800">
               <span className="block text-[10px] font-bold text-slate-400">
-                {isFa ? 'حجم کل صف' : isAr ? 'الحجم الإجمالي' : 'Total Queue Volume'}
+                {isFa ? 'حجم کل دانلودها' : isAr ? 'الحجم الإجمالي' : 'Total Volume'}
               </span>
               <span className="text-xs sm:text-sm font-black text-slate-800 dark:text-slate-200 font-mono" dir="ltr">
                 {totalVolumeFormatted}
@@ -326,19 +339,6 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
               style={{ width: `${overallQueuePercent}%` }}
             />
           </div>
-
-          {queuedCount > 0 && (
-            <div className="text-[11px] font-bold text-indigo-600 dark:text-indigo-300 flex items-center gap-1.5">
-              <Clock className="w-3.5 h-3.5 animate-pulse" />
-              <span>
-                {isFa
-                  ? `${toFaDigits(queuedCount)} فایل در نوبت صف قرار دارد و بلافاصله پس از اتمام دانلود فعلی به صورت خودکار شروع می‌شود.`
-                  : isAr
-                  ? `${toFaDigits(queuedCount)} ملف(ات) في طابور الانتظار — سيبدأ التحميل تلقائياً بالتتابع.`
-                  : `${queuedCount} task(s) waiting in queue — will start automatically in sequence.`}
-              </span>
-            </div>
-          )}
         </div>
       )}
 
@@ -451,7 +451,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
         );
       case 'queued':
         return (
-          <span className="flex items-center gap-1 text-[11px] font-bold text-amber-600 dark:text-amber-400">
+          <span className="flex items-center gap-1 text-[11px] font-bold text-indigo-600 dark:text-indigo-400">
             <Clock className="w-3.5 h-3.5" />
             <span>
               {task.scheduledTime
@@ -461,10 +461,10 @@ const TaskCard: React.FC<TaskCardProps> = ({
                   ? `⏰ مجدول: ${task.scheduledTime}`
                   : `⏰ Scheduled: ${task.scheduledTime}`
                 : isFa
-                ? 'در نوبت صف'
+                ? 'در صف دانلود (نوبت بعدی)'
                 : isAr
                 ? 'في قائمة الانتظار'
-                : 'Queued'}
+                : 'In Queue (Next)'}
             </span>
           </span>
         );
@@ -472,7 +472,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
         return (
           <span className="flex items-center gap-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400">
             <CheckCircle2 className="w-3.5 h-3.5" />
-            <span>{t.statusCompleted}</span>
+            <span>{isFa ? 'پایان یافت' : t.statusCompleted}</span>
           </span>
         );
       case 'paused':
@@ -487,6 +487,20 @@ const TaskCard: React.FC<TaskCardProps> = ({
           <span className="flex items-center gap-1 text-[11px] font-bold text-slate-500">
             <XCircle className="w-3.5 h-3.5" />
             <span>{t.statusCancelled}</span>
+          </span>
+        );
+      case 'error':
+        return (
+          <span className="flex items-center gap-1 text-[11px] font-bold text-rose-500">
+            <XCircle className="w-3.5 h-3.5" />
+            <span>
+              {task.speedFormatted ||
+                (isFa
+                  ? 'خطا در دریافت — تلاش مجدد کنید'
+                  : isAr
+                  ? 'خطأ في التحميل — أعد المحاولة'
+                  : 'Download interrupted — Tap Retry')}
+            </span>
           </span>
         );
       default:
@@ -516,8 +530,20 @@ const TaskCard: React.FC<TaskCardProps> = ({
               src={getSafeThumbnail(task.thumbnail, task.videoId)}
               alt={task.title}
               className="absolute inset-0 w-full h-full object-cover"
+              referrerPolicy="no-referrer"
               onError={(e) => {
-                e.currentTarget.style.display = 'none';
+                const imgEl = e.currentTarget;
+                if (
+                  task.thumbnail &&
+                  task.thumbnail.startsWith('http') &&
+                  !imgEl.dataset.retriedRaw &&
+                  imgEl.src !== task.thumbnail
+                ) {
+                  imgEl.dataset.retriedRaw = '1';
+                  imgEl.src = task.thumbnail;
+                  return;
+                }
+                imgEl.style.display = 'none';
               }}
             />
           )}
@@ -543,12 +569,21 @@ const TaskCard: React.FC<TaskCardProps> = ({
             {renderStatusBadge(task.status)}
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500 dark:text-slate-400 mb-2 font-mono">
+          <div className="flex flex-wrap items-center gap-2.5 text-xs text-slate-500 dark:text-slate-400 mb-2 font-mono">
             <span className="font-bold text-indigo-600 dark:text-indigo-400">
               {task.format.qualityLabel}
             </span>
             <span>•</span>
             <span dir="ltr">{sizeInfoLabel}</span>
+            {task.status === 'completed' && (
+              <>
+                <span>•</span>
+                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-500 dark:text-slate-400" dir="ltr">
+                  <Clock className="w-3 h-3 text-emerald-500 shrink-0" />
+                  <span>{formatDownloadTimestamp(task.completedAt || task.createdAt, language)}</span>
+                </span>
+              </>
+            )}
             {task.status === 'downloading' && (
               <>
                 <span>•</span>
@@ -564,8 +599,8 @@ const TaskCard: React.FC<TaskCardProps> = ({
             )}
           </div>
 
-          {/* Linear Progress Bar */}
-          <div className="relative w-full h-2 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden mb-1 input-3d">
+          {/* TubeMate Single Direct Stream Progress Bar */}
+          <div className="relative w-full h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden mb-1.5 input-3d">
             <div
               className={`h-full rounded-full transition-all duration-300 ${
                 task.status === 'completed'
@@ -574,7 +609,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
                   ? 'bg-amber-500'
                   : task.status === 'error'
                   ? 'bg-rose-500'
-                  : 'bg-gradient-to-r from-indigo-500 to-violet-500'
+                  : 'bg-gradient-to-r from-indigo-500 via-violet-500 to-cyan-400'
               }`}
               style={{ width: `${task.status === 'error' ? 100 : task.progressPercent}%` }}
             />
@@ -582,13 +617,28 @@ const TaskCard: React.FC<TaskCardProps> = ({
 
           <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
             <span className="truncate max-w-[220px] sm:max-w-md">{task.fileName}</span>
-            <span className={`font-bold ${task.status === 'error' ? 'text-rose-500' : 'text-slate-700 dark:text-slate-300'}`}>
+            <span
+              className={`font-bold ${
+                task.status === 'error'
+                  ? 'text-rose-500'
+                  : task.status === 'completed'
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : 'text-slate-700 dark:text-slate-300'
+              }`}
+            >
               {task.status === 'error'
+                ? task.speedFormatted ||
+                  (isFa
+                    ? 'خطا در دریافت — تلاش مجدد'
+                    : isAr
+                    ? 'خطأ في التحميل — أعد المحاولة'
+                    : 'Download failed — Retry')
+                : task.status === 'completed'
                 ? isFa
-                  ? 'خطا در دریافت'
+                  ? 'پایان یافت • 100%'
                   : isAr
-                  ? 'خطأ في التحميل'
-                  : 'Error'
+                  ? 'مكتمل • 100%'
+                  : 'Completed • 100%'
                 : `${task.progressPercent}%`}
             </span>
           </div>
@@ -596,23 +646,49 @@ const TaskCard: React.FC<TaskCardProps> = ({
 
         {/* Action Buttons */}
         <div className="flex items-center gap-1.5 self-end sm:self-center shrink-0">
-          {task.status === 'downloading' && (
+          {(task.status === 'downloading' || task.status === 'queued') && (
             <button
+              type="button"
               onClick={() => onPause(task)}
-              className="p-2.5 rounded-2xl text-slate-600 dark:text-slate-300 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 btn-3d-secondary transition-colors"
-              title={t.pause}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-2xl text-xs font-black text-amber-700 dark:text-amber-300 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/60 dark:hover:bg-amber-900/60 border border-amber-500/30 btn-3d-secondary transition-colors cursor-pointer"
+              title={
+                task.status === 'queued'
+                  ? isFa
+                    ? 'نگه داشتن در صف'
+                    : isAr
+                    ? 'إيقاف مؤقت في الانتظار'
+                    : 'Hold / Pause in Queue'
+                  : t.pause
+              }
             >
-              <Pause className="w-4 h-4" />
+              <Pause className="w-4 h-4 shrink-0" />
+              <span>
+                {task.status === 'queued'
+                  ? isFa
+                    ? 'نگه داشتن'
+                    : isAr
+                    ? 'إيقاف مؤقت'
+                    : 'Hold'
+                  : isFa
+                  ? 'توقف موقت'
+                  : isAr
+                  ? 'إيقاف'
+                  : 'Pause'}
+              </span>
             </button>
           )}
 
-          {(task.status === 'paused' || task.status === 'queued') && (
+          {task.status === 'paused' && (
             <button
+              type="button"
               onClick={() => onResume(task)}
-              className="p-2.5 rounded-2xl text-indigo-600 dark:text-indigo-400 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 btn-3d-secondary transition-colors"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-2xl text-xs font-black text-indigo-600 dark:text-indigo-300 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 border border-indigo-500/30 btn-3d-secondary transition-colors cursor-pointer"
               title={t.resume}
             >
-              <Play className="w-4 h-4" />
+              <Play className="w-4 h-4 shrink-0" />
+              <span>
+                {isFa ? 'ادامه دانلود' : isAr ? 'استئناف التحميل' : 'Resume'}
+              </span>
             </button>
           )}
 
@@ -631,7 +707,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
               <button
                 type="button"
                 onClick={() => onPlay(task)}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-2xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 btn-3d-primary active:scale-95"
+                className="flex items-center gap-1.5 px-3 py-2 rounded-2xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 btn-3d-primary active:scale-95 cursor-pointer"
                 title={isFa ? 'پخش آفلاین' : isAr ? 'تشغيل بدون نت' : 'Play Offline'}
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
@@ -640,8 +716,20 @@ const TaskCard: React.FC<TaskCardProps> = ({
 
               <button
                 type="button"
+                onClick={() => onSave(task)}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-2xl text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 btn-3d-amber active:scale-95 cursor-pointer"
+                title={isFa ? 'ذخیره در دستگاه' : isAr ? 'حفظ في الجهاز' : 'Save to Device'}
+              >
+                <HardDrive className="w-3.5 h-3.5" />
+                <span>
+                  {isFa ? 'ذخیره در دستگاه' : isAr ? 'حفظ في الجهاز' : 'Save to Device'}
+                </span>
+              </button>
+
+              <button
+                type="button"
                 onClick={() => shareDownloadedMediaFile(task)}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-2xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 btn-3d-emerald active:scale-95"
+                className="flex items-center gap-1.5 px-3 py-2 rounded-2xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 btn-3d-emerald active:scale-95 cursor-pointer"
                 title={isFa ? 'اشتراک‌گذاری' : isAr ? 'مشاركة' : 'Share'}
               >
                 <Share2 className="w-3.5 h-3.5" />

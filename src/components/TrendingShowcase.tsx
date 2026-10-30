@@ -19,6 +19,7 @@ import {
   subscribeQuotaAndCoins
 } from '../services/quotaService';
 import { getSafeThumbnail } from '../services/platformDetector';
+import { formatDownloadTimestamp } from '../services/downloadEngine';
 import { PlatformIcon } from './PlatformIcon';
 
 interface TrendingShowcaseProps {
@@ -367,7 +368,10 @@ export const TrendingShowcase: React.FC<TrendingShowcaseProps> = ({
                       <p className="text-[10px] font-bold text-slate-500 dark:text-slate-400 truncate" dir="ltr">
                         {task.format.qualityLabel} •{' '}
                         {task.status === 'completed'
-                          ? task.totalSizeFormatted
+                          ? `${task.totalSizeFormatted} • ${formatDownloadTimestamp(
+                              task.completedAt || task.createdAt,
+                              language
+                            )}`
                           : `${task.progressPercent}%`}
                       </p>
                     </div>

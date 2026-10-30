@@ -10,9 +10,9 @@ import {
 import { Language } from '../types';
 import { ODLogo } from './ODLogo';
 
-export const APP_CURRENT_VERSION = '2.6.0';
+export const APP_CURRENT_VERSION = '1.0.0';
 export const CURRENT_APP_VERSION = APP_CURRENT_VERSION;
-export const UPDATE_DISMISSED_SESSION_KEY = 'onedownload_update_dismissed_v2_7_0';
+export const UPDATE_DISMISSED_SESSION_KEY = 'onedownload_update_dismissed_v1_0_0';
 
 export interface AppVersionManifest {
   currentVersion: string;
@@ -28,8 +28,8 @@ export interface AppVersionManifest {
 }
 
 export const DEFAULT_VERSION_MANIFEST: AppVersionManifest = {
-  currentVersion: '2.6.0',
-  latestVersion: '2.7.0',
+  currentVersion: '1.0.0',
+  latestVersion: '1.0.0',
   releaseDate: '1405/08/01',
   bazaarUrl: 'bazaar://details?id=ir.appone.onedownload',
   bazaarWebUrl: 'https://cafebazaar.ir/app/ir.appone.onedownload',

@@ -25,6 +25,7 @@ import {
   ReferralInfo,
   submitReferralCodeOrInvite,
   subscribeQuotaAndCoins,
+  syncAccountVipAndReferral,
   syncReferralFromCloud
 } from '../services/quotaService';
 import {
@@ -32,6 +33,7 @@ import {
   isDefaultGuestName,
   setLockedAccountCurrency
 } from '../services/storageService';
+import { getOrCreateDeviceId } from '../services/deviceService';
 import { ODLogo } from './ODLogo';
 
 interface AuthModalProps {
@@ -143,6 +145,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     type: 'success' | 'error';
     text: string;
   } | null>(null);
+  const [copiedRefCode, setCopiedRefCode] = useState(false);
+  const fixedHardwareId = getOrCreateDeviceId();
 
   useEffect(() => {
     if (isOpen) {
@@ -355,10 +359,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         : session.user.country || (language === 'fa' ? 'IR' : country);
     setLockedAccountCurrency(effectiveCountry === 'IR' || language === 'fa' ? 'toman' : 'usdt');
 
-    // If registering and user entered a referral code, process it now (syncs to cloud)
+    // If registering and user entered a referral code, process it now (increments counter + syncs to cloud)
     if (guestMode === 'register' && registerReferralCode.trim().length >= 3) {
       submitReferralCodeOrInvite(registerReferralCode.trim(), cleanIdentifier);
     }
+
+    // Bind and restore any account-bound VIP subscription & permanent referral code for this email/phone
+    const latestQuota = syncAccountVipAndReferral(cleanIdentifier);
+    const latestReferral = getReferralInfo();
+    setQuota(latestQuota);
+    setReferralInfo(latestReferral);
 
     const fallbackName = cleanIdentifier.includes('@')
       ? cleanIdentifier.split('@')[0]
@@ -378,7 +388,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         country: effectiveCountry,
         passwordHash: cleanPass,
         avatarUrl,
-        plan: quota.isPro ? 'VIP Pro' : 'Free'
+        plan: latestQuota.isPro ? 'VIP Pro' : 'Free',
+        vipExpiry: latestQuota.proExpiryDate,
+        vipPlan: latestQuota.proPlanName,
+        referralCode: latestReferral.myReferralCode
       }
     });
 
@@ -425,6 +438,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
+    const latestQuota = syncAccountVipAndReferral(cleanIdentifier);
+    const latestReferral = getReferralInfo();
+    setQuota(latestQuota);
+
     onUpdateSession({
       ...session,
       isLoggedIn: true,
@@ -434,7 +451,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         name:
           (!isDefaultGuestName(name) && name.trim()) ||
           (cleanIdentifier.includes('@') ? cleanIdentifier.split('@')[0] : cleanIdentifier),
-        passwordHash: cleanNewPass
+        passwordHash: cleanNewPass,
+        plan: latestQuota.isPro ? 'VIP Pro' : 'Free',
+        vipExpiry: latestQuota.proExpiryDate,
+        vipPlan: latestQuota.proPlanName,
+        referralCode: latestReferral.myReferralCode
       }
     });
 
@@ -468,6 +489,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
+    const latestQuota = syncAccountVipAndReferral(cleanIdentifier);
+    const latestReferral = getReferralInfo();
+    setQuota(latestQuota);
+
     onUpdateSession({
       ...session,
       isLoggedIn: true,
@@ -477,7 +502,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         email: cleanIdentifier,
         country,
         avatarUrl,
-        plan: quota.isPro ? 'VIP Pro' : 'Free'
+        plan: latestQuota.isPro ? 'VIP Pro' : 'Free',
+        vipExpiry: latestQuota.proExpiryDate,
+        vipPlan: latestQuota.proPlanName,
+        referralCode: latestReferral.myReferralCode
       }
     });
 
@@ -627,7 +655,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/85 backdrop-blur-md animate-fade-in overflow-y-auto">
       <div className="relative w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 card-3d overflow-hidden my-auto">
-        {/* Prominent Language Switcher Bar at Top of Auth Screen: English 🇬🇧 | العربية 🇮🇶 | فارسی 🇮🇷 */}
+        {/* Prominent Language Switcher Bar at Top of Auth Screen: فارسی | العربية | English */}
         <div className="px-4 py-2.5 bg-slate-900 text-white border-b border-slate-800 flex items-center justify-between gap-2">
           <div className="flex items-center gap-1.5 text-[11px] font-black text-indigo-300 shrink-0">
             <Globe className="w-3.5 h-3.5 text-amber-400 shrink-0" />
@@ -638,14 +666,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           <div className="grid grid-cols-3 gap-1.5 flex-1 max-w-[270px]" dir="ltr">
             <button
               type="button"
-              onClick={() => handleLanguageSwitch('en')}
+              onClick={() => handleLanguageSwitch('fa')}
               className={`py-1.5 px-2 rounded-xl text-[11px] font-black transition-all cursor-pointer ${
-                language === 'en'
+                language === 'fa'
                   ? 'bg-indigo-600 text-white shadow-md shadow-indigo-500/30 ring-1 ring-indigo-400'
                   : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
               }`}
             >
-              English 🇬🇧
+              فارسی
             </button>
             <button
               type="button"
@@ -656,18 +684,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
               }`}
             >
-              العربية 🇮🇶
+              العربية
             </button>
             <button
               type="button"
-              onClick={() => handleLanguageSwitch('fa')}
+              onClick={() => handleLanguageSwitch('en')}
               className={`py-1.5 px-2 rounded-xl text-[11px] font-black transition-all cursor-pointer ${
-                language === 'fa'
+                language === 'en'
                   ? 'bg-indigo-600 text-white shadow-md shadow-indigo-500/30 ring-1 ring-indigo-400'
                   : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
               }`}
             >
-              فارسی 🇮🇷
+              English
             </button>
           </div>
         </div>
@@ -857,46 +885,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               ) : (
                 <form onSubmit={handleGuestAuthSubmit} className="space-y-2.5">
                   {guestMode === 'register' && (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <div>
-                        <label className="block text-[11px] font-black text-slate-600 dark:text-slate-300 mb-1">
-                          {isFa
-                            ? 'نام نمایشی (اختیاری):'
-                            : isAr
-                            ? 'الاسم (اختياري):'
-                            : 'Display Name:'}
-                        </label>
-                        <div className="relative">
-                          <User className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                          <input
-                            type="text"
-                            value={name}
-                            onChange={(e) => setName(e.target.value)}
-                            placeholder={getLocalizedGuestName(language)}
-                            className="w-full pr-9 pl-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 input-3d"
-                          />
-                        </div>
-                      </div>
-
-                      {/* Country / Nationality Selector for Smart Payment Gateway */}
-                      <div>
-                        <label className="block text-[11px] font-black text-indigo-600 dark:text-indigo-300 mb-1 flex items-center gap-1">
-                          <Globe className="w-3.5 h-3.5 shrink-0" />
-                          <span>
-                            {isFa
-                              ? 'کشور / منطقه کاربری:'
-                              : isAr
-                              ? 'البلد / الجنسية (طريقة الدفع):'
-                              : 'Country / Region:'}
-                          </span>
-                        </label>
-                        <select
-                          value={country}
-                          onChange={(e) => setCountry(e.target.value as UserCountryCode)}
-                          className="w-full px-2.5 py-2 rounded-xl bg-slate-50 dark:bg-slate-950 border border-indigo-400/50 text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 input-3d"
-                        >
-                          {renderCountryOptions()}
-                        </select>
+                    <div>
+                      <label className="block text-[11px] font-black text-slate-600 dark:text-slate-300 mb-1">
+                        {isFa
+                          ? 'نام نمایشی (اختیاری):'
+                          : isAr
+                          ? 'الاسم (اختياري):'
+                          : 'Display Name:'}
+                      </label>
+                      <div className="relative">
+                        <User className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          type="text"
+                          value={name}
+                          onChange={(e) => setName(e.target.value)}
+                          placeholder={getLocalizedGuestName(language)}
+                          className="w-full pr-9 pl-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 input-3d"
+                        />
                       </div>
                     </div>
                   )}
@@ -1102,13 +1107,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     <Users className="w-3.5 h-3.5 text-indigo-500 mb-0.5" />
                     <span className="text-xs font-black text-indigo-600 dark:text-indigo-300">
                       {isFa
-                        ? `${toFaDigits(invitedProgress)}/۳`
+                        ? `${toFaDigits(referralInfo.invitedCount)} (${toFaDigits(invitedProgress)}/۳)`
                         : isAr
-                        ? `${toArDigits(invitedProgress)}/٣`
-                        : `${invitedProgress}/3`}
+                        ? `${toArDigits(referralInfo.invitedCount)} (${toArDigits(invitedProgress)}/٣)`
+                        : `${referralInfo.invitedCount} (${invitedProgress}/3)`}
                     </span>
                     <span className="text-[9px] font-bold text-slate-500 dark:text-slate-400">
-                      {isFa ? 'رفرال موفق' : isAr ? 'الدعوات' : 'Referrals'}
+                      {isFa ? 'تعداد رفرال‌های موفق' : isAr ? 'الدعوات الناجحة' : 'Referrals'}
                     </span>
                   </div>
 
@@ -1151,6 +1156,68 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </div>
               </div>
 
+              {/* Live Account-Bound VIP Status Banner inside Profile */}
+              {quota.isPro && (
+                <div className="p-2.5 rounded-2xl bg-gradient-to-r from-amber-500/20 via-yellow-500/15 to-emerald-500/20 border border-amber-400/50 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-black text-amber-700 dark:text-amber-300">
+                    <Crown className="w-4 h-4 text-amber-500 fill-amber-500 shrink-0" />
+                    <span>
+                      {isFa
+                        ? `اشتراک VIP فعال • ${toFaDigits(quota.remainingProDays || 30)} روز باقی‌مانده`
+                        : isAr
+                        ? `اشتراك VIP نشط • ${toArDigits(quota.remainingProDays || 30)} يوم متبقي`
+                        : `VIP Active • ${quota.remainingProDays || 30} Days Remaining`}
+                    </span>
+                  </div>
+                  <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                </div>
+              )}
+
+              {/* Permanent Hardware ID & Personal Referral Code Card in Profile */}
+              <div className="p-3 rounded-2xl bg-indigo-50/70 dark:bg-slate-950/90 border border-indigo-500/30 space-y-2">
+                <div className="flex items-center justify-between gap-2 text-[11px]">
+                  <span className="font-black text-slate-600 dark:text-slate-300">
+                    {isFa
+                      ? 'شناسه ثابت سخت‌افزاری دستگاه:'
+                      : isAr
+                      ? 'المعرف الثابت للجهاز:'
+                      : 'Permanent Hardware ID:'}
+                  </span>
+                  <span
+                    dir="ltr"
+                    className="font-mono font-black text-indigo-600 dark:text-indigo-400 select-all"
+                  >
+                    {fixedHardwareId}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-indigo-500/20 text-[11px]">
+                  <span className="font-black text-slate-600 dark:text-slate-300">
+                    {isFa
+                      ? 'کد معرف اختصاصی شما (۳ دعوت = ۱ ماه VIP):'
+                      : isAr
+                      ? 'كود الدعوة الخاص بك (٣ دعوات = شهر VIP):'
+                      : 'Your Referral Code (3 Invites = 1M VIP):'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard?.writeText(referralInfo.myReferralCode).catch(() => {});
+                      setCopiedRefCode(true);
+                      setTimeout(() => setCopiedRefCode(false), 2000);
+                    }}
+                    dir="ltr"
+                    className="px-2.5 py-1 rounded-lg bg-indigo-600 text-white font-mono font-black text-xs cursor-pointer hover:bg-indigo-500 transition-colors"
+                  >
+                    {copiedRefCode
+                      ? isFa
+                        ? 'کپی شد ✓'
+                        : 'Copied ✓'
+                      : referralInfo.myReferralCode}
+                  </button>
+                </div>
+              </div>
+
               {/* 2 Compact Profile Sub-Tabs: Edit Info / Change Password */}
               <div className="grid grid-cols-2 gap-1.5 p-1 rounded-2xl bg-slate-100 dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800">
                 <button
@@ -1168,10 +1235,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <User className="w-3.5 h-3.5 shrink-0" />
                   <span>
                     {isFa
-                      ? 'ویرایش مشخصات و کشور'
+                      ? 'ویرایش مشخصات'
                       : isAr
-                      ? 'تعديل البيانات والبلد'
-                      : 'Edit Info & Country'}
+                      ? 'تعديل البيانات'
+                      : 'Edit Info'}
                   </span>
                 </button>
 
@@ -1227,23 +1294,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                         className="w-full pr-9 pl-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 input-3d"
                       />
                     </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-[11px] font-black text-indigo-600 dark:text-indigo-300 mb-1">
-                      {isFa
-                        ? 'کشور / منطقه کاربری:'
-                        : isAr
-                        ? 'البلد / الجنسية (طريقة الدفع):'
-                        : 'Country / Payment Region:'}
-                    </label>
-                    <select
-                      value={country}
-                      onChange={(e) => setCountry(e.target.value as UserCountryCode)}
-                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 input-3d"
-                    >
-                      {renderCountryOptions()}
-                    </select>
                   </div>
 
                   <div className="flex items-center gap-2 pt-1">

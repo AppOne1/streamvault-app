@@ -18,6 +18,8 @@ import {
   clearAllIDBBlobs,
   deleteMediaBlobFromIDB,
   DEFAULT_SETTINGS,
+  ensurePersistentStorage,
+  hydrateTasksFromIndexedDB,
   loadSettingsFromStorage,
   loadSessionFromIDB,
   loadSessionFromStorage,
@@ -63,6 +65,7 @@ import {
   QuotaInfo,
   resetUserAccountAndQuotaToGuest,
   subscribeQuotaAndCoins,
+  syncAccountVipAndReferral,
   syncReferralFromCloud,
   verifyAppLockPinOrKeyword
 } from './services/quotaService';
@@ -112,6 +115,13 @@ export default function App() {
   });
   const [sharedLinkNotice, setSharedLinkNotice] = useState<boolean>(false);
   const [toastNotice, setToastNotice] = useState<ToastNotice | null>(null);
+  const completedToastIdsRef = React.useRef<Set<string>>(
+    new Set(
+      loadTasksFromStorage()
+        .filter((t) => t.status === 'completed')
+        .map((t) => t.id)
+    )
+  );
 
   const isOnline = useOnlineStatus();
   const {
@@ -155,27 +165,23 @@ export default function App() {
       });
     });
 
-    // Check server version for In-App Update popup
-    fetch('/api/app/version')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data && data.latestVersion && data.latestVersion !== CURRENT_APP_VERSION) {
-          setLatestServerVersion(data.latestVersion);
-          const dismissed = sessionStorage.getItem(UPDATE_DISMISSED_SESSION_KEY) === 'true';
-          if (!dismissed) {
-            setTimeout(() => setIsUpdateModalOpen(true), 2200);
-          }
-        }
-      })
-      .catch(() => {
-        // Ignore offline version check
-      });
-
     return () => window.clearTimeout(splashTimer);
   }, []);
 
-  // Restore session from IndexedDB on mount if localStorage was cleared
+  // Request Persistent Storage (navigator.storage.persist()) & hydrate completed downloads from IndexedDB on startup
   useEffect(() => {
+    ensurePersistentStorage();
+    hydrateTasksFromIndexedDB(loadTasksFromStorage()).then((hydrated) => {
+      if (hydrated && hydrated.length > 0) {
+        hydrated.forEach((t) => {
+          if (t.status === 'completed') {
+            completedToastIdsRef.current.add(t.id);
+          }
+        });
+        setTasks(hydrated);
+      }
+    });
+
     if (!userSession.isLoggedIn) {
       loadSessionFromIDB().then((idbSession) => {
         if (idbSession && idbSession.isLoggedIn) {
@@ -206,6 +212,12 @@ export default function App() {
 
   useEffect(() => {
     saveSessionToStorage(userSession);
+    if (userSession.isLoggedIn && (userSession.user.email || userSession.user.phone)) {
+      const syncedQuota = syncAccountVipAndReferral(
+        userSession.user.email || userSession.user.phone
+      );
+      setQuotaInfo(syncedQuota);
+    }
   }, [userSession]);
 
   useEffect(() => {
@@ -234,64 +246,34 @@ export default function App() {
         return copy;
       });
 
-      // Smart Notifications: Notify on download completion
-      if (updatedTask.status === 'completed') {
-        const smartNotifyEnabled = localStorage.getItem('onedownload_smart_notifications_v1') !== 'false';
-        if (smartNotifyEnabled) {
-          setToastNotice({
-            type: 'success',
-            title: isFa
-              ? '🔔 دانلود با موفقیت تکمیل شد!'
-              : isAr
-              ? '🔔 اكتمل التحميل بنجاح!'
-              : '🔔 Download Completed!',
-            message: updatedTask.fileName
-          });
-          setTimeout(() => setToastNotice(null), 4500);
-          try {
-            if ('Notification' in window && Notification.permission === 'granted') {
-              new Notification(
-                isFa ? 'وان دانلود (OneDownload)' : 'OneDownload',
-                {
-                  body: isFa
-                    ? `فایل «${updatedTask.fileName}» با موفقیت دانلود شد.`
-                    : isAr
-                    ? `تم تحميل الملف "${updatedTask.fileName}" بنجاح.`
-                    : `"${updatedTask.fileName}" finished downloading.`
-                }
-              );
-            }
-          } catch {
-            // Ignore browser Notification API errors
-          }
-        }
-      }
+      // Single-Execution Completion Banner (Strictly ONCE per completed task — 3 seconds, no OS popup loops!)
+      if (
+        updatedTask.status === 'completed' &&
+        !completedToastIdsRef.current.has(updatedTask.id)
+      ) {
+        completedToastIdsRef.current.add(updatedTask.id);
 
-      // Auto-save finished task directly to device storage
-      if (updatedTask.status === 'completed' && settings.autoSaveToDevice) {
-        downloadEngine.saveFileToDisk(updatedTask);
         setToastNotice({
           type: 'success',
           title: isFa
             ? 'فایل در حافظه دستگاه ذخیره شد'
             : isAr
             ? 'تم حفظ الملف في ذاكرة الجهاز'
-            : 'File saved to device',
+            : 'File saved to device storage',
           message: updatedTask.fileName
         });
-        setTimeout(() => setToastNotice(null), 4500);
-      }
+        setTimeout(() => setToastNotice(null), 3000);
 
-      // Auto-play finished task if preference is enabled
-      if (updatedTask.status === 'completed' && settings.autoPlayAfterDownload) {
-        setActivePlayerTask(updatedTask);
+        if (settings.autoPlayAfterDownload) {
+          setActivePlayerTask(updatedTask);
+        }
       }
     });
 
     return () => unsubscribe();
-  }, [settings.autoPlayAfterDownload, settings.autoSaveToDevice, isFa, isAr]);
+  }, [settings.autoPlayAfterDownload, isFa, isAr]);
 
-  // Web Share Target API: Catch URL shared from external apps (e.g. YouTube, TikTok, Instagram)
+  // Web Share Target API: Place shared URL into input box without auto-starting download
   useEffect(() => {
     try {
       const searchParams = new URLSearchParams(window.location.search);
@@ -302,7 +284,6 @@ export default function App() {
         if (extracted && isValidHttpUrl(extracted)) {
           setInputUrl(extracted);
           setSharedLinkNotice(true);
-          handleAnalyze(extracted);
           window.history.replaceState({}, document.title, window.location.pathname);
         }
       }
@@ -319,17 +300,17 @@ export default function App() {
     return currentHm === hhmm;
   };
 
-  // Automatic Sequential Queue Scheduler + Scheduled Download Timer
+  // Sequential Download Launcher + Scheduled Download Timer
   useEffect(() => {
     const checkQueueAndSchedule = () => {
-      const currentlyDownloading = tasks.filter((t) => t.status === 'downloading');
-      if (currentlyDownloading.length === 0) {
-        const nextReadyQueued = [...tasks]
-          .reverse()
-          .find((t) => t.status === 'queued' && (!t.scheduledTime || isScheduledTimeDue(t.scheduledTime)));
-        if (nextReadyQueued) {
-          downloadEngine.startTask(nextReadyQueued);
-        }
+      const readyTasks = tasks.filter(
+        (t) =>
+          t.status === 'queued' &&
+          !downloadEngine.isTaskQueuedOrActive(t.id) &&
+          (!t.scheduledTime || isScheduledTimeDue(t.scheduledTime))
+      );
+      for (const readyTask of readyTasks) {
+        downloadEngine.startTask(readyTask);
       }
     };
 
@@ -523,7 +504,6 @@ export default function App() {
     setCustomFileName('');
     setScheduledTime('');
 
-    const hasActiveDownload = tasks.some((t) => t.status === 'downloading');
     setTasks((prev) => [newTask, ...prev]);
 
     if (finalSchedule && !isScheduledTimeDue(finalSchedule)) {
@@ -537,7 +517,7 @@ export default function App() {
         message: newTask.fileName
       });
       setTimeout(() => setToastNotice(null), 4500);
-    } else if (!hasActiveDownload) {
+    } else {
       downloadEngine.startTask(newTask);
     }
 
@@ -593,49 +573,55 @@ export default function App() {
     setToastNotice({
       type: 'info',
       title: isFa
-        ? `در حال افزودن ${urls.length} لینک به صف دانلود نوبتی...`
+        ? `در حال شروع دانلود همزمان ${urls.length} لینک...`
         : isAr
-        ? `جاري إضافة ${urls.length} روابط إلى قائمة التحميل...`
-        : `Adding ${urls.length} links to batch queue...`,
+        ? `جاري بدء التحميل المتزامن لـ ${urls.length} روابط...`
+        : `Starting concurrent download of ${urls.length} links...`,
       message: qualityPreset.toUpperCase()
     });
 
-    const createdTasks: DownloadTask[] = [];
-    for (const rawUrl of urls) {
-      if (!isValidHttpUrl(rawUrl)) continue;
-      try {
-        const media = await parseMediaUrl(rawUrl);
-        let chosenFormat =
-          qualityPreset === 'mp3'
-            ? media.formats.find((f) => f.type === 'audio')
-            : qualityPreset === '720p'
-            ? media.formats.find((f) => f.type === 'video' && f.qualityLabel.includes('720'))
-            : media.formats.find((f) => f.type === 'video' && f.qualityLabel.includes('1080'));
-        if (!chosenFormat) {
-          chosenFormat = media.formats[0];
+    const validUrls = urls.filter((u) => isValidHttpUrl(u));
+    const resolvedTasks = await Promise.all(
+      validUrls.map(async (rawUrl) => {
+        try {
+          const media = await parseMediaUrl(rawUrl);
+          let chosenFormat =
+            qualityPreset === 'mp3'
+              ? media.formats.find((f) => f.type === 'audio')
+              : qualityPreset === '720p'
+              ? media.formats.find((f) => f.type === 'video' && f.qualityLabel.includes('720'))
+              : media.formats.find((f) => f.type === 'video' && f.qualityLabel.includes('1080'));
+          if (!chosenFormat) {
+            chosenFormat = media.formats[0];
+          }
+          return downloadEngine.createTask(media, chosenFormat);
+        } catch {
+          return null;
         }
-        const task = downloadEngine.createTask(media, chosenFormat);
-        createdTasks.push(task);
-      } catch {
-        // skip invalid url
-      }
-    }
+      })
+    );
+
+    const createdTasks = resolvedTasks.filter((t): t is DownloadTask => t !== null);
 
     if (createdTasks.length > 0) {
       setTasks((prev) => [...createdTasks, ...prev]);
       setActiveTab('downloads');
+      // Start all batch tasks simultaneously in parallel
+      for (const task of createdTasks) {
+        downloadEngine.startTask(task);
+      }
       setToastNotice({
         type: 'success',
         title: isFa
-          ? `${createdTasks.length} فایل به صف دانلود نوبتی اضافه شد!`
+          ? `دانلود همزمان ${createdTasks.length} فایل آغاز شد!`
           : isAr
-          ? `تمت إضافة ${createdTasks.length} ملفات إلى قائمة الانتظار!`
-          : `${createdTasks.length} files added to sequential queue!`,
+          ? `بدأ التحميل المتزامن لـ ${createdTasks.length} ملفات!`
+          : `Concurrent download of ${createdTasks.length} files started!`,
         message: isFa
-          ? 'دانلودها به نوبت و خودکار انجام می‌شوند'
+          ? 'تمامی فایل‌ها به صورت موازی و مستقل در حال دریافت هستند'
           : isAr
-          ? 'سيتم التحميل بالتتابع تلقائياً'
-          : 'Downloads will run automatically in sequence'
+          ? 'يتم تحميل جميع الملفات بالتوازي وبشكل مستقل'
+          : 'All files are downloading concurrently in parallel'
       });
       setTimeout(() => setToastNotice(null), 4000);
     }
@@ -674,22 +660,15 @@ export default function App() {
   };
 
   const handleSaveToDisk = async (task: DownloadTask) => {
-    setToastNotice({
-      type: 'info',
-      title: isFa ? 'در حال آماده‌سازی فایل...' : isAr ? 'جاري تجهيز الملف...' : 'Preparing file...',
-      message: task.fileName
-    });
-    const success = await downloadEngine.saveFileToDisk(task, (msg) => {
-      setToastNotice({
-        type: 'info',
-        title: isFa ? 'در حال انتقال به حافظه...' : isAr ? 'جاري الحفظ في الجهاز...' : 'Saving to storage...',
-        message: msg
-      });
-    });
+    const success = await downloadEngine.saveFileToDisk(task);
     if (success) {
       setToastNotice({
         type: 'success',
-        title: isFa ? 'فایل با موفقیت ذخیره شد!' : isAr ? 'تم حفظ الملف بنجاح!' : 'File successfully saved!',
+        title: isFa
+          ? 'فایل در حافظه دستگاه ذخیره شد'
+          : isAr
+          ? 'تم حفظ الملف في ذاكرة الجهاز'
+          : 'File saved to device storage',
         message: task.fileName
       });
     } else {
@@ -703,12 +682,12 @@ export default function App() {
           : 'Please check connection and retry'
       });
     }
-    setTimeout(() => setToastNotice(null), 4500);
+    setTimeout(() => setToastNotice(null), 3000);
   };
 
   const handlePauseAll = () => {
     tasks.forEach((t) => {
-      if (t.status === 'downloading') {
+      if (t.status === 'downloading' || t.status === 'queued') {
         downloadEngine.pauseTask(t);
       }
     });
@@ -718,6 +697,8 @@ export default function App() {
     tasks.forEach((t) => {
       if (t.status === 'paused') {
         downloadEngine.resumeTask(t);
+      } else if (t.status === 'error') {
+        downloadEngine.retryTask(t);
       }
     });
   };

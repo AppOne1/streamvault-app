@@ -10,7 +10,8 @@
 import { DownloadTask, Language } from '../types';
 import { getOfflineMedia } from './storageService';
 
-export const DEVICE_ID_STORAGE_KEY = 'onedownload_unique_device_id_v1';
+export const DEVICE_ID_STORAGE_KEY = 'od_fixed_hardware_id';
+const LEGACY_DEVICE_ID_KEY = 'onedownload_unique_device_id_v1';
 const DEVICE_ID_COOKIE_NAME = 'od_permanent_hwid_v1';
 const DEVICE_ID_IDB_DB = 'OneDownloadPermanentHWID';
 const DEVICE_ID_IDB_STORE = 'hwid_lock';
@@ -78,6 +79,13 @@ function syncHardwareIdToIndexedDB(hwid: string): void {
 export function restoreHardwareIdFromIndexedDB(): Promise<string> {
   return new Promise((resolve) => {
     try {
+      // Strictly prioritize od_fixed_hardware_id if already locked in localStorage
+      const lockedLocal = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
+      if (lockedLocal && lockedLocal.startsWith('APPONE-DEV-')) {
+        resolve(lockedLocal);
+        return;
+      }
+
       if (typeof window === 'undefined' || !window.indexedDB) {
         resolve(getOrCreateDeviceId());
         return;
@@ -95,6 +103,11 @@ export function restoreHardwareIdFromIndexedDB(): Promise<string> {
           const tx = db.transaction(DEVICE_ID_IDB_STORE, 'readonly');
           const getReq = tx.objectStore(DEVICE_ID_IDB_STORE).get('primary_hwid');
           getReq.onsuccess = () => {
+            const existingFixed = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
+            if (existingFixed && existingFixed.startsWith('APPONE-DEV-')) {
+              resolve(existingFixed);
+              return;
+            }
             const saved = getReq.result?.hwid;
             if (saved && typeof saved === 'string' && saved.startsWith('APPONE-DEV-')) {
               localStorage.setItem(DEVICE_ID_STORAGE_KEY, saved);
@@ -169,13 +182,26 @@ function generateHardwareBoundId(): string {
 
 export function getOrCreateDeviceId(): string {
   try {
-    const fromStorage = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
-    if (fromStorage && fromStorage.startsWith('APPONE-DEV-')) {
-      writeCookieHardwareId(fromStorage);
-      syncHardwareIdToIndexedDB(fromStorage);
-      return fromStorage;
+    // 1. Always read from permanent key `od_fixed_hardware_id` first
+    const fromFixedStorage = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
+    if (fromFixedStorage && fromFixedStorage.trim().startsWith('APPONE-DEV-')) {
+      const cleanFixed = fromFixedStorage.trim();
+      writeCookieHardwareId(cleanFixed);
+      syncHardwareIdToIndexedDB(cleanFixed);
+      return cleanFixed;
     }
 
+    // 2. Migrate from legacy key if present
+    const fromLegacy = localStorage.getItem(LEGACY_DEVICE_ID_KEY);
+    if (fromLegacy && fromLegacy.trim().startsWith('APPONE-DEV-')) {
+      const cleanLegacy = fromLegacy.trim();
+      localStorage.setItem(DEVICE_ID_STORAGE_KEY, cleanLegacy);
+      writeCookieHardwareId(cleanLegacy);
+      syncHardwareIdToIndexedDB(cleanLegacy);
+      return cleanLegacy;
+    }
+
+    // 3. Check long-lived cookie backup
     const fromCookie = readCookieHardwareId();
     if (fromCookie && fromCookie.startsWith('APPONE-DEV-')) {
       localStorage.setItem(DEVICE_ID_STORAGE_KEY, fromCookie);
@@ -183,6 +209,7 @@ export function getOrCreateDeviceId(): string {
       return fromCookie;
     }
 
+    // 4. First install: generate once and lock permanently in `od_fixed_hardware_id`
     const created = generateHardwareBoundId();
     localStorage.setItem(DEVICE_ID_STORAGE_KEY, created);
     writeCookieHardwareId(created);
