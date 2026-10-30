@@ -22,13 +22,18 @@ import { Language, UserCountryCode } from '../types';
 import { getDeviceProfile } from '../services/deviceService';
 import { getLockedAccountCurrency } from '../services/storageService';
 import {
+  BAZAAR_SKU_IDS,
+  BazaarProductId,
   getCoinsBalance,
   getDailyQuota,
   getReferralInfo,
   getVipEligibilityState,
+  purchasePlan,
   QuotaInfo,
   redeemCoinsForQuotaOrPro,
+  registerGlobalBazaarCallbacks,
   submitOneMonthVipRequest,
+  subscribeBazaarPurchaseEvents,
   subscribeQuotaAndCoins,
   syncReferralFromCloud,
   verifyAndActivateVipCode
@@ -149,16 +154,34 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
     type: 'success' | 'error' | 'info';
     text: string;
   } | null>(null);
+  const supportBoxRef = React.useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    const unsub = subscribeQuotaAndCoins(() => {
+    registerGlobalBazaarCallbacks();
+    const unsubQuota = subscribeQuotaAndCoins(() => {
       setQuota(getDailyQuota());
       setCoinsBalance(getCoinsBalance());
       setReferralInfo(getReferralInfo());
       setVipEligibility(getVipEligibilityState());
     });
-    return () => unsub();
-  }, []);
+
+    const unsubBazaar = subscribeBazaarPurchaseEvents((evt) => {
+      const msg = isFa ? evt.messageFa : isAr ? evt.messageAr : evt.messageEn;
+      if (evt.type === 'success') {
+        const updated = evt.quota || getDailyQuota();
+        setQuota(updated);
+        setFeedback({ type: 'success', text: msg });
+        onSuccess(updated, msg);
+      } else {
+        setFeedback({ type: 'error', text: msg });
+      }
+    });
+
+    return () => {
+      unsubQuota();
+      unsubBazaar();
+    };
+  }, [isFa, isAr]);
 
   useEffect(() => {
     if (isOpen) {
@@ -274,6 +297,7 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
   const plans = [
     {
       key: '1m' as const,
+      sku: BAZAAR_SKU_IDS.VIP_1M,
       titleFa: 'اشتراک ۱ ماهه (۳۰ روزه)',
       titleAr: 'اشتراك شهر واحد (٣٠ يوم)',
       titleEn: '1-Month VIP (30 Days)',
@@ -287,6 +311,7 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
     },
     {
       key: '3m' as const,
+      sku: BAZAAR_SKU_IDS.VIP_3M,
       titleFa: 'اشتراک ۳ ماهه (۹۰ روزه)',
       titleAr: 'اشتراك ٣ أشهر (٩٠ يوم)',
       titleEn: '3-Month VIP (90 Days)',
@@ -301,6 +326,7 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
     },
     {
       key: '12m' as const,
+      sku: BAZAAR_SKU_IDS.VIP_1Y,
       titleFa: 'اشتراک ۱ ساله (۱۲ ماهه)',
       titleAr: 'اشتراك سنة كاملة (١٢ شهر)',
       titleEn: '1-Year VIP (12 Months)',
@@ -318,6 +344,36 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
     isFa ? plan.priceTomanFa : isAr ? plan.priceTomanAr : plan.priceTomanEn;
 
   const selectedPlan = plans.find((p) => p.key === selectedPlanKey) || plans[1];
+
+  const handlePurchasePlanClick = (productId: BazaarProductId, planKey?: '1m' | '3m' | '12m') => {
+    if (planKey) {
+      setSelectedPlanKey(planKey);
+    }
+    setFeedback(null);
+    if (activeCurrency === 'toman') {
+      const res = purchasePlan(productId);
+      if (res.handledByBazaar) {
+        setFeedback({
+          type: 'info',
+          text: isFa
+            ? 'در حال اتصال به درگاه پرداخت درون‌برنامه‌ای کافه‌بازار...'
+            : isAr
+            ? 'جاري الاتصال ببوابة الدفع داخل التطبيق...'
+            : 'Connecting to CafeBazaar In-App Billing...'
+        });
+      } else {
+        setFeedback({
+          type: 'info',
+          text: isFa
+            ? 'برای تهیه اشتراک روی مرورگر، لطفاً شناسه سخت‌افزاری خود را برای پشتیبانی ارسال نمایید یا از نسخه اندرویدی کافه‌بازار استفاده کنید.'
+            : isAr
+            ? 'لشراء الاشتراك عبر المتصفح، يرجى إرسال معرف الجهاز إلى الدعم الفني بالأسفل.'
+            : 'To purchase on a browser, please send your Hardware ID to Support below.'
+        });
+        supportBoxRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/85 backdrop-blur-md overflow-y-auto animate-fade-in">
@@ -471,7 +527,7 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
                   <button
                     key={plan.key}
                     type="button"
-                    onClick={() => setSelectedPlanKey(plan.key)}
+                    onClick={() => handlePurchasePlanClick(plan.sku, plan.key)}
                     className={`relative p-2.5 rounded-2xl border text-center transition-all flex flex-col items-center justify-between gap-1 cursor-pointer ${
                       isSelected
                         ? 'bg-indigo-600/25 border-amber-400 ring-2 ring-amber-400/30 shadow-lg'
@@ -509,7 +565,7 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
 
             {/* Toman Details vs International USDT Details */}
             {activeCurrency === 'toman' ? (
-              <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 text-xs text-slate-300 space-y-2">
+              <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 text-xs text-slate-300 space-y-2.5">
                 <div className="flex items-center justify-between font-black text-amber-300">
                   <span>
                     {isFa
@@ -520,12 +576,28 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
                   </span>
                   <span>{getLocalizedTomanPrice(selectedPlan)}</span>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() => handlePurchasePlanClick(selectedPlan.sku, selectedPlan.key)}
+                  className="w-full py-3 px-4 rounded-2xl text-xs sm:text-sm font-black text-white bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-500 hover:from-emerald-500 hover:to-teal-400 btn-3d-emerald flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <CreditCard className="w-4 h-4 shrink-0" />
+                  <span>
+                    {isFa
+                      ? `خرید اشتراک ${selectedPlan.titleFa} (${getLocalizedTomanPrice(selectedPlan)})`
+                      : isAr
+                      ? `شراء ${selectedPlan.titleAr} (${getLocalizedTomanPrice(selectedPlan)})`
+                      : `Purchase ${selectedPlan.titleEn} (${getLocalizedTomanPrice(selectedPlan)})`}
+                  </span>
+                </button>
+
                 <p className="text-[11px] text-slate-400 leading-relaxed">
                   {isFa
-                    ? 'شناسه سخت‌افزاری دستگاه خود را کپی کرده و از طریق بخش «پشتیبانی فنی و ارتباط با ما» در پایین همین صفحه ارسال نمایید تا کد فعال‌سازی اختصاصی خود را دریافت و در کادر زیر وارد کنید.'
+                    ? 'در نسخه اندروید، با زدن دکمه بالا مستقیماً به درگاه پرداخت درون‌برنامه‌ای کافه‌بازار متصل می‌شوید. همچنین در صورت اجرا روی مرورگر، می‌توانید شناسه سخت‌افزاری دستگاه خود را از طریق بخش «پشتیبانی فنی و ارتباط با ما» در پایین همین صفحه ارسال نمایید.'
                     : isAr
-                    ? 'انسخ معرف الجهاز (Hardware ID) وأرسله عبر قسم الدعم الفني بالأسفل للحصول على كود التفعيل الخاص بك.'
-                    : 'Copy your Device Hardware ID below and contact Technical Support to receive your personal VIP Activation Code.'}
+                    ? 'في نسخة أندرويد سيتم فتح بوابة الدفع مباشرة، وفي المتصفح يمكنك إرسال معرف الجهاز إلى قسم الدعم الفني بالأسفل.'
+                    : 'On Android, tapping above opens CafeBazaar In-App Billing directly. On web browsers, you can also contact Technical Support below.'}
                 </p>
               </div>
             ) : (
@@ -883,11 +955,13 @@ export const ProUpgradeModal: React.FC<ProUpgradeModalProps> = ({
           )}
 
           {/* Official Support & Contact Management Section (پشتیبانی و ارتباط با مدیریت) */}
-          <SupportChannelsBox
-            language={language}
-            isTomanAccount={isTomanAccount}
-            darkVariant={true}
-          />
+          <div ref={supportBoxRef}>
+            <SupportChannelsBox
+              language={language}
+              isTomanAccount={isTomanAccount}
+              darkVariant={true}
+            />
+          </div>
         </div>
       </div>
     </div>

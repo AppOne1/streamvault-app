@@ -94,6 +94,12 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   const [activeMediaUrl, setActiveMediaUrl] = useState<string | null>(null);
   const [sleepTimer, setSleepTimer] = useState<number | null>(null);
   const [showSleepMenu, setShowSleepMenu] = useState<boolean>(false);
+  const [fitMode, setFitMode] = useState<'contain' | 'cover' | 'fill'>('contain');
+  const [videoFilter, setVideoFilter] = useState<'normal' | 'vivid' | 'cinema' | 'night'>('normal');
+  const [audioBoost, setAudioBoost] = useState<1 | 1.5 | 2>(1);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
+  const connectedMediaElRef = useRef<HTMLMediaElement | null>(null);
 
   // Detect YouTube ID for authentic real video playback
   const ytVideoId = task?.videoId || (task?.originalUrl ? extractYouTubeVideoId(task.originalUrl) : null);
@@ -113,19 +119,20 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   }, [task]);
 
   useEffect(() => {
+    // Unlock native screen orientation while the video player is open so physical rotation works
     try {
       if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any)?.unlock) {
         (screen.orientation as any).unlock();
       }
     } catch {
-      // ignore if browser does not allow orientation unlock
+      // ignore if browser restricts unlock
     }
 
     const updateViewportAndFullscreen = () => {
       if (typeof window !== 'undefined') {
-        const portrait = window.innerHeight > window.innerWidth;
+        const portrait = window.innerHeight >= window.innerWidth;
         setIsViewportPortrait(portrait);
-        // If user physically rotated phone into landscape, turn off artificial CSS rotation
+        // If native viewport rotated into landscape, use native full-screen landscape without double CSS rotation
         if (!portrait) {
           setIsLandscapeRotated(false);
         }
@@ -137,25 +144,44 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
       setIsFullscreen(Boolean(fsEl));
     };
 
+    // Gyroscope / Accelerometer physical tilt listener (works even if phone auto-rotate is locked in portrait)
+    const handleDeviceOrientation = (e: DeviceOrientationEvent) => {
+      if (task?.format.type !== 'video') return;
+      const gamma = typeof e.gamma === 'number' ? Math.abs(e.gamma) : 0;
+      const beta = typeof e.beta === 'number' ? Math.abs(e.beta) : 0;
+      const viewportIsPortrait =
+        typeof window !== 'undefined' ? window.innerHeight >= window.innerWidth : true;
+
+      if (viewportIsPortrait) {
+        if (gamma > 60 && beta < 42) {
+          setIsLandscapeRotated(true);
+        } else if (gamma < 28 && beta > 48) {
+          setIsLandscapeRotated(false);
+        }
+      }
+    };
+
     window.addEventListener('resize', updateViewportAndFullscreen);
     window.addEventListener('orientationchange', updateViewportAndFullscreen);
+    window.addEventListener('deviceorientation', handleDeviceOrientation, true);
     document.addEventListener('fullscreenchange', updateViewportAndFullscreen);
     document.addEventListener('webkitfullscreenchange', updateViewportAndFullscreen as any);
 
     return () => {
       window.removeEventListener('resize', updateViewportAndFullscreen);
       window.removeEventListener('orientationchange', updateViewportAndFullscreen);
+      window.removeEventListener('deviceorientation', handleDeviceOrientation, true);
       document.removeEventListener('fullscreenchange', updateViewportAndFullscreen);
       document.removeEventListener('webkitfullscreenchange', updateViewportAndFullscreen as any);
       try {
-        if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any)?.unlock) {
-          (screen.orientation as any).unlock();
+        if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any)?.lock) {
+          (screen.orientation as any).lock('portrait-primary').catch(() => {});
         }
       } catch {
         // ignore
       }
     };
-  }, []);
+  }, [task?.format.type]);
 
   // Helper to send commands to YouTube IFrame API (Play, Pause, Seek, Volume, Speed)
   const sendYtCommand = (func: string, args: any[] = []) => {
@@ -573,6 +599,59 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
     if (mediaEl) mediaEl.playbackRate = nextSpeed;
   };
 
+  const cycleFitMode = () => {
+    const modes: Array<'contain' | 'cover' | 'fill'> = ['contain', 'cover', 'fill'];
+    setFitMode((prev) => modes[(modes.indexOf(prev) + 1) % modes.length]);
+  };
+
+  const cycleVideoFilter = () => {
+    const filters: Array<'normal' | 'vivid' | 'cinema' | 'night'> = ['normal', 'vivid', 'cinema', 'night'];
+    setVideoFilter((prev) => filters[(filters.indexOf(prev) + 1) % filters.length]);
+  };
+
+  const cycleAudioBoost = () => {
+    const boosts: Array<1 | 1.5 | 2> = [1, 1.5, 2];
+    const nextBoost = boosts[(boosts.indexOf(audioBoost) + 1) % boosts.length];
+    setAudioBoost(nextBoost);
+    try {
+      const mediaEl = isVideo ? videoRef.current : audioRef.current;
+      if (mediaEl) {
+        if (!audioCtxRef.current) {
+          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+          if (AudioContextClass) {
+            const ctx = new AudioContextClass();
+            const gain = ctx.createGain();
+            const source = ctx.createMediaElementSource(mediaEl);
+            source.connect(gain);
+            gain.connect(ctx.destination);
+            audioCtxRef.current = ctx;
+            gainNodeRef.current = gain;
+            connectedMediaElRef.current = mediaEl;
+          }
+        }
+        if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+          audioCtxRef.current.resume().catch(() => {});
+        }
+        if (gainNodeRef.current) {
+          gainNodeRef.current.gain.value = nextBoost;
+        }
+      }
+    } catch {
+      // If cross-origin stream prevents MediaElementSource, fallback to max native volume
+      const mediaEl = isVideo ? videoRef.current : audioRef.current;
+      if (mediaEl) mediaEl.volume = 1;
+    }
+  };
+
+  const videoFilterStyle =
+    videoFilter === 'vivid'
+      ? 'contrast(1.12) saturate(1.25) brightness(1.04)'
+      : videoFilter === 'cinema'
+      ? 'contrast(1.18) saturate(1.1) sepia(0.08)'
+      : videoFilter === 'night'
+      ? 'brightness(0.85) contrast(1.08)'
+      : 'none';
+
   const togglePiP = async () => {
     if (!videoRef.current) return;
     try {
@@ -822,11 +901,25 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
                   e.stopPropagation();
                   toggleOrientation();
                 }}
-                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-black/65 hover:bg-indigo-600/90 text-white text-[11px] font-bold backdrop-blur-md border border-white/15 shadow-lg transition-all"
-                title={language === 'fa' ? 'چرخش افقی / عمودی' : 'Rotate Screen'}
+                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-white text-[11px] font-bold backdrop-blur-md border shadow-lg transition-all cursor-pointer ${
+                  isLandscapeRotated
+                    ? 'bg-emerald-600/90 border-emerald-400/50'
+                    : 'bg-black/65 hover:bg-indigo-600/90 border-white/15'
+                }`}
+                title={language === 'fa' ? 'چرخش افقی / عمودی ویدیو' : 'Toggle Horizontal / Vertical'}
               >
                 <RotateCw className="w-3.5 h-3.5" />
-                <span>{language === 'fa' ? 'چرخش تصویر' : language === 'ar' ? 'تدوير الشاشة' : 'Rotate'}</span>
+                <span>
+                  {isLandscapeRotated
+                    ? language === 'fa'
+                      ? 'حالت عمودی'
+                      : 'Vertical'
+                    : language === 'fa'
+                    ? 'حالت افقی (چرخش)'
+                    : language === 'ar'
+                    ? 'الوضع الأفقي'
+                    : 'Horizontal'}
+                </span>
               </button>
               <button
                 type="button"
@@ -954,7 +1047,14 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
               onEnded={() => setIsPlaying(false)}
               onError={handleMediaError}
               onClick={togglePlay}
-              className="w-full h-full max-w-full max-h-full object-contain cursor-pointer bg-black"
+              style={{ filter: videoFilterStyle }}
+              className={`w-full h-full max-w-full max-h-full cursor-pointer bg-black ${
+                fitMode === 'cover'
+                  ? 'object-cover'
+                  : fitMode === 'fill'
+                  ? 'object-fill'
+                  : 'object-contain'
+              }`}
               playsInline
               controls
               autoPlay
@@ -1198,12 +1298,94 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
                   />
                 </div>
 
+                {/* Audio Boost Button (100% / 150% / 200%) */}
+                <button
+                  type="button"
+                  onClick={cycleAudioBoost}
+                  className={`px-2 py-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
+                    audioBoost > 1
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                  }`}
+                  title={language === 'fa' ? 'تقویت صدای پخش' : 'Audio Boost'}
+                >
+                  {language === 'fa' ? `صدا ${Math.round(audioBoost * 100)}%` : `Boost ${Math.round(audioBoost * 100)}%`}
+                </button>
+
+                {/* Video Fit & Visual Filter Controls */}
+                {isVideo && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={cycleFitMode}
+                      className={`px-2 py-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
+                        fitMode !== 'contain'
+                          ? 'bg-indigo-600 text-white'
+                          : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                      }`}
+                      title={language === 'fa' ? 'تنظیم کادر تصویر' : 'Aspect Fit'}
+                    >
+                      {fitMode === 'contain'
+                        ? language === 'fa'
+                          ? 'کادر: عادی'
+                          : 'Fit'
+                        : fitMode === 'cover'
+                        ? language === 'fa'
+                          ? 'کادر: زوم'
+                          : 'Zoom'
+                        : language === 'fa'
+                        ? 'کادر: پر'
+                        : 'Stretch'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={cycleVideoFilter}
+                      className={`px-2 py-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
+                        videoFilter !== 'normal'
+                          ? 'bg-amber-500 text-slate-950'
+                          : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                      }`}
+                      title={language === 'fa' ? 'بهبود رنگ و تصویر' : 'Video Filter'}
+                    >
+                      {videoFilter === 'normal'
+                        ? language === 'fa'
+                          ? 'تصویر: عادی'
+                          : 'Normal'
+                        : videoFilter === 'vivid'
+                        ? language === 'fa'
+                          ? 'تصویر: شفاف'
+                          : 'Vivid'
+                        : videoFilter === 'cinema'
+                        ? language === 'fa'
+                          ? 'تصویر: سینمایی'
+                          : 'Cinema'
+                        : language === 'fa'
+                        ? 'تصویر: شب'
+                        : 'Night'}
+                    </button>
+                  </>
+                )}
+
                 <button
                   onClick={toggleOrientation}
-                  className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                  className={`flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
+                    isLandscapeRotated
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700'
+                  }`}
                   title={language === 'fa' ? 'تغییر جهت نمایش (افقی / عمودی)' : 'Rotate Screen'}
                 >
-                  <RotateCw className="w-4 h-4" />
+                  <RotateCw className="w-3.5 h-3.5" />
+                  <span className="text-[11px]">
+                    {isLandscapeRotated
+                      ? language === 'fa'
+                        ? 'عمودی'
+                        : 'Portrait'
+                      : language === 'fa'
+                      ? 'افقی'
+                      : 'Landscape'}
+                  </span>
                 </button>
 
                 {isVideo && (

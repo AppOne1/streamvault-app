@@ -203,12 +203,16 @@ export interface TikWMResolvedStream {
  */
 export async function resolveViaTikWM(
   originalUrl: string,
-  mediaType: MediaType
+  mediaType: MediaType,
+  qualityLabel: string = '720p'
 ): Promise<TikWMResolvedStream | null> {
   try {
     const data = await fetchTikWmCached(originalUrl);
     if (data) {
       const isAudio = mediaType === 'audio';
+      const heightMatch = qualityLabel.match(/(\d{3,4})/);
+      const reqH = heightMatch ? parseInt(heightMatch[1], 10) : 720;
+
       const idPlayUrl = data.id ? `https://www.tikwm.com/video/media/play/${data.id}.mp4` : '';
       const hdPlayUrl = data.hdplay
         ? String(data.hdplay).startsWith('http')
@@ -231,15 +235,67 @@ export async function resolveViaTikWM(
           : `https://www.tikwm.com${data.music}`
         : '';
 
-      const orderedRawCandidates = isAudio
-        ? [musicUrl, idPlayUrl, stdPlayUrl, hdPlayUrl].filter(Boolean)
-        : [idPlayUrl, stdPlayUrl, hdPlayUrl, wmPlayUrl].filter(Boolean);
+      const rawStdSize = Number(data.size) > 150000 ? Number(data.size) : 0;
+      const rawWmSize = Number(data.wm_size) > 150000 ? Number(data.wm_size) : 0;
+      const rawHdSize = Number(data.hd_size) > 150000 ? Number(data.hd_size) : 0;
+      const wmIsSmaller = rawWmSize > 150000 && rawStdSize > 150000 && rawWmSize < rawStdSize * 0.85;
+
+      const baseStdSize = rawStdSize > 150000 ? rawStdSize : rawWmSize > 150000 ? rawWmSize : 4500000;
+      const baseHdSize =
+        rawHdSize > baseStdSize
+          ? rawHdSize
+          : rawWmSize > baseStdSize
+          ? rawWmSize
+          : Math.round(baseStdSize * 1.38);
+      const base480Size = wmIsSmaller ? rawWmSize : Math.round(baseStdSize * 0.56);
+      const base360Size = Math.round(baseStdSize * 0.36);
+
+      const heightBucket = reqH <= 360 ? 360 : reqH <= 480 ? 480 : reqH <= 720 ? 720 : 1080;
+      const serverResolutionStream = getApiUrl(
+        `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${heightBucket}&audio=${
+          isAudio ? '1' : '0'
+        }`
+      );
+
+      let orderedRawCandidates: string[];
+      let chosenSize = baseStdSize;
+
+      if (isAudio) {
+        orderedRawCandidates = [musicUrl, serverResolutionStream, stdPlayUrl, idPlayUrl].filter(Boolean);
+        chosenSize = Math.round(baseStdSize * 0.25);
+      } else if (heightBucket >= 1080) {
+        orderedRawCandidates = [serverResolutionStream, hdPlayUrl, stdPlayUrl, idPlayUrl].filter(Boolean);
+        chosenSize = baseHdSize;
+      } else if (heightBucket === 720) {
+        orderedRawCandidates = [serverResolutionStream, stdPlayUrl, idPlayUrl, hdPlayUrl].filter(Boolean);
+        chosenSize = baseStdSize;
+      } else if (heightBucket === 480) {
+        orderedRawCandidates = [
+          serverResolutionStream,
+          wmIsSmaller ? wmPlayUrl : stdPlayUrl,
+          idPlayUrl
+        ].filter(Boolean);
+        chosenSize = base480Size;
+      } else {
+        orderedRawCandidates = [
+          serverResolutionStream,
+          wmIsSmaller ? wmPlayUrl : stdPlayUrl,
+          idPlayUrl
+        ].filter(Boolean);
+        chosenSize = base360Size;
+      }
 
       if (orderedRawCandidates.length > 0) {
         const primaryRaw = orderedRawCandidates[0];
         const fallbackUrls: string[] = [];
         for (const candidate of orderedRawCandidates) {
-          const wrapped = wrapStreamUrl(candidate, data.title || 'tiktok_video', isAudio, originalUrl);
+          const wrapped = wrapStreamUrl(
+            candidate,
+            data.title || 'tiktok_video',
+            isAudio,
+            originalUrl,
+            String(heightBucket)
+          );
           if (wrapped && !fallbackUrls.includes(wrapped)) fallbackUrls.push(wrapped);
         }
 
@@ -249,7 +305,7 @@ export async function resolveViaTikWM(
           title: data.title || `TikTok Video (@${data.author?.unique_id || 'tiktok'})`,
           thumbnail: data.cover || data.origin_cover,
           duration: data.duration,
-          estimatedSize: data.size || data.hd_size || 4500000
+          estimatedSize: chosenSize
         };
       }
     }
@@ -374,7 +430,15 @@ export async function resolveFallbackMediaStreams(
             if (s?.url) addCandidate(s.url);
           }
         } else if (!isAudio && Array.isArray(data.videoStreams)) {
-          const prog = data.videoStreams.filter((s: any) => s.videoOnly === false && s.url);
+          const prog = data.videoStreams
+            .filter((s: any) => s.videoOnly === false && s.url)
+            .sort((a: any, b: any) => {
+              const ha = parseInt(String(a.quality || a.height || '720'), 10) || 720;
+              const hb = parseInt(String(b.quality || b.height || '720'), 10) || 720;
+              const aLe = ha <= requestedHeight ? 0 : 10000;
+              const bLe = hb <= requestedHeight ? 0 : 10000;
+              return aLe + Math.abs(requestedHeight - ha) - (bLe + Math.abs(requestedHeight - hb));
+            });
           for (const s of prog) {
             addCandidate(s.url);
           }
@@ -392,7 +456,14 @@ export async function resolveFallbackMediaStreams(
           timeoutMs: 5000
         });
         if (data && Array.isArray(data.formatStreams)) {
-          for (const s of data.formatStreams) {
+          const sortedStreams = [...data.formatStreams].sort((a: any, b: any) => {
+            const ha = parseInt(String(a.qualityLabel || a.resolution || '720'), 10) || 720;
+            const hb = parseInt(String(b.qualityLabel || b.resolution || '720'), 10) || 720;
+            const aLe = ha <= requestedHeight ? 0 : 10000;
+            const bLe = hb <= requestedHeight ? 0 : 10000;
+            return aLe + Math.abs(requestedHeight - ha) - (bLe + Math.abs(requestedHeight - hb));
+          });
+          for (const s of sortedStreams) {
             if (s?.url) addCandidate(s.url);
           }
         }
@@ -599,9 +670,9 @@ export async function resolveDirectMediaStream(
     // fall through to client-side / native resolvers below
   }
 
-  // 2. TikTok Direct No-Watermark API Fallback (Client/Native)
+  // 2. TikTok Direct Stream API Fallback (Client/Native, strictly respects qualityLabel)
   if (isTikTok) {
-    const tikResolved = await resolveViaTikWM(originalUrl, mediaType);
+    const tikResolved = await resolveViaTikWM(originalUrl, mediaType, qualityLabel);
     if (tikResolved && tikResolved.url) {
       return {
         url: tikResolved.url,
@@ -661,7 +732,13 @@ export async function resolveDirectMediaStream(
       : originalUrl.split('?')[0] || originalUrl;
 
     const heightsToTry = ytId
-      ? Array.from(new Set([requestedHeight, 720, 360]))
+      ? requestedHeight <= 360
+        ? [360]
+        : requestedHeight <= 480
+        ? [480, 360]
+        : requestedHeight <= 720
+        ? [720, 480, 360]
+        : Array.from(new Set([requestedHeight, 720, 360]))
       : [requestedHeight];
 
     for (const tryHeight of heightsToTry) {
@@ -918,8 +995,16 @@ export async function fetchMediaStreamWithCorsFallback(
 
   if (isBackendTarget) {
     candidateUrls.push(getApiUrl(targetUrl));
+    const unwrapped = unwrapRawMediaUrl(targetUrl);
+    if (unwrapped && unwrapped.startsWith('http') && !candidateUrls.includes(unwrapped)) {
+      candidateUrls.push(unwrapped);
+    }
   } else {
     candidateUrls.push(targetUrl);
+    const wrapped = wrapStreamUrl(targetUrl, 'media', isAudio);
+    if (wrapped && !candidateUrls.includes(wrapped)) {
+      candidateUrls.push(wrapped);
+    }
   }
 
   let lastError: unknown;

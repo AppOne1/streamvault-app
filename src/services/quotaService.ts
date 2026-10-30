@@ -1502,3 +1502,219 @@ export function resetUserAccountAndQuotaToGuest(): void {
   notifySubscribers();
 }
 
+/**
+ * ============================================================================
+ * CAFEBAZAAR POOLAKEY IN-APP BILLING BRIDGE INTEGRATION
+ * Official SKUs:
+ * - 1-Month VIP (39,000 Toman): `od_vip_1m` (30 Days)
+ * - 3-Month VIP (79,000 Toman): `od_vip_3m` (90 Days)
+ * - 1-Year VIP  (99,000 Toman): `od_vip_1y` (365 Days)
+ * ============================================================================
+ */
+export const BAZAAR_SKU_IDS = {
+  VIP_1M: 'od_vip_1m',
+  VIP_3M: 'od_vip_3m',
+  VIP_1Y: 'od_vip_1y'
+} as const;
+
+export type BazaarProductId =
+  | typeof BAZAAR_SKU_IDS.VIP_1M
+  | typeof BAZAAR_SKU_IDS.VIP_3M
+  | typeof BAZAAR_SKU_IDS.VIP_1Y;
+
+export interface BazaarPurchaseEvent {
+  type: 'success' | 'error';
+  productId?: string;
+  purchaseToken?: string;
+  durationDays?: number;
+  quota?: QuotaInfo;
+  messageFa: string;
+  messageAr: string;
+  messageEn: string;
+}
+
+declare global {
+  interface Window {
+    AndroidBazaar?: {
+      startPurchase: (productId: string) => void;
+    };
+    onBazaarPurchaseSuccess?: (productId: string, purchaseToken: string) => void;
+    onBazaarPurchaseFailed?: (errorMessage: string) => void;
+  }
+}
+
+type BazaarEventSubscriber = (event: BazaarPurchaseEvent) => void;
+const bazaarEventSubscribers: Set<BazaarEventSubscriber> = new Set();
+
+export function subscribeBazaarPurchaseEvents(cb: BazaarEventSubscriber): () => void {
+  bazaarEventSubscribers.add(cb);
+  return () => bazaarEventSubscribers.delete(cb);
+}
+
+function notifyBazaarEvent(event: BazaarPurchaseEvent): void {
+  bazaarEventSubscribers.forEach((cb) => cb(event));
+}
+
+export function resolveBazaarSkuId(planOrSku: string): BazaarProductId {
+  const clean = (planOrSku || '').trim().toLowerCase();
+  if (clean === 'od_vip_1y' || clean === '12m' || clean === '1y' || clean === 'yearly') {
+    return BAZAAR_SKU_IDS.VIP_1Y;
+  }
+  if (clean === 'od_vip_3m' || clean === '3m' || clean === 'quarterly') {
+    return BAZAAR_SKU_IDS.VIP_3M;
+  }
+  return BAZAAR_SKU_IDS.VIP_1M;
+}
+
+/**
+ * Initiates a Toman subscription purchase via the Android CafeBazaar Poolakey bridge (`window.AndroidBazaar.startPurchase(productId)`)
+ * if running inside the Android app. Otherwise returns `{ handledByBazaar: false }` so the browser UI shows support / manual activation options.
+ */
+export function purchasePlan(planOrProductId: string): {
+  handledByBazaar: boolean;
+  productId: BazaarProductId;
+} {
+  const productId = resolveBazaarSkuId(planOrProductId);
+
+  if (
+    typeof window !== 'undefined' &&
+    window.AndroidBazaar &&
+    typeof window.AndroidBazaar.startPurchase === 'function'
+  ) {
+    try {
+      window.AndroidBazaar.startPurchase(productId);
+      return { handledByBazaar: true, productId };
+    } catch (err: any) {
+      const errMsg = err?.message || 'خطا در برقراری ارتباط با کافه‌بازار';
+      if (typeof window.onBazaarPurchaseFailed === 'function') {
+        window.onBazaarPurchaseFailed(errMsg);
+      }
+      return { handledByBazaar: true, productId };
+    }
+  }
+
+  return { handledByBazaar: false, productId };
+}
+
+/**
+ * Activates VIP status upon successful CafeBazaar Poolakey purchase callback,
+ * persists purchaseToken and expiry in localStorage + user profile, and updates all live subscribers.
+ */
+export function activateBazaarVipPurchase(
+  rawProductId: string,
+  purchaseToken: string
+): QuotaInfo {
+  const productId = resolveBazaarSkuId(rawProductId);
+  const durationDays =
+    productId === BAZAAR_SKU_IDS.VIP_1Y
+      ? 365
+      : productId === BAZAAR_SKU_IDS.VIP_3M
+      ? 90
+      : 30;
+  const planCode = durationDays === 365 ? '12' : durationDays === 90 ? '3' : '1';
+  const planId: 'monthly' | 'quarterly' | 'yearly' =
+    durationDays === 365 ? 'yearly' : durationDays === 90 ? 'quarterly' : 'monthly';
+  const planName =
+    durationDays === 365
+      ? 'اشتراک VIP یک‌ساله (۱۲ ماهه)'
+      : durationDays === 90
+      ? 'اشتراک VIP سه‌ماهه (۹۰ روزه)'
+      : 'اشتراک VIP یک‌ماهه (۳۰ روزه)';
+
+  const expireTimestamp = Date.now() + durationDays * 24 * 60 * 60 * 1000;
+  const safeToken = (purchaseToken || `bazaar_${Date.now()}`).trim();
+
+  try {
+    // 1. Save Bazaar token, SKU, and VIP expiry in localStorage
+    localStorage.setItem('od_bazaar_purchase_token', safeToken);
+    localStorage.setItem('od_bazaar_product_id', productId);
+    localStorage.setItem('od_bazaar_purchase_time', String(Date.now()));
+    localStorage.setItem('od_vip_active', 'true');
+    localStorage.setItem('od_vip_plan', planCode);
+    localStorage.setItem('od_vip_expiry', String(expireTimestamp));
+    localStorage.setItem(
+      PRO_STORAGE_KEY,
+      JSON.stringify({
+        isActive: true,
+        planId,
+        productId,
+        purchaseToken: safeToken,
+        planName,
+        expiry: expireTimestamp,
+        activatedAt: Date.now()
+      })
+    );
+
+    // 2. Save in account VIP registry & cookie backup
+    saveVipRecordForCurrentAccount(expireTimestamp, planCode, planName);
+
+    // 3. Also update user profile in localStorage (`od_user_session` & `onedownload_session_v2`)
+    const sessionKeys = ['od_user_session', 'onedownload_session_v2'];
+    for (const sKey of sessionKeys) {
+      const rawSession = localStorage.getItem(sKey);
+      if (rawSession) {
+        const parsedSession = JSON.parse(rawSession);
+        if (parsedSession && parsedSession.user) {
+          parsedSession.user.plan = 'Pro';
+          parsedSession.user.bazaarPurchaseToken = safeToken;
+          parsedSession.user.bazaarProductId = productId;
+          parsedSession.user.vipExpiry = expireTimestamp;
+          localStorage.setItem(sKey, JSON.stringify(parsedSession));
+        }
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+
+  playVipUnlockSound();
+  triggerCoinAnimation(
+    0,
+    'vip',
+    'پرداخت با موفقیت انجام شد! اشتراک VIP شما فعال گردید.',
+    'Payment successful! Your VIP subscription is now active.'
+  );
+
+  notifySubscribers();
+  const updatedQuota = getDailyQuota();
+
+  notifyBazaarEvent({
+    type: 'success',
+    productId,
+    purchaseToken: safeToken,
+    durationDays,
+    quota: updatedQuota,
+    messageFa: 'پرداخت با موفقیت انجام شد! اشتراک VIP شما فعال گردید.',
+    messageAr: 'تم الدفع بنجاح! تم تفعيل اشتراك VIP الخاص بك.',
+    messageEn: 'Payment completed successfully! Your VIP subscription is now active.'
+  });
+
+  return updatedQuota;
+}
+
+/**
+ * Registers global `window.onBazaarPurchaseSuccess` and `window.onBazaarPurchaseFailed`
+ * callbacks so the Kotlin AndroidBazaar Poolakey bridge can invoke them directly.
+ */
+export function registerGlobalBazaarCallbacks(): void {
+  if (typeof window === 'undefined') return;
+
+  window.onBazaarPurchaseSuccess = (productId: string, purchaseToken: string) => {
+    activateBazaarVipPurchase(productId, purchaseToken);
+  };
+
+  window.onBazaarPurchaseFailed = (errorMessage: string) => {
+    const cleanReason = (errorMessage || 'لغو توسط کاربر یا خطای ارتباط با کافه‌بازار').trim();
+    notifyBazaarEvent({
+      type: 'error',
+      messageFa: `پرداخت انجام نشد: ${cleanReason}`,
+      messageAr: `لم تتم عملية الدفع: ${cleanReason}`,
+      messageEn: `Payment failed: ${cleanReason}`
+    });
+  };
+}
+
+// Auto-register on module load in browser environment
+registerGlobalBazaarCallbacks();
+
+

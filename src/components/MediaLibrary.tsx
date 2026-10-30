@@ -30,7 +30,11 @@ import {
   Check,
   Share2,
   ArrowRight,
-  Clock
+  Clock,
+  Menu,
+  ChevronDown,
+  MoreVertical,
+  Edit3
 } from 'lucide-react';
 
 interface MediaLibraryProps {
@@ -97,6 +101,10 @@ export const MediaLibrary: React.FC<MediaLibraryProps> = ({
 
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
+  const [isFolderMenuOpen, setIsFolderMenuOpen] = useState(false);
+  const [openCardMenuId, setOpenCardMenuId] = useState<string | null>(null);
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
+  const [renameFolderInput, setRenameFolderInput] = useState('');
 
   // Multi-select, Drag-and-Drop & Long-Press Organization State
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
@@ -183,6 +191,20 @@ export const MediaLibrary: React.FC<MediaLibraryProps> = ({
     if (activeTab === folderId) {
       setActiveTab('all');
     }
+  };
+
+  const handleRenameFolder = (folderId: string) => {
+    const clean = renameFolderInput.trim();
+    if (!clean) {
+      setRenamingFolderId(null);
+      return;
+    }
+    const nextFolders = customFolders.map((f) =>
+      f.id === folderId ? { ...f, name: clean } : f
+    );
+    saveCustomFolders(nextFolders);
+    setRenamingFolderId(null);
+    setRenameFolderInput('');
   };
 
   const handleMoveSelectedToFolder = (targetFolderId: string | null) => {
@@ -446,11 +468,32 @@ export const MediaLibrary: React.FC<MediaLibraryProps> = ({
     }, 900);
   };
 
+  const builtinTabs = [
+    { id: 'all', label: t.tabAllMedia, icon: FolderOpen },
+    { id: 'video', label: t.tabVideos, icon: Film },
+    { id: 'audio', label: t.tabAudios, icon: Music },
+    { id: 'starred', label: t.tabFavorites, icon: Star },
+    {
+      id: 'vault',
+      label: isFa
+        ? `گاوصندوق خصوصی 🔒 (${toFaDigits(vaultedCount)})`
+        : isAr
+        ? `الخزنة الخاصة 🔒 (${toFaDigits(vaultedCount)})`
+        : `Private Vault 🔒 (${vaultedCount})`,
+      icon: Lock
+    }
+  ];
+
+  const activeBuiltinTab = builtinTabs.find((tab) => tab.id === activeTab);
+  const activeTabLabel = activeCustomFolder
+    ? `📁 ${activeCustomFolder.name}`
+    : activeBuiltinTab?.label || t.tabAllMedia;
+
   return (
-    <section className="w-full max-w-5xl mx-auto px-3 sm:px-4 pt-3 pb-6 overflow-x-hidden">
-      {/* Header & Device Storage Info with Active Back Button */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-        <div className="flex items-center gap-2.5 min-w-0">
+    <section className="w-full max-w-5xl mx-auto px-3 sm:px-4 pt-2 pb-6 overflow-x-hidden">
+      {/* Compact Single-Line Header */}
+      <div className="flex items-center justify-between gap-2 mb-2.5">
+        <div className="flex items-center gap-2 min-w-0">
           {(activeTab !== 'all' || handleBackClick) && (
             <button
               type="button"
@@ -461,56 +504,43 @@ export const MediaLibrary: React.FC<MediaLibraryProps> = ({
                   handleBackClick();
                 }
               }}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 text-xs font-black btn-3d-secondary shrink-0"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 text-[11px] font-black btn-3d-secondary shrink-0"
               title={isFa ? 'بازگشت' : isAr ? 'رجوع' : 'Back'}
             >
-              <ArrowRight className={`w-4 h-4 ${isRtl ? '' : 'rotate-180'}`} />
+              <ArrowRight className={`w-3.5 h-3.5 ${isRtl ? '' : 'rotate-180'}`} />
               <span>{isFa ? 'بازگشت' : isAr ? 'رجوع' : 'Back'}</span>
             </button>
           )}
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-lg sm:text-2xl font-black text-slate-900 dark:text-white drop-shadow-sm text-3d">
-                {isFa
-                  ? '📁 مدیریت پوشه‌ها و فایل‌ها'
-                  : isAr
-                  ? '📁 إدارة المجلدات والملفات'
-                  : '📁 Media Folders & Organizer'}
-              </h2>
-              <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
-                {isFa
-                  ? 'پوشه‌های نامحدود'
-                  : isAr
-                  ? 'مجلدات غير محدودة'
-                  : 'Unlimited Folders'}
-              </span>
-            </div>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-              {isFa
-                ? `${toFaDigits(libraryItems.length)} فایل ذخیره شده • برای انتقال به پوشه دلخواه، آیتم‌ها را لمس طولانی کرده یا بکشید و رها کنید`
-                : isAr
-                ? `${toFaDigits(libraryItems.length)} ملفات محفوظة • اسحب وأفلت أو اضغط مطولاً على العناصر لنقلها إلى مجلدات مخصصة`
-                : `${libraryItems.length} files stored • Drag & drop or long-press items to move them into custom folders`}
-            </p>
-          </div>
+          <h2 className="text-sm sm:text-lg font-black text-slate-900 dark:text-white truncate">
+            {isFa
+              ? '📁 پوشه دانلودها'
+              : isAr
+              ? '📁 مجلد التنزيلات'
+              : '📁 Downloads Folder'}
+          </h2>
+          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 shrink-0">
+            {isFa
+              ? `${toFaDigits(libraryItems.length)} فایل`
+              : isAr
+              ? `${toFaDigits(libraryItems.length)} ملف`
+              : `${libraryItems.length} files`}
+          </span>
         </div>
 
-        <div className="flex items-center gap-2 self-start sm:self-auto shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1 px-2.5 py-1 rounded-xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 text-[11px] font-mono" dir="ltr">
+            <HardDrive className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+            <span className="font-extrabold text-slate-800 dark:text-slate-200">{totalMb} MB</span>
+          </div>
+
           <button
             type="button"
             onClick={() => setIsCreatingFolder(!isCreatingFolder)}
-            className="px-3.5 py-2 rounded-2xl bg-gradient-to-r from-indigo-600 to-violet-600 text-white text-xs font-black btn-3d-primary flex items-center gap-1.5"
+            className="px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 text-white text-[11px] font-black btn-3d-primary flex items-center gap-1"
           >
-            <FolderPlus className="w-4 h-4" />
-            <span>
-              {isFa ? '+ پوشه جدید' : isAr ? '+ مجلد جديد' : '+ New Folder'}
-            </span>
+            <FolderPlus className="w-3.5 h-3.5" />
+            <span>{isFa ? '+ پوشه' : isAr ? '+ مجلد' : '+ Folder'}</span>
           </button>
-
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 text-xs card-3d" dir="ltr">
-            <HardDrive className="w-4 h-4 text-indigo-500 shrink-0" />
-            <span className="font-extrabold text-slate-800 dark:text-slate-200">{totalMb} MB</span>
-          </div>
         </div>
       </div>
 
@@ -518,9 +548,9 @@ export const MediaLibrary: React.FC<MediaLibraryProps> = ({
       {isCreatingFolder && (
         <form
           onSubmit={handleCreateFolder}
-          className="mb-4 p-3.5 rounded-2xl bg-indigo-50/80 dark:bg-indigo-950/40 border border-indigo-300 dark:border-indigo-800 flex items-center gap-2 card-3d animate-fade-in"
+          className="mb-2.5 p-2.5 rounded-2xl bg-indigo-50/80 dark:bg-indigo-950/40 border border-indigo-300 dark:border-indigo-800 flex items-center gap-2 card-3d animate-fade-in"
         >
-          <FolderPlus className="w-5 h-5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+          <FolderPlus className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
           <input
             type="text"
             autoFocus
@@ -528,191 +558,273 @@ export const MediaLibrary: React.FC<MediaLibraryProps> = ({
             onChange={(e) => setNewFolderName(e.target.value)}
             placeholder={
               isFa
-                ? 'نام پوشه جدید (مثلاً: فیلم‌های آموزشی، موزیک‌های موردعلاقه...)'
+                ? 'نام پوشه جدید...'
                 : isAr
-                ? 'اسم المجلد الجديد (مثال: فيديوهات، موسيقى مفضلة...)'
-                : 'Enter new folder name...'
+                ? 'اسم المجلد الجديد...'
+                : 'New folder name...'
             }
-            className="flex-1 px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 input-3d"
+            className="flex-1 px-2.5 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 input-3d"
           />
           <button
             type="submit"
-            className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-xs font-black btn-3d-primary shrink-0"
+            className="px-3 py-1.5 rounded-xl bg-indigo-600 text-white text-xs font-black btn-3d-primary shrink-0"
           >
-            {isFa ? 'ایجاد پوشه' : isAr ? 'إنشاء مجلد' : 'Create'}
+            {isFa ? 'ایجاد' : isAr ? 'إنشاء' : 'Create'}
           </button>
           <button
             type="button"
             onClick={() => setIsCreatingFolder(false)}
-            className="p-2 rounded-xl bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
+            className="p-1.5 rounded-xl bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
           >
-            <X className="w-4 h-4" />
+            <X className="w-3.5 h-3.5" />
           </button>
         </form>
       )}
 
-      {/* Selection & Move Action Bar (Appears when files are selected via long-press or checkbox) */}
+      {/* Selection & Move Action Bar */}
       {selectedTaskIds.length > 0 && (
-        <div className="mb-4 p-3 rounded-2xl bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 text-white flex flex-wrap items-center justify-between gap-2 shadow-lg animate-fade-in">
-          <div className="flex items-center gap-2 text-xs font-black">
-            <CheckSquare className="w-4 h-4 text-amber-300 shrink-0" />
+        <div className="mb-2.5 p-2.5 rounded-2xl bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 text-white flex items-center justify-between gap-2 shadow-lg animate-fade-in">
+          <div className="flex items-center gap-1.5 text-xs font-black">
+            <CheckSquare className="w-3.5 h-3.5 text-amber-300 shrink-0" />
             <span>
               {isFa
-                ? `${toFaDigits(selectedTaskIds.length)} فایل انتخاب شده`
+                ? `${toFaDigits(selectedTaskIds.length)} انتخاب شده`
                 : isAr
-                ? `${toFaDigits(selectedTaskIds.length)} ملفات محددة`
-                : `${selectedTaskIds.length} files selected`}
+                ? `${toFaDigits(selectedTaskIds.length)} محددة`
+                : `${selectedTaskIds.length} selected`}
             </span>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <button
               type="button"
               onClick={() => setIsMoveModalOpen(true)}
-              className="px-3.5 py-1.5 rounded-xl bg-amber-400 text-slate-950 font-black text-xs btn-3d-amber flex items-center gap-1.5"
+              className="px-3 py-1 rounded-xl bg-amber-400 text-slate-950 font-black text-[11px] btn-3d-amber flex items-center gap-1"
             >
               <FolderInput className="w-3.5 h-3.5" />
-              <span>
-                {isFa ? 'انتقال به پوشه' : isAr ? 'نقل إلى مجلد' : 'Move to Folder'}
-              </span>
+              <span>{isFa ? 'انتقال به پوشه' : isAr ? 'نقل لمجلد' : 'Move'}</span>
             </button>
 
             <button
               type="button"
               onClick={() => setSelectedTaskIds([])}
-              className="px-2.5 py-1.5 rounded-xl bg-white/15 hover:bg-white/25 text-white font-bold text-xs"
+              className="px-2 py-1 rounded-xl bg-white/15 hover:bg-white/25 text-white font-bold text-[11px]"
             >
-              {isFa ? 'لغو انتخاب' : isAr ? 'إلغاء التحديد' : 'Clear'}
+              {isFa ? 'لغو' : isAr ? 'إلغاء' : 'Clear'}
             </button>
           </div>
         </div>
       )}
 
-      {/* 3D Filter Tabs + Unlimited Custom Folders Grid */}
-      <div className="flex flex-col gap-3 mb-5">
-        <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 p-2 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 card-3d">
-          {[
-            { id: 'all', label: t.tabAllMedia, icon: FolderOpen },
-            { id: 'video', label: t.tabVideos, icon: Film },
-            { id: 'audio', label: t.tabAudios, icon: Music },
-            { id: 'starred', label: t.tabFavorites, icon: Star },
-            {
-              id: 'vault',
-              label: isFa
-                ? `گاوصندوق خصوصی 🔒 (${toFaDigits(vaultedCount)})`
-                : isAr
-                ? `الخزنة الخاصة 🔒 (${toFaDigits(vaultedCount)})`
-                : `Private Vault 🔒 (${vaultedCount})`,
-              icon: Lock
-            }
-          ].map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-            const isVaultTab = tab.id === 'vault';
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setActiveTab(tab.id)}
-                className={`${isVaultTab ? 'col-span-2 sm:col-span-1' : ''} flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-black transition-all duration-150 ${
-                  isActive
-                    ? isVaultTab
-                      ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 border-t border-white/40 shadow-[0_4px_0_rgb(180,83,9)] active:translate-y-[2px]'
-                      : 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white border-t border-white/25 shadow-[0_4px_0_rgb(76,29,149)] active:translate-y-[2px]'
-                    : 'bg-slate-100 dark:bg-slate-800/90 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 btn-3d-secondary active:translate-y-[2px]'
-                }`}
-              >
-                {Icon && <Icon className="w-3.5 h-3.5 shrink-0" />}
-                <span className="truncate">{tab.label}</span>
-              </button>
-            );
-          })}
+      {/* Minimal Unified Toolbar: Hamburger Category Menu + Search + Sort */}
+      <div className="relative mb-3">
+        <div className="flex items-center gap-1.5">
+          {/* Hamburger Menu Button for Folders & Categories */}
+          <button
+            type="button"
+            onClick={() => setIsFolderMenuOpen(!isFolderMenuOpen)}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-black transition-all shrink-0 cursor-pointer ${
+              isFolderMenuOpen || activeTab !== 'all'
+                ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-sm'
+                : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-100 card-3d'
+            }`}
+            title={isFa ? 'منوی پوشه‌ها و دسته‌بندی' : isAr ? 'قائمة المجلدات والفئات' : 'Folders & Categories Menu'}
+          >
+            <Menu className="w-4 h-4 shrink-0" />
+            <span className="max-w-[115px] sm:max-w-[160px] truncate">{activeTabLabel}</span>
+            <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${isFolderMenuOpen ? 'rotate-180' : ''}`} />
+          </button>
 
-          {/* User-Created Unlimited Folders (Supports Drag & Drop + Tap) */}
-          {customFolders.map((folder) => {
-            const count = libraryItems.filter((i) => !i.isVaulted && i.folderId === folder.id).length;
-            const isActive = activeTab === folder.id;
-            const isDragTarget = dragOverFolderId === folder.id;
-            return (
-              <button
-                key={folder.id}
-                type="button"
-                onClick={() => setActiveTab(folder.id)}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setDragOverFolderId(folder.id);
-                }}
-                onDragLeave={() => setDragOverFolderId(null)}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  handleDropOnFolder(folder.id);
-                }}
-                className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-black transition-all duration-150 ${
-                  isDragTarget
-                    ? 'ring-2 ring-amber-400 scale-105 bg-emerald-600 text-white'
-                    : isActive
-                    ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white btn-3d-emerald'
-                    : 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60 btn-3d-secondary'
-                }`}
-              >
-                <FolderOpen className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">
-                  {folder.name} ({isRtl ? toFaDigits(count) : count})
-                </span>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Active Custom Folder Management Header */}
-        {activeCustomFolder && (
-          <div className="p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 flex items-center justify-between gap-2 card-3d">
-            <div className="flex items-center gap-2 text-xs font-black text-emerald-900 dark:text-emerald-200">
-              <FolderOpen className="w-4 h-4 text-emerald-600 shrink-0" />
-              <span>
-                {isFa
-                  ? `پوشه فعال: ${activeCustomFolder.name}`
-                  : isAr
-                  ? `المجلد النشط: ${activeCustomFolder.name}`
-                  : `Active Folder: ${activeCustomFolder.name}`}
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => handleDeleteFolder(activeCustomFolder.id)}
-              className="px-3 py-1 rounded-xl bg-rose-600 text-white text-[11px] font-black flex items-center gap-1"
-            >
-              <Trash2 className="w-3 h-3" />
-              <span>
-                {isFa ? 'حذف این پوشه' : isAr ? 'حذف المجلد' : 'Delete Folder'}
-              </span>
-            </button>
-          </div>
-        )}
-
-        {/* Search & Sort Controls */}
-        <div className="flex items-center gap-2">
+          {/* Compact Search Input */}
           <div className="relative flex-1 min-w-0">
-            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={t.searchPlaceholder}
-              className="w-full pl-9 pr-3 py-2 text-xs rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-500 input-3d"
+              className="w-full pl-8 pr-2.5 py-2 text-xs rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-500 input-3d"
             />
           </div>
 
+          {/* Compact Sort Select */}
           <select
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
-            className="px-3 py-2 text-xs font-bold rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 focus:outline-none card-3d shrink-0"
+            className="px-2.5 py-2 text-[11px] font-bold rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 focus:outline-none card-3d shrink-0"
           >
             <option value="newest">{t.sortByDate}</option>
             <option value="name">{t.sortByName}</option>
             <option value="size">{t.sortBySize}</option>
           </select>
         </div>
+
+        {/* Hamburger Dropdown Drawer (All Categories, Private Vault & Custom Folders) */}
+        {isFolderMenuOpen && (
+          <div className="mt-2 p-2.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl card-3d animate-fade-in z-30">
+            <div className="flex items-center justify-between px-1 pb-2 mb-2 border-b border-slate-100 dark:border-slate-800">
+              <span className="text-[11px] font-black text-slate-500 dark:text-slate-400">
+                {isFa ? 'انتخاب دسته‌بندی یا پوشه:' : isAr ? 'اختر الفئة أو المجلد:' : 'Select Category or Folder:'}
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsFolderMenuOpen(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+              {builtinTabs.map((tab) => {
+                const Icon = tab.icon;
+                const isActive = activeTab === tab.id;
+                const isVaultTab = tab.id === 'vault';
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => {
+                      setActiveTab(tab.id);
+                      setIsFolderMenuOpen(false);
+                    }}
+                    className={`${isVaultTab ? 'col-span-2 sm:col-span-1' : ''} flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-bold transition-all ${
+                      isActive
+                        ? isVaultTab
+                          ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-black'
+                          : 'bg-indigo-600 text-white font-black'
+                        : 'bg-slate-50 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    {Icon && <Icon className="w-3.5 h-3.5 shrink-0" />}
+                    <span className="truncate">{tab.label}</span>
+                  </button>
+                );
+              })}
+
+              {customFolders.map((folder) => {
+                const count = libraryItems.filter((i) => !i.isVaulted && i.folderId === folder.id).length;
+                const isActive = activeTab === folder.id;
+                const isDragTarget = dragOverFolderId === folder.id;
+                return (
+                  <button
+                    key={folder.id}
+                    type="button"
+                    onClick={() => {
+                      setActiveTab(folder.id);
+                      setIsFolderMenuOpen(false);
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      setDragOverFolderId(folder.id);
+                    }}
+                    onDragLeave={() => setDragOverFolderId(null)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      handleDropOnFolder(folder.id);
+                      setIsFolderMenuOpen(false);
+                    }}
+                    className={`flex items-center justify-between gap-1.5 px-2.5 py-2 rounded-xl text-xs font-bold transition-all ${
+                      isDragTarget
+                        ? 'ring-2 ring-amber-400 bg-emerald-600 text-white'
+                        : isActive
+                        ? 'bg-emerald-600 text-white font-black'
+                        : 'bg-emerald-50/70 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200/60 dark:border-emerald-800/50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <FolderOpen className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">{folder.name}</span>
+                    </div>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-black/10 dark:bg-white/10 shrink-0">
+                      {isRtl ? toFaDigits(count) : count}
+                    </span>
+                  </button>
+                );
+              })}
+
+              {/* Quick + Create Folder inside Hamburger Menu */}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsFolderMenuOpen(false);
+                  setIsCreatingFolder(true);
+                }}
+                className="flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-black bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-600 dark:text-indigo-300 border border-dashed border-indigo-400/50 transition-all cursor-pointer"
+              >
+                <FolderPlus className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">
+                  {isFa ? '+ پوشه جدید' : isAr ? '+ مجلد جديد' : '+ New Folder'}
+                </span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Active Custom Folder Management Pill (Rename & Delete) */}
+        {activeCustomFolder && (
+          <div className="mt-2 px-3 py-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 flex items-center justify-between gap-2">
+            {renamingFolderId === activeCustomFolder.id ? (
+              <div className="flex items-center gap-1.5 flex-1">
+                <input
+                  type="text"
+                  value={renameFolderInput}
+                  onChange={(e) => setRenameFolderInput(e.target.value)}
+                  className="flex-1 px-2.5 py-1 rounded-lg bg-white dark:bg-slate-900 border border-emerald-400 text-xs font-bold text-slate-900 dark:text-white focus:outline-none"
+                  placeholder={activeCustomFolder.name}
+                />
+                <button
+                  type="button"
+                  onClick={() => handleRenameFolder(activeCustomFolder.id)}
+                  className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-[10px] font-black"
+                >
+                  {isFa ? 'ثبت' : isAr ? 'حفظ' : 'Save'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRenamingFolderId(null)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-slate-600"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-900 dark:text-emerald-200">
+                  <FolderOpen className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>
+                    {isFa
+                      ? `پوشه: ${activeCustomFolder.name}`
+                      : isAr
+                      ? `المجلد: ${activeCustomFolder.name}`
+                      : `Folder: ${activeCustomFolder.name}`}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRenamingFolderId(activeCustomFolder.id);
+                      setRenameFolderInput(activeCustomFolder.name);
+                    }}
+                    className="px-2 py-1 rounded-lg bg-emerald-600/15 hover:bg-emerald-600/25 text-emerald-700 dark:text-emerald-300 text-[10px] font-black flex items-center gap-1 cursor-pointer"
+                  >
+                    <Edit3 className="w-3 h-3" />
+                    <span>{isFa ? 'تغییر نام' : isAr ? 'تعديل الاسم' : 'Rename'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteFolder(activeCustomFolder.id)}
+                    className="px-2 py-1 rounded-lg bg-rose-600 text-white text-[10px] font-black flex items-center gap-1 cursor-pointer"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    <span>{isFa ? 'حذف' : isAr ? 'حذف' : 'Delete'}</span>
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Private Vault Lock Screen (Default Password: 12345678 / Master Keyword: onedownload) */}
@@ -992,42 +1104,33 @@ export const MediaLibrary: React.FC<MediaLibraryProps> = ({
                     </div>
                   </div>
 
-                  {/* Bottom details & 3D action row (Play + Save + Share Media File + Move to Folder + Delete) */}
-                  <div className="p-3.5 flex flex-col justify-between flex-1">
-                    <div>
-                      <div className="flex items-center justify-between gap-1.5 mb-1">
-                        <h4 className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white line-clamp-1">
-                          {item.title}
-                        </h4>
+                  {/* Bottom details & compact single-row action bar (Play + Save + Share + Folder + Delete) */}
+                  <div className="p-3 flex flex-col justify-between flex-1">
+                    <div className="flex items-center justify-between gap-1.5 mb-2">
+                      <h4 className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white line-clamp-1 min-w-0">
+                        {item.title}
+                      </h4>
+                      <div className="flex items-center gap-1.5 shrink-0">
                         {assignedFolder && (
-                          <span className="px-2 py-0.5 rounded-md text-[9px] font-black bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 shrink-0">
+                          <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
                             📁 {assignedFolder.name}
                           </span>
                         )}
-                      </div>
-                      <p className="text-[11px] text-slate-400 truncate mb-1.5">
-                        {item.fileName}
-                      </p>
-                      <div className="flex flex-wrap items-center gap-2 text-[10px] font-bold text-slate-500 dark:text-slate-400 mb-2.5 font-mono">
-                        <span className="text-indigo-600 dark:text-indigo-400">{item.format.qualityLabel}</span>
-                        <span>•</span>
-                        <span dir="ltr">{item.totalSizeFormatted}</span>
-                        <span>•</span>
-                        <span className="inline-flex items-center gap-1 text-slate-500 dark:text-slate-400" dir="ltr">
+                        <span className="inline-flex items-center gap-0.5 text-[10px] font-mono text-slate-400" dir="ltr">
                           <Clock className="w-2.5 h-2.5 text-emerald-500 shrink-0" />
                           <span>{formatDownloadTimestamp(item.completedAt || item.createdAt, language)}</span>
                         </span>
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between pt-2.5 border-t border-slate-100 dark:border-slate-800 text-xs gap-1.5">
-                      <div className="flex items-center gap-1.5 flex-1 flex-wrap">
+                    <div className="relative flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800 gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-1 min-w-0">
                         <button
                           type="button"
                           onClick={() => onPlayMedia(item)}
-                          className="flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-black text-[11px] btn-3d-primary cursor-pointer"
+                          className="flex-1 flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-black text-[11px] btn-3d-primary cursor-pointer whitespace-nowrap"
                         >
-                          <Play className="w-3 h-3 fill-current" />
+                          <Play className="w-3 h-3 fill-current shrink-0" />
                           <span>{isFa ? 'پخش' : isAr ? 'تشغيل' : 'Play'}</span>
                         </button>
 
@@ -1035,48 +1138,129 @@ export const MediaLibrary: React.FC<MediaLibraryProps> = ({
                           <button
                             type="button"
                             onClick={() => onSaveToDisk(item)}
-                            className="flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-[11px] btn-3d-amber cursor-pointer"
+                            className="flex-1 flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-[11px] btn-3d-amber cursor-pointer whitespace-nowrap"
                             title={isFa ? 'ذخیره در دستگاه' : isAr ? 'حفظ في الجهاز' : 'Save to Device'}
                           >
-                            <HardDrive className="w-3 h-3" />
-                            <span>
-                              {isFa ? 'ذخیره در دستگاه' : isAr ? 'حفظ في الجهاز' : 'Save to Device'}
-                            </span>
+                            <HardDrive className="w-3 h-3 shrink-0" />
+                            <span>{isFa ? 'ذخیره' : isAr ? 'حفظ' : 'Save'}</span>
                           </button>
                         )}
 
-                        {/* Dedicated Share Downloaded Media File Button */}
                         <button
                           type="button"
                           onClick={() => shareDownloadedMediaFile(item)}
-                          className="flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-[11px] btn-3d-emerald cursor-pointer"
+                          className="p-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white active:scale-95 cursor-pointer shrink-0"
                           title={isFa ? 'اشتراک‌گذاری' : isAr ? 'مشاركة' : 'Share'}
+                          aria-label={isFa ? 'اشتراک‌گذاری' : isAr ? 'مشاركة' : 'Share'}
                         >
-                          <Share2 className="w-3 h-3" />
-                          <span>{isFa ? 'اشتراک‌گذاری' : isAr ? 'مشاركة' : 'Share'}</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedTaskIds([item.id]);
-                            setIsMoveModalOpen(true);
-                          }}
-                          className="flex items-center justify-center gap-1 px-2 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 font-black text-[11px] btn-3d-secondary"
-                        >
-                          <FolderInput className="w-3 h-3 text-indigo-500" />
-                          <span>{isFa ? 'پوشه' : isAr ? 'مجلد' : 'Folder'}</span>
+                          <Share2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
 
-                      <button
-                        type="button"
-                        onClick={() => handleDelete(item.id)}
-                        className="p-1.5 rounded-xl text-slate-400 hover:text-rose-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0"
-                        title={t.deleteItem}
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      {/* 3-Dot Kebab / Sandwich Action Menu for Secondary Operations */}
+                      <div className="relative shrink-0">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setOpenCardMenuId((prev) => (prev === item.id ? null : item.id));
+                          }}
+                          className="p-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
+                          title={isFa ? 'منوی عملیات فایل' : isAr ? 'قائمة عمليات الملف' : 'File Actions Menu'}
+                        >
+                          <MoreVertical className="w-4 h-4" />
+                        </button>
+
+                        {openCardMenuId === item.id && (
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className="absolute bottom-full mb-1.5 left-0 sm:right-0 sm:left-auto z-40 w-48 p-1.5 rounded-2xl bg-slate-900/95 backdrop-blur-xl border border-slate-700/80 shadow-2xl space-y-1 animate-fade-in"
+                          >
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setOpenCardMenuId(null);
+                                setSelectedTaskIds([item.id]);
+                                setIsMoveModalOpen(true);
+                              }}
+                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-indigo-300 hover:bg-indigo-600/20 transition-colors cursor-pointer"
+                            >
+                              <FolderInput className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                              <span>
+                                {isFa ? 'انتقال به پوشه' : isAr ? 'نقل إلى مجلد' : 'Move to Folder'}
+                              </span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setOpenCardMenuId(null);
+                                onToggleStar(item.id);
+                              }}
+                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-amber-300 hover:bg-amber-500/15 transition-colors cursor-pointer"
+                            >
+                              <Star
+                                className={`w-3.5 h-3.5 shrink-0 ${
+                                  item.isStarred ? 'fill-amber-400 text-amber-400' : 'text-amber-400'
+                                }`}
+                              />
+                              <span>
+                                {item.isStarred
+                                  ? isFa
+                                    ? 'حذف از نشان‌شده‌ها'
+                                    : isAr
+                                    ? 'إزالة من المفضلة'
+                                    : 'Unstar'
+                                  : isFa
+                                  ? 'افزودن به نشان‌شده‌ها'
+                                  : isAr
+                                  ? 'إضافة للمفضلة'
+                                  : 'Add to Starred'}
+                              </span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setOpenCardMenuId(null);
+                                toggleItemVault(item.id);
+                              }}
+                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-emerald-300 hover:bg-emerald-500/15 transition-colors cursor-pointer"
+                            >
+                              {item.isVaulted ? (
+                                <Unlock className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                              ) : (
+                                <Lock className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                              )}
+                              <span>
+                                {item.isVaulted
+                                  ? isFa
+                                    ? 'خروج از گاوصندوق'
+                                    : isAr
+                                    ? 'إخراج من الخزنة'
+                                    : 'Remove from Vault'
+                                  : isFa
+                                  ? 'انتقال به گاوصندوق 🔒'
+                                  : isAr
+                                  ? 'نقل للخزنة 🔒'
+                                  : 'Move to Vault 🔒'}
+                              </span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setOpenCardMenuId(null);
+                                handleDelete(item.id);
+                              }}
+                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-rose-300 hover:bg-rose-500/15 transition-colors cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                              <span>{t.deleteItem}</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>

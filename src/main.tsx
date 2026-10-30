@@ -2,17 +2,12 @@ import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
 
-// Unregister any legacy Service Workers and purge stale precaches so media streams are never intercepted
+// Register active Background Keep-Alive Service Worker (/sw.js) and purge only stale bundle caches
 if (typeof window !== 'undefined') {
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker
-      .getRegistrations()
-      .then((registrations) => {
-        for (const registration of registrations) {
-          registration.unregister().catch(() => {});
-        }
-      })
-      .catch(() => {});
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    });
   }
   if ('caches' in window) {
     caches

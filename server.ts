@@ -45,10 +45,13 @@ interface CachedSaveVideoResult {
 const saveVideoResultCache = new Map<string, CachedSaveVideoResult>();
 const taskSourceUrlMap = new Map<string, { url: string; height?: number; audio?: boolean }>();
 const tikTokResultCache = new Map<string, { data: any; expiresAt: number }>();
+const ytDlpResultCache = new Map<string, { data: ExtractedPlatformMedia; expiresAt: number }>();
+const tikTokTranscodeCache = new Map<string, { filePath: string; size: number; expiresAt: number }>();
 
-async function resolveViaTikWMServer(url: string): Promise<any | null> {
-  const cleanKey = url.trim().split('?')[0];
-  const cached = tikTokResultCache.get(cleanKey) || tikTokResultCache.get(url.trim());
+async function resolveViaTikWMServer(url: string, requestedHeight = 720, isAudio = false): Promise<any | null> {
+  const cleanBaseUrl = url.trim().split('?')[0].replace(/\/+$/, '') || url.trim();
+  const resolutionKey = `${cleanBaseUrl}::${requestedHeight}::${isAudio ? 'a' : 'v'}`;
+  const cached = tikTokResultCache.get(resolutionKey) || tikTokResultCache.get(cleanBaseUrl) || tikTokResultCache.get(url.trim());
   if (cached && cached.expiresAt > Date.now()) {
     return cached.data;
   }
@@ -78,13 +81,192 @@ async function resolveViaTikWMServer(url: string): Promise<any | null> {
               // ignore redirect check error
             }
           }
-          tikTokResultCache.set(cleanKey, { data: d, expiresAt: Date.now() + 10 * 60 * 1000 });
-          tikTokResultCache.set(url.trim(), { data: d, expiresAt: Date.now() + 10 * 60 * 1000 });
+          const ttl = Date.now() + 10 * 60 * 1000;
+          tikTokResultCache.set(resolutionKey, { data: d, expiresAt: ttl });
+          tikTokResultCache.set(cleanBaseUrl, { data: d, expiresAt: ttl });
+          tikTokResultCache.set(url.trim(), { data: d, expiresAt: ttl });
           return d;
         }
       }
     } catch {
       // retry after 1.1s
+    }
+  }
+  return null;
+}
+
+/**
+ * Helper: Compute strictly distinct TikTok stream URLs and byte sizes per resolution (360p, 480p, 720p, 1080p)
+ * Prevents the bug where TikWM's watermarked stream (`d.wmplay` / `d.wm_size`, often 11.8MB+) was mistakenly assigned to 360p/480p.
+ */
+function computeTikTokResolutionMeta(d: any, ytdlpData?: ExtractedPlatformMedia | null) {
+  const resolvedCdn = d?.resolved_cdn_url || '';
+  const idPlay = d?.id ? `https://www.tikwm.com/video/media/play/${d.id}.mp4` : '';
+  const hdPlay = d?.hdplay
+    ? String(d.hdplay).startsWith('http')
+      ? String(d.hdplay)
+      : `https://www.tikwm.com${d.hdplay}`
+    : idPlay;
+  const stdPlay = d?.play
+    ? String(d.play).startsWith('http')
+      ? String(d.play)
+      : `https://www.tikwm.com${d.play}`
+    : idPlay;
+  const wmPlay = d?.wmplay
+    ? String(d.wmplay).startsWith('http')
+      ? String(d.wmplay)
+      : `https://www.tikwm.com${d.wmplay}`
+    : stdPlay;
+
+  const rawStdSize = Number(d?.size) > 150000 ? Number(d.size) : 0;
+  const rawWmSize = Number(d?.wm_size) > 150000 ? Number(d.wm_size) : 0;
+  const rawHdSize = Number(d?.hd_size) > 150000 ? Number(d.hd_size) : 0;
+
+  // Pick the smaller non-HD stream as the 720p baseline (never use wm_size if it is larger than stdSize)
+  const wmIsSmaller = rawWmSize > 150000 && rawStdSize > 150000 && rawWmSize < rawStdSize * 0.85;
+  const base720Size =
+    ytdlpData?.est?.['720'] ||
+    (rawStdSize > 150000 ? rawStdSize : rawWmSize > 150000 ? rawWmSize : 4500000);
+  const base1080Size =
+    ytdlpData?.est?.['1080'] ||
+    (rawHdSize > base720Size
+      ? rawHdSize
+      : rawWmSize > base720Size
+      ? rawWmSize
+      : Math.round(base720Size * 1.38));
+  const base480Size =
+    ytdlpData?.est?.['480'] && ytdlpData.est['480'] < base720Size * 0.9
+      ? ytdlpData.est['480']
+      : wmIsSmaller
+      ? rawWmSize
+      : Math.round(base720Size * 0.56);
+  const base360Size =
+    ytdlpData?.est?.['360'] && ytdlpData.est['360'] < base480Size * 0.92
+      ? ytdlpData.est['360']
+      : Math.round(base720Size * 0.36);
+
+  const url1080 = ytdlpData?.formats_map?.['1080'] || hdPlay || resolvedCdn || stdPlay || idPlay;
+  const url720 = ytdlpData?.formats_map?.['720'] || stdPlay || resolvedCdn || idPlay || hdPlay;
+  const url480 =
+    ytdlpData?.formats_map?.['480'] || (wmIsSmaller ? wmPlay : stdPlay) || resolvedCdn || idPlay;
+  const url360 =
+    ytdlpData?.formats_map?.['360'] || (wmIsSmaller ? wmPlay : stdPlay) || resolvedCdn || idPlay;
+
+  return {
+    est: {
+      '360': base360Size,
+      '480': base480Size,
+      '720': base720Size,
+      '1080': base1080Size
+    },
+    rawUrls: {
+      '360': url360,
+      '480': url480,
+      '720': url720,
+      '1080': url1080
+    },
+    hasDistinctLowResStream: Boolean(
+      (ytdlpData?.formats_map?.['360'] && ytdlpData.formats_map['360'] !== url720) ||
+        (ytdlpData?.formats_map?.['480'] && ytdlpData.formats_map['480'] !== url720) ||
+        wmIsSmaller
+    ),
+    musicUrl: d?.music || ytdlpData?.direct_audio_url || url720
+  };
+}
+
+/**
+ * Helper: Transcode TikTok stream to exact 360p or 480p via local ffmpeg when upstream only provides a single high-bitrate stream.
+ * Cached by `url::height::v` so repeated requests or Range requests are instantaneous.
+ */
+async function transcodeTikTokToTargetHeight(
+  sourceUrl: string,
+  upstreamMediaUrl: string,
+  targetHeight: number
+): Promise<{ filePath: string; size: number } | null> {
+  const cleanKey = `${sourceUrl.trim().split('?')[0]}::${targetHeight}::v`;
+  const existing = tikTokTranscodeCache.get(cleanKey);
+  if (existing && existing.expiresAt > Date.now() && fs.existsSync(existing.filePath)) {
+    return { filePath: existing.filePath, size: existing.size };
+  }
+
+  const ffmpegCandidates = ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg', 'ffmpeg'];
+  let ffmpegBin = '';
+  for (const bin of ffmpegCandidates) {
+    if (bin === 'ffmpeg' || fs.existsSync(bin)) {
+      ffmpegBin = bin;
+      break;
+    }
+  }
+  if (!ffmpegBin) return null;
+
+  const safeHash = Buffer.from(cleanKey).toString('base64url').slice(0, 28);
+  const outPath = path.join('/tmp', `od_tiktok_${safeHash}_${targetHeight}p.mp4`);
+
+  try {
+    if (fs.existsSync(outPath)) {
+      const st = fs.statSync(outPath);
+      if (st.size > 80 * 1024) {
+        tikTokTranscodeCache.set(cleanKey, {
+          filePath: outPath,
+          size: st.size,
+          expiresAt: Date.now() + 15 * 60 * 1000
+        });
+        return { filePath: outPath, size: st.size };
+      }
+    }
+
+    const crf = targetHeight <= 360 ? '30' : '26';
+    const maxrate = targetHeight <= 360 ? '420k' : '740k';
+    const bufsize = targetHeight <= 360 ? '840k' : '1480k';
+    const audioBitrate = targetHeight <= 360 ? '80k' : '96k';
+
+    await execFileAsync(
+      ffmpegBin,
+      [
+        '-y',
+        '-headers',
+        `User-Agent: ${DESKTOP_CHROME_UA}\r\nReferer: https://www.tikwm.com/\r\n`,
+        '-i',
+        upstreamMediaUrl,
+        '-vf',
+        `scale='if(gt(iw,ih),-2,${targetHeight})':'if(gt(iw,ih),${targetHeight},-2)'`,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-crf',
+        crf,
+        '-maxrate',
+        maxrate,
+        '-bufsize',
+        bufsize,
+        '-c:a',
+        'aac',
+        '-b:a',
+        audioBitrate,
+        '-movflags',
+        '+faststart',
+        outPath
+      ],
+      { timeout: 22000 }
+    );
+
+    if (fs.existsSync(outPath)) {
+      const st = fs.statSync(outPath);
+      if (st.size > 80 * 1024) {
+        tikTokTranscodeCache.set(cleanKey, {
+          filePath: outPath,
+          size: st.size,
+          expiresAt: Date.now() + 15 * 60 * 1000
+        });
+        return { filePath: outPath, size: st.size };
+      }
+    }
+  } catch {
+    try {
+      if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
+    } catch {
+      // ignore cleanup error
     }
   }
   return null;
@@ -97,28 +279,43 @@ async function resolveViaSaveVideoBackend(
   height = 720,
   audio = false
 ): Promise<CachedSaveVideoResult | null> {
-  const cleanKey = `${url.trim().split('?')[0].replace(/\/+$/, '')}::${height}::${audio ? 'a' : 'v'}`;
+  const reqHeightNum = Number(height) || 720;
+  const isYt = /(?:youtube\.com|youtu\.be)/i.test(url);
+  const isTikTok = /(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/i.test(url);
+  const ytMatch = url.match(
+    /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/|live\/))([\w-]{11})/i
+  );
+  const targetUrl = isYt && ytMatch
+    ? `https://www.youtube.com/watch?v=${ytMatch[1]}`
+    : url.trim().split('?')[0].replace(/\/+$/, '') || url.trim();
+
+  const cleanKey = `${targetUrl}::${reqHeightNum}::${audio ? 'a' : 'v'}`;
   if (!forceFresh) {
-    const existing = saveVideoResultCache.get(cleanKey) || saveVideoResultCache.get(url.trim());
+    const existing = saveVideoResultCache.get(cleanKey);
     if (existing && Date.now() - existing.createdAt < 10 * 60 * 1000) {
       return existing;
     }
   }
 
-  const isYt = /(?:youtube\.com|youtu\.be)/i.test(url);
-  const ytMatch = url.match(
-    /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/|live\/))([\w-]{11})/i
-  );
-  const targetUrl = isYt && ytMatch ? `https://www.youtube.com/watch?v=${ytMatch[1]}` : url.trim();
-  const startEndpoint = isYt ? `${SAVEVIDEO_BASE}/api/yt/start` : `${SAVEVIDEO_BASE}/api/download`;
+  const useHeightAwareEndpoint = isYt || (isTikTok && reqHeightNum <= 720);
+  const startEndpoint = useHeightAwareEndpoint
+    ? `${SAVEVIDEO_BASE}/api/yt/start`
+    : `${SAVEVIDEO_BASE}/api/download`;
 
-  // If high resolution fails on YouTube, automatically fall back to 720p -> 360p progressive
-  const heightCandidates = isYt && !audio
-    ? Array.from(new Set([height || 720, 720, 360]))
-    : [height || 720];
+  // Never upgrade a lower resolution (e.g. 360p) to 720p/1080p; only fall back downward if needed
+  const heightCandidates =
+    useHeightAwareEndpoint && !audio
+      ? reqHeightNum <= 360
+        ? [360]
+        : reqHeightNum <= 480
+        ? [480, 360]
+        : reqHeightNum <= 720
+        ? [720, 480, 360]
+        : Array.from(new Set([reqHeightNum, 720, 360]))
+      : [reqHeightNum];
 
   for (const candidateHeight of heightCandidates) {
-    const startBody = isYt
+    const startBody = useHeightAwareEndpoint
       ? { url: targetUrl, height: candidateHeight, audio: !!audio }
       : { url: targetUrl };
 
@@ -161,10 +358,10 @@ async function resolveViaSaveVideoBackend(
           const title = stData.title || '';
           const validSize = fileSize > 200000 ? fileSize : 8400000;
           const fileType = stData.file_type || 'video';
-          const directVideoUrl = `/api/media/file/${taskId}?t=${encodeURIComponent(fileToken)}&ext=${ext}&title=${encodeURIComponent(
+          const directVideoUrl = `/api/media/file/${taskId}?t=${encodeURIComponent(fileToken)}&ext=${ext}&quality=${candidateHeight}&title=${encodeURIComponent(
             title || 'video'
           )}&sourceUrl=${encodeURIComponent(targetUrl)}`;
-          const directAudioUrl = `/api/media/audio/${taskId}?t=${encodeURIComponent(fileToken)}&sourceUrl=${encodeURIComponent(
+          const directAudioUrl = `/api/media/audio/${taskId}?t=${encodeURIComponent(fileToken)}&quality=${candidateHeight}&sourceUrl=${encodeURIComponent(
             targetUrl
           )}`;
 
@@ -179,9 +376,10 @@ async function resolveViaSaveVideoBackend(
             directAudioUrl,
             createdAt: Date.now()
           };
-          saveVideoResultCache.set(cleanKey, result);
-          if (candidateHeight === 720) {
-            saveVideoResultCache.set(url.trim(), result);
+          const exactCandidateKey = `${targetUrl}::${candidateHeight}::${audio ? 'a' : 'v'}`;
+          saveVideoResultCache.set(exactCandidateKey, result);
+          if (candidateHeight === reqHeightNum) {
+            saveVideoResultCache.set(cleanKey, result);
           }
           return result;
         } else if (stData.status === 'error') {
@@ -1004,14 +1202,32 @@ async function extractFacebookMedia(url: string): Promise<ExtractedPlatformMedia
  * Always prioritizes Progressive Combined Audio+Video streams (`acodec !== 'none' && vcodec !== 'none'`)
  * so downloaded Facebook / YouTube / Twitter videos are never silent.
  */
-async function extractViaYtDlp(url: string): Promise<ExtractedPlatformMedia | null> {
+async function extractViaYtDlp(
+  url: string,
+  targetHeight?: number
+): Promise<ExtractedPlatformMedia | null> {
   try {
     if (!fs.existsSync(YTDLP_BIN)) return null;
-    const { stdout } = await execFileAsync(
-      YTDLP_BIN,
-      ['--dump-json', '--no-playlist', '--no-warnings', '--no-check-certificates', url],
-      { timeout: 14000, maxBuffer: 10 * 1024 * 1024 }
-    );
+    const cleanKey = `${url.trim().split('?')[0]}::${targetHeight || 'all'}`;
+    const cached = ytDlpResultCache.get(cleanKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.data;
+    }
+
+    const args = ['--dump-json', '--no-playlist', '--no-warnings', '--no-check-certificates'];
+    if (targetHeight && targetHeight > 0) {
+      // Lock format filter strictly to requested height (supports both horizontal height<=H and vertical 9:16 width<=H)
+      args.push(
+        '-f',
+        `bestvideo[height<=${targetHeight}]+bestaudio/best[height<=${targetHeight}]/best[width<=${targetHeight}]/best`
+      );
+    }
+    args.push(url);
+
+    const { stdout } = await execFileAsync(YTDLP_BIN, args, {
+      timeout: 14000,
+      maxBuffer: 10 * 1024 * 1024
+    });
     if (!stdout) return null;
     const info = JSON.parse(stdout.trim().split('\n')[0]);
     if (!info) return null;
@@ -1030,6 +1246,15 @@ async function extractViaYtDlp(url: string): Promise<ExtractedPlatformMedia | nu
         ? info.url
         : undefined;
 
+    const durationSec = Math.max(1, Math.round(Number(info.duration) || 35));
+    const progressiveList: Array<{
+      url: string;
+      shortDim: number;
+      rawHeight: number;
+      bytes: number;
+      isH264: boolean;
+    }> = [];
+
     if (Array.isArray(info.formats)) {
       for (const f of info.formats) {
         if (!f.url || f.protocol === 'mhtml') continue;
@@ -1044,27 +1269,104 @@ async function extractViaYtDlp(url: string): Promise<ExtractedPlatformMedia | nu
         ) {
           continue;
         }
-        const isDirectMp4 = f.ext === 'mp4' || f.ext === 'webm' || proto === 'https' || proto === 'http';
-        const hasVideo = Boolean(f.vcodec && f.vcodec !== 'none') || (f.ext === 'mp4' && !f.format_id?.includes('audio'));
+        const isDirectMp4 =
+          f.ext === 'mp4' || f.ext === 'webm' || proto === 'https' || proto === 'http';
+        const hasVideo =
+          Boolean(f.vcodec && f.vcodec !== 'none') ||
+          (f.ext === 'mp4' && !String(f.format_id || '').includes('audio'));
         const hasAudio = Boolean(f.acodec && f.acodec !== 'none');
 
         if (hasVideo && isDirectMp4) {
-          const h = Number(f.height) || (f.format_id === 'hd' ? 1080 : f.format_id === 'sd' ? 480 : 720);
-          if (!heights.includes(h)) heights.push(h);
-          if (f.filesize || f.filesize_approx) {
-            est[String(h)] = f.filesize || f.filesize_approx;
-          }
+          const w = Number(f.width) || 0;
+          const rawH =
+            Number(f.height) || (f.format_id === 'hd' ? 1080 : f.format_id === 'sd' ? 480 : 720);
+          // Normalize vertical 9:16 video dimensions (e.g. 576x1024 -> 576, 720x1280 -> 720, 1080x1920 -> 1080)
+          const shortDim = w > 0 && rawH > 0 ? Math.min(w, rawH) : rawH;
+          const bucketH =
+            shortDim <= 380
+              ? 360
+              : shortDim <= 580
+              ? 480
+              : shortDim <= 760
+              ? 720
+              : 1080;
+
+          if (!heights.includes(bucketH)) heights.push(bucketH);
+          const estBytes = Number(
+            f.filesize ||
+              f.filesize_approx ||
+              (f.tbr ? Math.round(((Number(f.tbr) * 1000) / 8) * durationSec) : 0)
+          );
+
           if (hasAudio || f.format_id === 'hd' || f.format_id === 'sd') {
-            progressiveMap[String(h)] = f.url;
-            bestProgressiveUrl = f.url;
+            progressiveList.push({
+              url: fUrl,
+              shortDim,
+              rawHeight: bucketH,
+              bytes: estBytes,
+              isH264: /avc1|h264/i.test(String(f.vcodec || ''))
+            });
+            // Keep lowest-bitrate stream for 360/480 buckets and highest-bitrate for 1080
+            if (bucketH <= 480) {
+              if (!progressiveMap[String(bucketH)] || (estBytes > 0 && (!est[String(bucketH)] || estBytes < est[String(bucketH)]))) {
+                progressiveMap[String(bucketH)] = fUrl;
+                if (estBytes > 0) est[String(bucketH)] = estBytes;
+              }
+            } else {
+              progressiveMap[String(bucketH)] = fUrl;
+              if (estBytes > 0) est[String(bucketH)] = estBytes;
+            }
+            bestProgressiveUrl = fUrl;
           } else {
-            fallbackVideoMap[String(h)] = f.url;
-            bestFallbackVideoUrl = f.url;
+            fallbackVideoMap[String(bucketH)] = fUrl;
+            if (estBytes > 0 && !est[String(bucketH)]) {
+              est[String(bucketH)] = estBytes;
+            }
+            bestFallbackVideoUrl = fUrl;
           }
         } else if (hasAudio && (!f.vcodec || f.vcodec === 'none')) {
-          bestAudioUrl = f.url;
+          bestAudioUrl = fUrl;
         }
       }
+    }
+
+    // Sort all progressive streams by byte size / bitrate ascending so 360p, 480p, 720p, 1080p map to distinct tiers
+    if (progressiveList.length > 0) {
+      progressiveList.sort((a, b) => {
+        if (a.bytes > 0 && b.bytes > 0 && a.bytes !== b.bytes) return a.bytes - b.bytes;
+        return a.shortDim - b.shortDim;
+      });
+      const n = progressiveList.length;
+      const tier360 = progressiveList[0];
+      const tier480 = progressiveList[Math.min(n - 1, Math.floor((n - 1) * 0.35))];
+      const tier720 = progressiveList[Math.min(n - 1, Math.floor((n - 1) * 0.7))];
+      const tier1080 = progressiveList[n - 1];
+
+      if (!progressiveMap['360'] && tier360) {
+        progressiveMap['360'] = tier360.url;
+        if (tier360.bytes > 0) est['360'] = tier360.bytes;
+      }
+      if (!progressiveMap['480'] && tier480) {
+        progressiveMap['480'] = tier480.url;
+        if (tier480.bytes > 0) est['480'] = tier480.bytes;
+      }
+      if (!progressiveMap['720'] && tier720) {
+        progressiveMap['720'] = tier720.url;
+        if (tier720.bytes > 0) est['720'] = tier720.bytes;
+      }
+      if (!progressiveMap['1080'] && tier1080) {
+        progressiveMap['1080'] = tier1080.url;
+        if (tier1080.bytes > 0) est['1080'] = tier1080.bytes;
+      }
+      for (const hVal of [360, 480, 720, 1080]) {
+        if (progressiveMap[String(hVal)] && !heights.includes(hVal)) {
+          heights.push(hVal);
+        }
+      }
+    }
+
+    if (targetHeight && bestFallbackVideoUrl && !progressiveMap[String(targetHeight)]) {
+      progressiveMap[String(targetHeight)] = bestFallbackVideoUrl;
     }
 
     heights.sort((a, b) => a - b);
@@ -1072,13 +1374,13 @@ async function extractViaYtDlp(url: string): Promise<ExtractedPlatformMedia | nu
     const isYouTubeExtractor = String(info.extractor_key || info.extractor || '')
       .toLowerCase()
       .includes('youtube');
-    // For YouTube, never return video-only DASH streams as direct_video_url (only return combined progressive streams)
     const chosenFormatsMap = hasProgressive
       ? progressiveMap
       : isYouTubeExtractor
       ? {}
       : fallbackVideoMap;
     const bestVideoUrl =
+      (targetHeight ? chosenFormatsMap[String(targetHeight)] : undefined) ||
       bestProgressiveUrl ||
       (heights.length > 0 ? chosenFormatsMap[String(heights[heights.length - 1])] : undefined) ||
       (isYouTubeExtractor ? undefined : bestFallbackVideoUrl);
@@ -1089,14 +1391,14 @@ async function extractViaYtDlp(url: string): Promise<ExtractedPlatformMedia | nu
       info.thumbnail ||
       (Array.isArray(info.thumbnails) && info.thumbnails[info.thumbnails.length - 1]?.url) ||
       '';
-    return {
+    const result: ExtractedPlatformMedia = {
       platform: String(info.extractor_key || info.extractor || 'Media').toLowerCase(),
       title: info.title || info.fulltitle || 'Video Stream',
       author: info.uploader || info.channel || info.creator || undefined,
-      duration: Math.round(Number(info.duration) || 60),
+      duration: durationSec,
       thumbnail: rawThumb ? `/api/media/thumbnail?url=${encodeURIComponent(rawThumb)}` : '',
       viewsCount: info.view_count ? String(info.view_count) : undefined,
-      heights: heights.length > 0 ? heights : [720, 1080],
+      heights: heights.length > 0 ? heights : [360, 480, 720, 1080],
       max_height: heights[heights.length - 1] || 1080,
       est,
       formats_map:
@@ -1106,6 +1408,8 @@ async function extractViaYtDlp(url: string): Promise<ExtractedPlatformMedia | nu
       direct_video_url: bestVideoUrl,
       direct_audio_url: bestAudioUrl || bestVideoUrl
     };
+    ytDlpResultCache.set(cleanKey, { data: result, expiresAt: Date.now() + 10 * 60 * 1000 });
+    return result;
   } catch {
     return null;
   }
@@ -1251,53 +1555,46 @@ async function startServer() {
         }
       }
 
-      // D. TikTok (tiktok.com, vt.tiktok.com, vm.tiktok.com)
+      // D. TikTok (tiktok.com, vt.tiktok.com, vm.tiktok.com) — Resolution-Locked Stream & Volume Binding
       const isTikTok = /(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/i.test(url);
       if (isTikTok) {
-        const d = await resolveViaTikWMServer(url);
-        if (d) {
-          const idPlay = d.id ? `https://www.tikwm.com/video/media/play/${d.id}.mp4` : '';
-          const hdPlay = d.hdplay
-            ? d.hdplay.startsWith('http')
-              ? d.hdplay
-              : `https://www.tikwm.com${d.hdplay}`
-            : idPlay;
-          const stdPlay = d.play
-            ? d.play.startsWith('http')
-              ? d.play
-              : `https://www.tikwm.com${d.play}`
-            : idPlay;
-          const wmPlay = d.wmplay
-            ? d.wmplay.startsWith('http')
-              ? d.wmplay
-              : `https://www.tikwm.com${d.wmplay}`
-            : stdPlay;
-          const primaryPlay = idPlay || hdPlay || stdPlay;
+        const [d, ytdlpTikTok] = await Promise.all([
+          resolveViaTikWMServer(url, 720, false),
+          extractViaYtDlp(url)
+        ]);
+        if (d || ytdlpTikTok) {
+          const meta = computeTikTokResolutionMeta(d, ytdlpTikTok);
+          const cleanTikTokUrl = url.trim();
+          // Bind each resolution to its dedicated server stream endpoint keyed by url::height::type
+          const resolutionBoundMap: Record<string, string> = {
+            '1080': `/api/media/stream?url=${encodeURIComponent(cleanTikTokUrl)}&quality=1080&audio=0`,
+            '720': `/api/media/stream?url=${encodeURIComponent(cleanTikTokUrl)}&quality=720&audio=0`,
+            '480': `/api/media/stream?url=${encodeURIComponent(cleanTikTokUrl)}&quality=480&audio=0`,
+            '360': `/api/media/stream?url=${encodeURIComponent(cleanTikTokUrl)}&quality=360&audio=0`
+          };
+          const rawThumb = d?.cover || '';
           return res.json({
             success: true,
             platform: 'TikTok',
-            title: d.title || `TikTok Video (@${d.author?.unique_id || 'creator'})`,
-            author: d.author?.nickname ? `${d.author.nickname} (@${d.author.unique_id})` : undefined,
-            duration: d.duration || 30,
+            title:
+              d?.title ||
+              ytdlpTikTok?.title ||
+              `TikTok Video (@${d?.author?.unique_id || 'creator'})`,
+            author: d?.author?.nickname
+              ? `${d.author.nickname} (@${d.author.unique_id})`
+              : ytdlpTikTok?.author,
+            duration: d?.duration || ytdlpTikTok?.duration || 30,
             max_height: 1080,
             heights: [360, 480, 720, 1080],
-            est: {
-              '360': Math.round((d.size || 4500000) * 0.6),
-              '480': Math.round((d.size || 4500000) * 0.8),
-              '720': d.size || 4500000,
-              '1080': d.hd_size || d.size || 6500000
-            },
-            thumbnail: d.cover ? `/api/media/thumbnail?url=${encodeURIComponent(d.cover)}` : '',
-            formats_map: primaryPlay
-              ? {
-                  '1080': hdPlay || primaryPlay,
-                  '720': primaryPlay,
-                  '480': stdPlay || primaryPlay,
-                  '360': wmPlay || primaryPlay
-                }
-              : {},
-            direct_video_url: primaryPlay,
-            direct_audio_url: d.music || primaryPlay
+            est: meta.est,
+            thumbnail: rawThumb
+              ? `/api/media/thumbnail?url=${encodeURIComponent(rawThumb)}`
+              : ytdlpTikTok?.thumbnail || '',
+            formats_map: resolutionBoundMap,
+            direct_video_url: resolutionBoundMap['720'],
+            direct_audio_url:
+              meta.musicUrl ||
+              `/api/media/stream?url=${encodeURIComponent(cleanTikTokUrl)}&quality=720&audio=1`
           });
         }
       }
@@ -1429,22 +1726,28 @@ async function startServer() {
         return res.status(400).json({ error: 'URL is required' });
       }
 
-      // Engine A: Aparat Direct Stream Resolution (Neutral headers, highest quality directLink / file_link_all)
+      // Engine A: Aparat Direct Stream Resolution (Strictly matches requested height first)
       if (/aparat\.com/i.test(url)) {
         const aparatData = await extractAparatMedia(url);
         if (aparatData && aparatData.direct_video_url) {
-          const targetHeight = String(height || 720);
+          const reqH = Number(height) || 720;
+          const targetHeight = String(reqH);
+          const availableHeights = (aparatData.heights || [360, 480, 720, 1080]).slice().sort((a, b) => a - b);
+          // Pick exact height, or closest height <= reqH, or lowest available
+          const bestMatchHeight =
+            availableHeights.find((h) => h === reqH) ||
+            availableHeights.slice().reverse().find((h) => h <= reqH) ||
+            availableHeights[0] ||
+            720;
           const chosenStream =
             aparatData.formats_map[targetHeight] ||
-            aparatData.formats_map['1080'] ||
-            aparatData.formats_map['720'] ||
-            aparatData.formats_map['480'] ||
+            aparatData.formats_map[String(bestMatchHeight)] ||
             aparatData.direct_video_url;
           return res.json({
             status: 'done',
             direct_url: chosenStream,
             title: aparatData.title,
-            file_size: aparatData.est[targetHeight] || 15000000,
+            file_size: aparatData.est[targetHeight] || aparatData.est[String(bestMatchHeight)] || 15000000,
             thumbnail: aparatData.thumbnail
           });
         }
@@ -1496,36 +1799,46 @@ async function startServer() {
         }
       }
 
-      // Engine D: TikTok Direct No-Watermark API (Uses cached TikWM result + direct tiktokcdn-us.com URL)
+      // Engine D: TikTok Direct Stream API (Strictly matches requested height 360p/480p/720p/1080p via url::height::type)
       const isTikTok = /(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/i.test(url);
       if (isTikTok) {
-        const d = await resolveViaTikWMServer(url);
-        if (d) {
-          const resolvedCdn = d.resolved_cdn_url || '';
-          const idPlay = d.id ? `https://www.tikwm.com/video/media/play/${d.id}.mp4` : '';
-          const hdPlay = d.hdplay
-            ? d.hdplay.startsWith('http')
-              ? d.hdplay
-              : `https://www.tikwm.com${d.hdplay}`
-            : idPlay;
-          const stdPlay = d.play
-            ? d.play.startsWith('http')
-              ? d.play
-              : `https://www.tikwm.com${d.play}`
-            : idPlay;
-          const directMediaUrl = audio
-            ? d.music || resolvedCdn || idPlay || stdPlay
-            : resolvedCdn || idPlay || stdPlay || hdPlay;
-          if (directMediaUrl) {
-            return res.json({
-              status: 'done',
-              direct_url: directMediaUrl,
-              fallback_urls: [resolvedCdn, idPlay, hdPlay, stdPlay].filter(Boolean),
-              title: d.title,
-              file_size: d.size || d.hd_size || 4200000,
-              thumbnail: d.cover
-            });
+        const reqH = Number(height) || 720;
+        const heightBucket = reqH <= 360 ? '360' : reqH <= 480 ? '480' : reqH <= 720 ? '720' : '1080';
+        const [d, ytdlpTikTok] = await Promise.all([
+          resolveViaTikWMServer(url, Number(heightBucket), !!audio),
+          extractViaYtDlp(url, Number(heightBucket))
+        ]);
+        if (d || ytdlpTikTok) {
+          const meta = computeTikTokResolutionMeta(d, ytdlpTikTok);
+          let chosenSize = meta.est[heightBucket as keyof typeof meta.est] || meta.est['720'];
+          const rawChosenUrl = meta.rawUrls[heightBucket as keyof typeof meta.rawUrls] || meta.rawUrls['720'];
+
+          // If user requested 360p or 480p and upstream only gave a single high-bitrate stream, pre-transcode to exact target height
+          if (!audio && Number(heightBucket) <= 480 && !meta.hasDistinctLowResStream && rawChosenUrl) {
+            const transcoded = await transcodeTikTokToTargetHeight(
+              url,
+              rawChosenUrl,
+              Number(heightBucket)
+            );
+            if (transcoded && transcoded.size > 0) {
+              chosenSize = transcoded.size;
+            }
           }
+
+          const streamBoundUrl = `/api/media/stream?url=${encodeURIComponent(
+            url.trim()
+          )}&quality=${heightBucket}&audio=${audio ? '1' : '0'}`;
+
+          return res.json({
+            status: 'done',
+            direct_url: audio ? meta.musicUrl || streamBoundUrl : streamBoundUrl,
+            fallback_urls: audio
+              ? [meta.musicUrl, streamBoundUrl, rawChosenUrl].filter(Boolean)
+              : [streamBoundUrl, rawChosenUrl].filter(Boolean),
+            title: d?.title || ytdlpTikTok?.title || 'TikTok Video',
+            file_size: audio ? Math.round(meta.est['720'] * 0.25) : chosenSize,
+            thumbnail: d?.cover || ytdlpTikTok?.thumbnail || ''
+          });
         }
       }
 
@@ -1540,13 +1853,9 @@ async function startServer() {
         const canonicalYtUrl = ytId ? `https://www.youtube.com/watch?v=${ytId}` : url;
         const reqHeight = Number(height) || 720;
 
-        // 0. Check if pre-warmed SaveVideo result is already ready in saveVideoResultCache
+        // 0. Check if pre-warmed SaveVideo result for this EXACT height is already ready in saveVideoResultCache
         const exactKey = `${canonicalYtUrl}::${reqHeight}::${audio ? 'a' : 'v'}`;
-        const fallback720Key = `${canonicalYtUrl}::720::${audio ? 'a' : 'v'}`;
-        const cachedYt =
-          saveVideoResultCache.get(exactKey) ||
-          (reqHeight === 720 ? saveVideoResultCache.get(canonicalYtUrl) : undefined) ||
-          (!audio ? saveVideoResultCache.get(fallback720Key) : undefined);
+        const cachedYt = saveVideoResultCache.get(exactKey);
 
         if (cachedYt && Date.now() - cachedYt.createdAt < 10 * 60 * 1000) {
           return res.json({
@@ -1614,63 +1923,93 @@ async function startServer() {
           }
         }
 
-        // 2. Fallback: Try SaveVideo /api/download generic endpoint
-        try {
-          const dlRes = await fetch(`${SAVEVIDEO_BASE}/api/download`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Referer': `${SAVEVIDEO_BASE}/`,
-              'User-Agent': DESKTOP_CHROME_UA
-            },
-            body: JSON.stringify({ url: canonicalYtUrl })
-          });
-          if (dlRes.ok) {
-            const dlData = await dlRes.json();
-            if (dlData && (dlData.task_id || dlData.status === 'done')) {
-              if (dlData.task_id) {
-                taskSourceUrlMap.set(dlData.task_id, {
-                  url: canonicalYtUrl,
-                  height: reqHeight,
-                  audio: !!audio
-                });
-              }
-              return res.json(dlData);
-            }
-          }
-        } catch {
-          // continue
-        }
-
-        // 3. Fallback: Local yt-dlp progressive stream (combined audio+video MP4)
+        // 2. Fallback: Local yt-dlp progressive stream (matches exact or closest <= reqHeight)
         const ytdlpYt = await extractViaYtDlp(url);
         if (ytdlpYt && ytdlpYt.direct_video_url) {
-          const targetHeight = String(reqHeight);
+          const availH = Object.keys(ytdlpYt.formats_map)
+            .map((k) => Number(k))
+            .filter((n) => !isNaN(n) && n > 0)
+            .sort((a, b) => a - b);
+          const lowerEq = availH.filter((h) => h <= reqHeight);
+          const pickedH =
+            lowerEq.length > 0
+              ? String(lowerEq[lowerEq.length - 1])
+              : availH.length > 0
+              ? String(availH[0])
+              : String(reqHeight);
           const chosenUrl = audio
             ? ytdlpYt.direct_audio_url || ytdlpYt.direct_video_url
-            : ytdlpYt.formats_map[targetHeight] || ytdlpYt.direct_video_url;
+            : ytdlpYt.formats_map[String(reqHeight)] ||
+              ytdlpYt.formats_map[pickedH] ||
+              ytdlpYt.direct_video_url;
           return res.json({
             status: 'done',
             direct_url: chosenUrl,
             title: ytdlpYt.title,
-            file_size: ytdlpYt.est[targetHeight] || 14000000,
+            file_size:
+              ytdlpYt.est[String(reqHeight)] ||
+              ytdlpYt.est[pickedH] ||
+              (reqHeight <= 360 ? 3500000 : reqHeight <= 480 ? 6500000 : 14000000),
             thumbnail: ytdlpYt.thumbnail
           });
+        }
+
+        // 3. Fallback: Try SaveVideo /api/download generic endpoint (only if high-res or audio)
+        if (reqHeight >= 720 || audio) {
+          try {
+            const dlRes = await fetch(`${SAVEVIDEO_BASE}/api/download`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Referer': `${SAVEVIDEO_BASE}/`,
+                'User-Agent': DESKTOP_CHROME_UA
+              },
+              body: JSON.stringify({ url: canonicalYtUrl })
+            });
+            if (dlRes.ok) {
+              const dlData = await dlRes.json();
+              if (dlData && (dlData.task_id || dlData.status === 'done')) {
+                if (dlData.task_id) {
+                  taskSourceUrlMap.set(dlData.task_id, {
+                    url: canonicalYtUrl,
+                    height: reqHeight,
+                    audio: !!audio
+                  });
+                }
+                return res.json(dlData);
+              }
+            }
+          } catch {
+            // continue
+          }
         }
       }
 
       // Engine F: Local yt-dlp binary or OpenGraph direct stream for other platforms
       const ytdlpData = await extractViaYtDlp(url);
       if (ytdlpData && ytdlpData.direct_video_url) {
-        const targetHeight = String(height || 720);
+        const reqH = Number(height) || 720;
+        const availH = Object.keys(ytdlpData.formats_map)
+          .map((k) => Number(k))
+          .filter((n) => !isNaN(n) && n > 0)
+          .sort((a, b) => a - b);
+        const lowerEq = availH.filter((h) => h <= reqH);
+        const pickedH =
+          lowerEq.length > 0
+            ? String(lowerEq[lowerEq.length - 1])
+            : availH.length > 0
+            ? String(availH[0])
+            : String(reqH);
         const chosenUrl = audio
-          ? (ytdlpData.direct_audio_url || ytdlpData.direct_video_url)
-          : (ytdlpData.formats_map[targetHeight] || ytdlpData.direct_video_url);
+          ? ytdlpData.direct_audio_url || ytdlpData.direct_video_url
+          : ytdlpData.formats_map[String(reqH)] ||
+            ytdlpData.formats_map[pickedH] ||
+            ytdlpData.direct_video_url;
         return res.json({
           status: 'done',
           direct_url: chosenUrl,
           title: ytdlpData.title,
-          file_size: ytdlpData.est[targetHeight] || 12000000,
+          file_size: ytdlpData.est[String(reqH)] || ytdlpData.est[pickedH] || 12000000,
           thumbnail: ytdlpData.thumbnail
         });
       }
@@ -1710,7 +2049,7 @@ async function startServer() {
   });
 
   /**
-   * 3. Poll Download Status Endpoint (with automatic 720p fallback if 1080p fails on upstream)
+   * 3. Poll Download Status Endpoint (with automatic resolution fallback if upstream fails)
    */
   app.get('/api/media/status/:taskId', async (req, res) => {
     try {
@@ -1736,7 +2075,7 @@ async function startServer() {
             mappedInfo.url,
             18,
             true,
-            720,
+            mappedInfo.height || 360,
             false
           );
           if (fallbackResolved && fallbackResolved.taskId) {
@@ -1769,7 +2108,7 @@ async function startServer() {
             mappedInfo.url,
             18,
             true,
-            720,
+            mappedInfo.height || 360,
             !!mappedInfo.audio
           );
           if (fallbackResolved && fallbackResolved.taskId) {
@@ -2367,14 +2706,35 @@ async function startServer() {
           }
         }
 
-        // 5. TikTok (uses cached TikWM resolver)
+        // 5. TikTok (strictly respects requested quality 360/480/720/1080 via url::height::type)
         if (!resolvedDirect && /(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/i.test(sourceUrl)) {
-          const d = await resolveViaTikWMServer(sourceUrl);
-          if (d) {
-            const idPlay = d.id ? `https://www.tikwm.com/video/media/play/${d.id}.mp4` : '';
-            resolvedDirect = isAudio
-              ? d.music || idPlay
-              : idPlay || d.hdplay || d.play || '';
+          const reqQ = parseInt(quality, 10) || 720;
+          const heightBucket = reqQ <= 360 ? '360' : reqQ <= 480 ? '480' : reqQ <= 720 ? '720' : '1080';
+          const [d, ytdlpTikTok] = await Promise.all([
+            resolveViaTikWMServer(sourceUrl, Number(heightBucket), isAudio),
+            extractViaYtDlp(sourceUrl, Number(heightBucket))
+          ]);
+          if (d || ytdlpTikTok) {
+            const meta = computeTikTokResolutionMeta(d, ytdlpTikTok);
+            if (isAudio) {
+              resolvedDirect = meta.musicUrl || meta.rawUrls['720'] || '';
+            } else {
+              const candidateRawUrl =
+                meta.rawUrls[heightBucket as keyof typeof meta.rawUrls] || meta.rawUrls['720'] || '';
+              if (Number(heightBucket) <= 480 && !meta.hasDistinctLowResStream && candidateRawUrl) {
+                const transcoded = await transcodeTikTokToTargetHeight(
+                  sourceUrl,
+                  candidateRawUrl,
+                  Number(heightBucket)
+                );
+                if (transcoded && fs.existsSync(transcoded.filePath)) {
+                  resolvedDirect = `file://${transcoded.filePath}`;
+                }
+              }
+              if (!resolvedDirect) {
+                resolvedDirect = candidateRawUrl;
+              }
+            }
           }
         }
 
@@ -2394,9 +2754,9 @@ async function startServer() {
           }
         }
 
-        // 7. Try yt-dlp direct stream URL extraction
+        // 7. Try yt-dlp direct stream URL extraction locked to requested quality
         if (!resolvedDirect) {
-          const ytData = await extractViaYtDlp(sourceUrl);
+          const ytData = await extractViaYtDlp(sourceUrl, parseInt(quality, 10) || 720);
           if (ytData && ytData.direct_video_url) {
             resolvedDirect = isAudio
               ? ytData.direct_audio_url || ytData.direct_video_url
@@ -2427,6 +2787,56 @@ async function startServer() {
 
       if (!cached || !cached.directUrl) {
         return res.status(404).json({ error: 'Progressive stream not resolved' });
+      }
+
+      // Serve locally transcoded resolution-locked MP4 (e.g. TikTok 360p / 480p) with full HTTP Range & HEAD support
+      if (cached.directUrl.startsWith('file://')) {
+        const localPath = cached.directUrl.slice('file://'.length);
+        if (fs.existsSync(localPath)) {
+          const stat = fs.statSync(localPath);
+          const totalSize = stat.size;
+          const ext = isAudio ? 'mp3' : 'mp4';
+          res.setHeader(
+            'Content-Type',
+            isDownload ? 'application/octet-stream' : cached.mimeType || 'video/mp4'
+          );
+          res.setHeader('Accept-Ranges', 'bytes');
+          res.setHeader('X-Accel-Buffering', 'no');
+          res.setHeader('Cache-Control', 'no-store, no-transform');
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.setHeader(
+            'Access-Control-Expose-Headers',
+            'Accept-Ranges, Content-Length, Content-Range'
+          );
+          res.setHeader(
+            'Content-Disposition',
+            `${isDownload ? 'attachment' : 'inline'}; filename="onedownload_${quality}p_${Date.now()}.${ext}"`
+          );
+
+          const rangeHeader = req.headers.range;
+          if (rangeHeader && /^bytes=\d*-\d*$/i.test(rangeHeader)) {
+            const parts = rangeHeader.replace(/bytes=/i, '').split('-');
+            const start = parseInt(parts[0], 10) || 0;
+            const end = parts[1] ? Math.min(totalSize - 1, parseInt(parts[1], 10)) : totalSize - 1;
+            const chunkSize = Math.max(0, end - start + 1);
+            res.status(req.method === 'HEAD' ? 200 : 206);
+            res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
+            res.setHeader('Content-Length', String(req.method === 'HEAD' ? totalSize : chunkSize));
+            if (req.method === 'HEAD') return res.end();
+            const fileStream = fs.createReadStream(localPath, { start, end });
+            req.on('close', () => fileStream.destroy());
+            return pipeline(fileStream, res, () => {});
+          }
+
+          res.status(200);
+          res.setHeader('Content-Length', String(totalSize));
+          if (req.method === 'HEAD') return res.end();
+          const fileStream = fs.createReadStream(localPath);
+          req.on('close', () => fileStream.destroy());
+          return pipeline(fileStream, res, () => {});
+        } else {
+          streamUrlCache.delete(cacheKey);
+        }
       }
 
       const fetchUpstreamFromEntry = async (entryUrl: string) => {

@@ -63,7 +63,9 @@ import {
   isAppLockEnabled,
   MASTER_KEYWORD,
   QuotaInfo,
+  registerGlobalBazaarCallbacks,
   resetUserAccountAndQuotaToGuest,
+  subscribeBazaarPurchaseEvents,
   subscribeQuotaAndCoins,
   syncAccountVipAndReferral,
   syncReferralFromCloud,
@@ -168,6 +170,23 @@ export default function App() {
     return () => window.clearTimeout(splashTimer);
   }, []);
 
+  // Lock main application UI strictly in Portrait mode (only BuiltInMediaPlayer can toggle Landscape)
+  useEffect(() => {
+    if (!activePlayerTask) {
+      try {
+        if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any)?.lock) {
+          (screen.orientation as any).lock('portrait-primary').catch(() => {});
+        }
+        const capOrient = (window as any)?.Capacitor?.Plugins?.ScreenOrientation;
+        if (capOrient?.lock) {
+          capOrient.lock({ orientation: 'portrait' }).catch(() => {});
+        }
+      } catch {
+        // ignore if unsupported by desktop browser
+      }
+    }
+  }, [activePlayerTask]);
+
   // Request Persistent Storage (navigator.storage.persist()) & hydrate completed downloads from IndexedDB on startup
   useEffect(() => {
     ensurePersistentStorage();
@@ -224,14 +243,57 @@ export default function App() {
     saveTasksToStorage(tasks);
   }, [tasks]);
 
-  // Subscribe to quota & Jet Coins balance updates across the app
+  // Subscribe to quota, Jet Coins balance & CafeBazaar Poolakey purchase updates across the app
   useEffect(() => {
-    const unsub = subscribeQuotaAndCoins(() => {
+    registerGlobalBazaarCallbacks();
+    const unsubQuota = subscribeQuotaAndCoins(() => {
       setQuotaInfo(getDailyQuota());
       setCoinsBalance(getCoinsBalance());
     });
-    return () => unsub();
-  }, []);
+
+    const unsubBazaar = subscribeBazaarPurchaseEvents((evt) => {
+      const msg = isFa ? evt.messageFa : isAr ? evt.messageAr : evt.messageEn;
+      if (evt.type === 'success') {
+        const updatedQuota = evt.quota || getDailyQuota();
+        setQuotaInfo(updatedQuota);
+        setUserSession((prev) => ({
+          ...prev,
+          user: {
+            ...prev.user,
+            plan: 'Pro'
+          }
+        }));
+        setToastNotice({
+          type: 'success',
+          title: msg,
+          message:
+            updatedQuota.proPlanName ||
+            (isFa
+              ? 'اشتراک VIP (دسترسی نامحدود)'
+              : isAr
+              ? 'اشتراك VIP (وصول غير محدود)'
+              : 'VIP Subscription (Unlimited)')
+        });
+        setTimeout(() => setToastNotice(null), 5000);
+      } else {
+        setToastNotice({
+          type: 'error',
+          title: msg,
+          message: isFa
+            ? 'در صورت کسر وجه یا نیاز به راهنمایی با پشتیبانی در ارتباط باشید'
+            : isAr
+            ? 'يرجى المحاولة مرة أخرى أو التواصل مع الدعم الفني'
+            : 'Please try again or contact support'
+        });
+        setTimeout(() => setToastNotice(null), 5000);
+      }
+    });
+
+    return () => {
+      unsubQuota();
+      unsubBazaar();
+    };
+  }, [isFa, isAr]);
 
   // Subscribe to real-time download engine ticks
   useEffect(() => {

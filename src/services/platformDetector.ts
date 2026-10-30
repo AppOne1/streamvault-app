@@ -471,14 +471,48 @@ function generateFormatOptions(
     }
   ];
 
+  const availableMapHeights = formatsMap
+    ? Object.keys(formatsMap)
+        .map((k) => Number(k))
+        .filter((n) => !isNaN(n) && n > 0)
+        .sort((a, b) => a - b)
+    : [];
+
+  const ref720Bytes =
+    (probedEst?.['720'] && probedEst['720'] > 30000 ? probedEst['720'] : 0) ||
+    (probedEst?.['1080'] && probedEst['1080'] > 30000 ? Math.round(probedEst['1080'] * 0.62) : 0);
+
   const videoFormats: FormatOption[] = tubeMateVideoDefinitions.map((def) => {
     const rawEst = probedEst?.[String(def.height)];
-    const estSize = rawEst && rawEst > 30000 ? rawEst : calcBytes(def.defaultKbps);
-    const matchedDirectUrl =
-      formatsMap?.[String(def.height)] ||
-      formatsMap?.['720'] ||
-      formatsMap?.['480'] ||
-      directVideoUrl;
+    let estSize = rawEst && rawEst > 30000 ? rawEst : 0;
+    if (!estSize && ref720Bytes > 0) {
+      const ratio =
+        def.height >= 1080
+          ? 1.55
+          : def.height >= 720
+          ? 1.0
+          : def.height >= 480
+          ? 0.62
+          : 0.42;
+      estSize = Math.round(ref720Bytes * ratio);
+    }
+    if (!estSize) {
+      estSize = calcBytes(def.defaultKbps);
+    }
+
+    let matchedDirectUrl = formatsMap?.[String(def.height)];
+    if (!matchedDirectUrl && formatsMap && availableMapHeights.length > 0) {
+      const lowerOrEqual = availableMapHeights.filter((h) => h <= def.height);
+      const pickedH =
+        lowerOrEqual.length > 0
+          ? lowerOrEqual[lowerOrEqual.length - 1]
+          : availableMapHeights[0];
+      // Only reuse a fallback map URL if all map entries point to the same single-stream CDN (e.g. Instagram/TikTok)
+      const uniqueUrls = new Set(Object.values(formatsMap).filter(Boolean));
+      if (uniqueUrls.size === 1 || pickedH <= def.height) {
+        matchedDirectUrl = formatsMap[String(pickedH)];
+      }
+    }
 
     return {
       id: def.id,
@@ -894,8 +928,8 @@ export async function parseMediaUrl(url: string): Promise<ParsedMediaInfo> {
     }
   }
 
-  // 2. TikTok TikWM Direct No-Watermark Resolver (Cached to avoid 1-req/sec rate limit)
-  if (platform === 'tiktok') {
+  // 2. TikTok TikWM Direct Resolver (Cached to avoid 1-req/sec rate limit; only runs if backend probe didn't already populate)
+  if (platform === 'tiktok' && (!directVideoUrl || Object.keys(formatsMap).length === 0)) {
     const d = await fetchTikWmCached(cleanUrl);
     if (d) {
       if (d.title) resolvedTitle = d.title;
@@ -903,17 +937,61 @@ export async function parseMediaUrl(url: string): Promise<ParsedMediaInfo> {
       if (d.duration) durationSeconds = Number(d.duration);
       if (d.cover) resolvedThumbnail = getSafeThumbnail(d.cover);
       if (d.play_count) viewsCount = String(d.play_count);
-      const playUrl = d.id ? `https://www.tikwm.com/video/media/play/${d.id}.mp4` : (d.hdplay || d.play);
-      if (playUrl && !directVideoUrl) {
-        directVideoUrl = playUrl;
-        formatsMap = { '1080': playUrl, '720': playUrl, '480': playUrl, '360': playUrl };
+
+      const idPlay = d.id ? `https://www.tikwm.com/video/media/play/${d.id}.mp4` : '';
+      const hdPlay = d.hdplay
+        ? String(d.hdplay).startsWith('http')
+          ? String(d.hdplay)
+          : `https://www.tikwm.com${d.hdplay}`
+        : idPlay;
+      const stdPlay = d.play
+        ? String(d.play).startsWith('http')
+          ? String(d.play)
+          : `https://www.tikwm.com${d.play}`
+        : idPlay;
+      const wmPlay = d.wmplay
+        ? String(d.wmplay).startsWith('http')
+          ? String(d.wmplay)
+          : `https://www.tikwm.com${d.wmplay}`
+        : stdPlay;
+
+      const rawStd = Number(d.size) > 150000 ? Number(d.size) : 0;
+      const rawWm = Number(d.wm_size) > 150000 ? Number(d.wm_size) : 0;
+      const rawHd = Number(d.hd_size) > 150000 ? Number(d.hd_size) : 0;
+      const wmIsSmaller = rawWm > 150000 && rawStd > 150000 && rawWm < rawStd * 0.85;
+
+      const baseStd = rawStd > 150000 ? rawStd : rawWm > 150000 ? rawWm : 4500000;
+      const baseHd =
+        rawHd > baseStd ? rawHd : rawWm > baseStd ? rawWm : Math.round(baseStd * 1.38);
+      const base480 = wmIsSmaller ? rawWm : Math.round(baseStd * 0.56);
+      const base360 = Math.round(baseStd * 0.36);
+
+      const primaryPlay = stdPlay || idPlay || hdPlay;
+      if (!directVideoUrl) {
+        if (!isCapacitorOrNative()) {
+          formatsMap = {
+            '1080': getApiUrl(`/api/media/stream?url=${encodeURIComponent(cleanUrl)}&quality=1080&audio=0`),
+            '720': getApiUrl(`/api/media/stream?url=${encodeURIComponent(cleanUrl)}&quality=720&audio=0`),
+            '480': getApiUrl(`/api/media/stream?url=${encodeURIComponent(cleanUrl)}&quality=480&audio=0`),
+            '360': getApiUrl(`/api/media/stream?url=${encodeURIComponent(cleanUrl)}&quality=360&audio=0`)
+          };
+          directVideoUrl = formatsMap['720'];
+        } else if (primaryPlay) {
+          directVideoUrl = primaryPlay;
+          formatsMap = {
+            '1080': hdPlay || primaryPlay,
+            '720': stdPlay || idPlay || primaryPlay,
+            '480': (wmIsSmaller ? wmPlay : stdPlay) || primaryPlay,
+            '360': (wmIsSmaller ? wmPlay : stdPlay) || primaryPlay
+          };
+        }
       }
-      if (d.size || d.hd_size) {
-        probedEst = {
-          '720': d.size || 4500000,
-          '1080': d.hd_size || d.size || 6500000
-        };
-      }
+      probedEst = {
+        '360': base360,
+        '480': base480,
+        '720': baseStd,
+        '1080': baseHd
+      };
       if (d.music && !directAudioUrl) {
         directAudioUrl = d.music;
       }

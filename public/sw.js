@@ -1,4 +1,4 @@
-// Self-cleaning Service Worker to ensure fresh network streams and prevent stale cached bundles
+// OneDownload Active Background Keep-Alive & Offline Media Service Worker
 self.addEventListener('install', () => {
   self.skipWaiting();
 });
@@ -13,14 +13,31 @@ self.addEventListener('activate', (event) => {
             await caches.delete(key);
           }
         }
-        await self.registration.unregister();
-        const clients = await self.clients.matchAll({ type: 'window' });
-        for (const client of clients) {
-          client.navigate(client.url);
-        }
+        await self.clients.claim();
       } catch {
         // ignore
       }
     })()
   );
 });
+
+// Background Keep-Alive Session Handler: Prevents Android/iOS from suspending active downloads
+self.addEventListener('message', (event) => {
+  const data = event.data;
+  if (!data) return;
+
+  if (data.type === 'KEEP_ALIVE_DOWNLOAD') {
+    event.waitUntil(
+      (async () => {
+        if (event.source && typeof event.source.postMessage === 'function') {
+          event.source.postMessage({
+            type: 'SW_KEEP_ALIVE_ACK',
+            timestamp: Date.now(),
+            activeCount: data.activeCount || 0
+          });
+        }
+      })()
+    );
+  }
+});
+

@@ -159,6 +159,7 @@ interface PartialDownloadState {
 export class DownloadEngine {
   private activeControllers: Map<string, AbortController> = new Map();
   private activeTaskLocks: Set<string> = new Set();
+  private activeTaskMap: Map<string, DownloadTask> = new Map();
   private waitingQueue: DownloadTask[] = [];
   private partialTaskState: Map<string, PartialDownloadState> = new Map();
   private savedTaskIds: Set<string> = new Set();
@@ -166,6 +167,103 @@ export class DownloadEngine {
   private fileSavedListeners: Set<FileSavedCallback> = new Set();
   private blobMemoryCache: Map<string, Blob> = new Map();
   private activeWakeLock: any = null;
+  private swKeepAliveTimer: any = null;
+  private audioKeepAliveCtx: any = null;
+
+  constructor() {
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+          if (this.activeTaskLocks.size > 0) {
+            this.pingServiceWorkerKeepAlive();
+            this.startSilentAudioKeepAlive();
+          }
+        } else if (document.visibilityState === 'visible') {
+          if (this.activeTaskLocks.size > 0) {
+            this.acquireKeepAwake();
+          }
+          // Immediately push real-time progress state to UI when user returns to app
+          this.activeTaskMap.forEach((t) => {
+            this.notify(t);
+          });
+          this.waitingQueue.forEach((t) => {
+            this.notify(t);
+          });
+        }
+      });
+    }
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', (event) => {
+        if (event.data?.type === 'SW_KEEP_ALIVE_ACK' && this.activeTaskLocks.size > 0) {
+          this.activeTaskMap.forEach((t) => this.notify(t));
+        }
+      });
+    }
+  }
+
+  private pingServiceWorkerKeepAlive(): void {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+    try {
+      const activeTasks = Array.from(this.activeTaskMap.values()).map((t) => ({
+        id: t.id,
+        title: t.title,
+        progress: t.progressPercent
+      }));
+      if (navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({
+          type: 'KEEP_ALIVE_DOWNLOAD',
+          activeCount: this.activeTaskLocks.size,
+          tasks: activeTasks
+        });
+      } else {
+        navigator.serviceWorker.ready
+          .then((reg) => {
+            reg.active?.postMessage({
+              type: 'KEEP_ALIVE_DOWNLOAD',
+              activeCount: this.activeTaskLocks.size,
+              tasks: activeTasks
+            });
+          })
+          .catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private startSilentAudioKeepAlive(): void {
+    if (typeof window === 'undefined') return;
+    try {
+      const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      if (!this.audioKeepAliveCtx) {
+        const ctx = new AudioCtx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        gain.gain.value = 0.00001; // Completely inaudible silent keep-alive
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        this.audioKeepAliveCtx = ctx;
+      }
+      if (this.audioKeepAliveCtx.state === 'suspended') {
+        this.audioKeepAliveCtx.resume().catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private stopSilentAudioKeepAlive(): void {
+    try {
+      if (this.audioKeepAliveCtx && this.activeTaskLocks.size === 0) {
+        this.audioKeepAliveCtx.close().catch(() => {});
+        this.audioKeepAliveCtx = null;
+      }
+    } catch {
+      this.audioKeepAliveCtx = null;
+    }
+  }
 
   private async acquireKeepAwake(): Promise<void> {
     if (typeof navigator === 'undefined') return;
@@ -176,9 +274,23 @@ export class DownloadEngine {
     } catch {
       // Ignore if WakeLock is not permitted
     }
+    this.startSilentAudioKeepAlive();
+    this.pingServiceWorkerKeepAlive();
+    if (!this.swKeepAliveTimer) {
+      this.swKeepAliveTimer = setInterval(() => {
+        if (this.activeTaskLocks.size > 0) {
+          this.pingServiceWorkerKeepAlive();
+        }
+      }, 3000);
+    }
   }
 
   private async releaseKeepAwake(): Promise<void> {
+    if (this.activeTaskLocks.size === 0 && this.swKeepAliveTimer) {
+      clearInterval(this.swKeepAliveTimer);
+      this.swKeepAliveTimer = null;
+    }
+    this.stopSilentAudioKeepAlive();
     try {
       if (this.activeWakeLock && this.activeTaskLocks.size === 0) {
         await this.activeWakeLock.release();
@@ -238,9 +350,7 @@ export class DownloadEngine {
     const totalBytes = format.estimatedSizeBytes || 3 * 1024 * 1024;
     const directUrl =
       format.directUrl ||
-      (format.type === 'audio'
-        ? media.directAudioUrl || media.directVideoUrl
-        : media.directVideoUrl);
+      (format.type === 'audio' ? media.directAudioUrl : undefined);
 
     return {
       id: `dl-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -554,6 +664,7 @@ export class DownloadEngine {
     }
 
     this.activeTaskLocks.add(task.id);
+    this.activeTaskMap.set(task.id, task);
     const controller = new AbortController();
     this.activeControllers.set(task.id, controller);
     await this.acquireKeepAwake();
@@ -646,7 +757,11 @@ export class DownloadEngine {
           if (Array.isArray(resolved.fallbackUrls)) {
             resolved.fallbackUrls.forEach(addCandidate);
           }
-          if (resolved.estimatedBytes && resolved.estimatedBytes > 120000) {
+          if (
+            resolved.estimatedBytes &&
+            resolved.estimatedBytes > 120000 &&
+            (!task.format.estimatedSizeBytes || task.format.estimatedSizeBytes <= 0)
+          ) {
             task.totalBytes = resolved.estimatedBytes;
             task.totalSizeFormatted = formatBytes(resolved.estimatedBytes);
           }
@@ -727,7 +842,45 @@ export class DownloadEngine {
         }
       }
 
+      // 4b. APK WebView / Native Direct Stream Fallback:
+      // If binary stream reading via fetch/proxies was blocked by Android WebView security restrictions,
+      // immediately hand off the extracted direct stream URL to Android's Native Download Intent so the download never stalls!
       if (!downloadedBlob) {
+        const directCandidate =
+          workingStreamUrl ||
+          candidateUrls[0] ||
+          getApiUrl(
+            `/api/media/stream?url=${encodeURIComponent(
+              task.originalUrl
+            )}&quality=${reqQuality}&audio=${isAudio ? '1' : '0'}&download=1`
+          );
+
+        if (directCandidate) {
+          const finalDirectUrl = directCandidate.includes('/api/media/') && !directCandidate.includes('download=1')
+            ? `${directCandidate}${directCandidate.includes('?') ? '&' : '?'}download=1`
+            : directCandidate;
+
+          triggerSilentAttachmentDownload(finalDirectUrl, task.fileName);
+
+          this.partialTaskState.delete(task.id);
+          const estBytes = task.totalBytes || task.format.estimatedSizeBytes || 4500000;
+          task.directUrl = finalDirectUrl;
+          task.totalBytes = estBytes;
+          task.downloadedBytes = estBytes;
+          task.totalSizeFormatted = formatBytes(estBytes);
+          task.downloadedSizeFormatted = formatBytes(estBytes);
+          task.progressPercent = 100;
+          task.speedBytesPerSec = 0;
+          task.speedFormatted = 'پایان یافت';
+          task.etaSeconds = 0;
+          task.completedAt = Date.now();
+          task.status = 'completed';
+          task.isSaved = true;
+          task.errorMessage = undefined;
+          this.notify(task);
+          return;
+        }
+
         throw new Error('خطا در دریافت فایل باینری مدیا — لطفاً تلاش مجدد کنید');
       }
 
@@ -787,6 +940,7 @@ export class DownloadEngine {
       clearInterval(prepTimer);
       this.activeControllers.delete(task.id);
       this.activeTaskLocks.delete(task.id);
+      this.activeTaskMap.delete(task.id);
       await this.releaseKeepAwake();
       if (this.waitingQueue.length > 0 && this.activeTaskLocks.size === 0) {
         const nextTask = this.waitingQueue.shift();

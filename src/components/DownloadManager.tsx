@@ -21,7 +21,11 @@ import {
   HardDrive,
   ArrowRight,
   ArrowLeft,
-  Share2
+  Share2,
+  AlertTriangle,
+  X,
+  Menu,
+  ChevronDown
 } from 'lucide-react';
 
 interface DownloadManagerProps {
@@ -67,8 +71,25 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
 
   const [filter, setFilter] = useState<'all' | 'active' | 'completed' | 'paused'>('all');
   const [isBatchModalOpen, setIsBatchModalOpen] = useState<boolean>(false);
+  const [isQueueMenuOpen, setIsQueueMenuOpen] = useState<boolean>(false);
   const [batchText, setBatchText] = useState<string>('');
   const [batchPreset, setBatchPreset] = useState<'1080p' | '720p' | 'mp3'>('1080p');
+  const [hideSpeedTip, setHideSpeedTip] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('od_hide_speed_tip_v1') === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleDismissSpeedTip = () => {
+    setHideSpeedTip(true);
+    try {
+      localStorage.setItem('od_hide_speed_tip_v1', '1');
+    } catch {
+      // ignore
+    }
+  };
 
   const filteredTasks = tasks.filter((task) => {
     if (filter === 'active') return task.status === 'downloading' || task.status === 'queued';
@@ -147,68 +168,114 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
           )}
         </div>
 
-        {/* Global Toolbar Controls */}
-        <div className="flex flex-wrap items-center gap-2">
-          {onStartBatchDownload && (
-            <button
-              type="button"
-              onClick={() => setIsBatchModalOpen(!isBatchModalOpen)}
-              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-black text-white bg-gradient-to-r from-indigo-600 to-violet-600 btn-3d-primary transition-all"
-            >
-              <ListPlus className="w-4 h-4" />
-              <span>
-                {isFa
-                  ? '+ افزودن دسته‌جمعی لینک‌ها'
-                  : isAr
-                  ? '+ إضافة روابط متعددة'
-                  : '+ Batch Add Links'}
-              </span>
-            </button>
-          )}
+        {/* Compact Hamburger Dropdown & Global Toolbar Controls */}
+        <div className="relative flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setIsQueueMenuOpen((prev) => !prev)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 dark:bg-slate-800 border border-indigo-500/30 text-white text-xs font-black shadow-xs hover:border-indigo-500/60 transition-all cursor-pointer"
+          >
+            <Menu className="w-4 h-4 text-indigo-400" />
+            <span>{isFa ? 'منوی عملیات صف' : isAr ? 'قائمة العمليات' : 'Queue Menu'}</span>
+            <ChevronDown
+              className={`w-3.5 h-3.5 text-slate-400 transition-transform ${
+                isQueueMenuOpen ? 'rotate-180' : ''
+              }`}
+            />
+          </button>
 
-          {activeCount > 0 && (
-            <button
-              onClick={onPauseAll}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 btn-3d-secondary transition-colors"
-            >
-              <PauseCircle className="w-3.5 h-3.5 text-amber-500" />
-              <span>{t.pauseAll}</span>
-            </button>
-          )}
+          {isQueueMenuOpen && (
+            <div className="absolute top-full mt-1.5 left-0 sm:right-0 sm:left-auto z-40 w-56 p-1.5 rounded-2xl bg-slate-900/95 backdrop-blur-xl border border-slate-700/80 shadow-2xl space-y-1 animate-fade-in">
+              {onStartBatchDownload && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsBatchModalOpen(!isBatchModalOpen);
+                    setIsQueueMenuOpen(false);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold text-indigo-300 hover:bg-indigo-600/20 transition-colors cursor-pointer"
+                >
+                  <ListPlus className="w-4 h-4 text-indigo-400 shrink-0" />
+                  <span>
+                    {isFa
+                      ? '+ افزودن دسته‌جمعی لینک‌ها'
+                      : isAr
+                      ? '+ إضافة روابط متعددة'
+                      : '+ Batch Add Links'}
+                  </span>
+                </button>
+              )}
 
-          {pausedCount > 0 && (
-            <button
-              onClick={onResumeAll}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 btn-3d-secondary transition-colors"
-            >
-              <PlayCircle className="w-3.5 h-3.5 text-indigo-500" />
-              <span>{t.resumeAll}</span>
-            </button>
-          )}
+              {activeCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onPauseAll();
+                    setIsQueueMenuOpen(false);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold text-amber-300 hover:bg-amber-500/15 transition-colors cursor-pointer"
+                >
+                  <PauseCircle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>{t.pauseAll}</span>
+                </button>
+              )}
 
-          {completedCount > 0 && (
-            <button
-              onClick={onClearCompleted}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 btn-3d-secondary transition-colors"
-            >
-              <Trash2 className="w-3.5 h-3.5 text-rose-500" />
-              <span>{t.clearCompleted}</span>
-            </button>
+              {pausedCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onResumeAll();
+                    setIsQueueMenuOpen(false);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold text-emerald-300 hover:bg-emerald-500/15 transition-colors cursor-pointer"
+                >
+                  <PlayCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>{t.resumeAll}</span>
+                </button>
+              )}
+
+              {completedCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClearCompleted();
+                    setIsQueueMenuOpen(false);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold text-rose-300 hover:bg-rose-500/15 transition-colors cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4 text-rose-400 shrink-0" />
+                  <span>{t.clearCompleted}</span>
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>
 
-      {/* Internet / VPN Speed & Foreground Keep-Alive Banner */}
-      <div className="flex items-start gap-2.5 p-3.5 rounded-2xl bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/30 text-xs font-bold text-amber-800 dark:text-amber-300 leading-relaxed">
-        <Gauge className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-        <span>
-          {isFa
-            ? 'سرعت دانلود مستقیماً به سرعت اینترنت و کیفیت فیلترشکن (VPN) شما بستگی دارد. فایل‌های داخل صف به‌نوبت (یکی پس از اتمام دیگری) دانلود می‌شوند. برای جلوگیری از کند شدن یا توقف دانلود توسط سیستم‌عامل گوشی، لطفاً تا پایان دانلود از برنامه خارج نشوید.'
-            : isAr
-            ? 'تعتمد سرعة التحميل على سرعة الإنترنت وجودة الـ VPN لديك. يتم تحميل الملفات في قائمة الانتظار بالتسلسل. يرجى البقاء داخل التطبيق حتى انتهاء التحميل.'
-            : 'Download speed depends directly on your internet speed and VPN quality. Queued files download sequentially one after another. Keep the app open during downloads.'}
-        </span>
-      </div>
+      {/* Minimal Single-Line Dismissible Speed & VPN Notice Bar */}
+      {!hideSpeedTip && (
+        <div className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/30 text-[11px] font-bold text-amber-800 dark:text-amber-300">
+          <div className="flex items-center gap-1.5 min-w-0 truncate">
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+            <span className="truncate">
+              {isFa
+                ? 'نکته: سرعت دانلود به پایداری اینترنت و فیلترشکن شما بستگی دارد.'
+                : isAr
+                ? 'ملاحظة: تعتمد سرعة التحميل على استقرار الإنترنت والـ VPN لديك.'
+                : 'Tip: Download speed depends on your internet & VPN stability.'}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={handleDismissSpeedTip}
+            className="p-0.5 rounded-md text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 transition-colors shrink-0 cursor-pointer"
+            title={isFa ? 'بستن' : isAr ? 'إغلاق' : 'Close'}
+            aria-label="Close notice"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Batch Queue Multi-Link Drawer */}
       {isBatchModalOpen && onStartBatchDownload && (
@@ -518,139 +585,144 @@ const TaskCard: React.FC<TaskCardProps> = ({
       : `${task.downloadedSizeFormatted} / ${task.totalSizeFormatted}`;
 
   return (
-    <div className="relative p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 card-3d overflow-hidden">
-      <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-        {/* Thumbnail with overlay icon */}
-        <div className="relative w-full sm:w-28 aspect-video rounded-2xl overflow-hidden bg-slate-900 shrink-0 shadow-inner flex items-center justify-center">
-          <div className="absolute inset-0 flex items-center justify-center text-slate-500 bg-slate-800">
-            <PlatformIcon platform={task.platform} size={20} />
-          </div>
-          {(task.thumbnail || task.videoId) && (
-            <img
-              src={getSafeThumbnail(task.thumbnail, task.videoId)}
-              alt={task.title}
-              className="absolute inset-0 w-full h-full object-cover"
-              referrerPolicy="no-referrer"
-              onError={(e) => {
-                const imgEl = e.currentTarget;
-                if (
-                  task.thumbnail &&
-                  task.thumbnail.startsWith('http') &&
-                  !imgEl.dataset.retriedRaw &&
-                  imgEl.src !== task.thumbnail
-                ) {
-                  imgEl.dataset.retriedRaw = '1';
-                  imgEl.src = task.thumbnail;
-                  return;
-                }
-                imgEl.style.display = 'none';
-              }}
-            />
-          )}
-          <div className="absolute top-1.5 left-1.5 p-1 rounded-md bg-black/60 backdrop-blur-xs">
-            <PlatformIcon platform={task.platform} size={14} />
-          </div>
-          <div className="absolute bottom-1.5 right-1.5 px-1.5 py-0.2 rounded bg-black/80 text-[10px] font-mono font-bold text-white uppercase">
-            {task.format.format}
-          </div>
-        </div>
-
-        {/* Task Details & Metrics */}
-        <div className="flex-1 min-w-0 w-full">
-          <div className="flex items-start justify-between gap-2 mb-1">
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="w-6 h-6 rounded-xl bg-indigo-600 text-white font-black text-xs flex items-center justify-center shrink-0 shadow-xs">
-                {isRtl ? toFaDigits(index) : index}
-              </span>
-              <h4 className="font-extrabold text-sm sm:text-base text-slate-900 dark:text-white truncate">
-                {task.title}
-              </h4>
+    <div className="relative p-3 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 card-3d overflow-hidden">
+      <div className="flex flex-col gap-2.5">
+        {/* Top Row: Compact Thumbnail + Single-Instance Title, Status & Progress */}
+        <div className="flex items-center gap-3">
+          {/* Compact Thumbnail */}
+          <div className="relative w-24 sm:w-28 aspect-video rounded-xl overflow-hidden bg-slate-900 shrink-0 shadow-inner flex items-center justify-center">
+            <div className="absolute inset-0 flex items-center justify-center text-slate-500 bg-slate-800">
+              <PlatformIcon platform={task.platform} size={18} />
             </div>
-            {renderStatusBadge(task.status)}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2.5 text-xs text-slate-500 dark:text-slate-400 mb-2 font-mono">
-            <span className="font-bold text-indigo-600 dark:text-indigo-400">
-              {task.format.qualityLabel}
-            </span>
-            <span>•</span>
-            <span dir="ltr">{sizeInfoLabel}</span>
-            {task.status === 'completed' && (
-              <>
-                <span>•</span>
-                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-500 dark:text-slate-400" dir="ltr">
-                  <Clock className="w-3 h-3 text-emerald-500 shrink-0" />
-                  <span>{formatDownloadTimestamp(task.completedAt || task.createdAt, language)}</span>
-                </span>
-              </>
+            {(task.thumbnail || task.videoId) && (
+              <img
+                src={getSafeThumbnail(task.thumbnail, task.videoId)}
+                alt={task.title}
+                className="absolute inset-0 w-full h-full object-cover"
+                referrerPolicy="no-referrer"
+                onError={(e) => {
+                  const imgEl = e.currentTarget;
+                  if (
+                    task.thumbnail &&
+                    task.thumbnail.startsWith('http') &&
+                    !imgEl.dataset.retriedRaw &&
+                    imgEl.src !== task.thumbnail
+                  ) {
+                    imgEl.dataset.retriedRaw = '1';
+                    imgEl.src = task.thumbnail;
+                    return;
+                  }
+                  imgEl.style.display = 'none';
+                }}
+              />
             )}
-            {task.status === 'downloading' && (
-              <>
-                <span>•</span>
-                <span className="flex items-center gap-1 text-slate-700 dark:text-slate-200 font-bold">
-                  <Gauge className="w-3 h-3 text-emerald-500" />
-                  <span>{task.speedFormatted}</span>
-                </span>
-                <span>•</span>
-                <span>
-                  {t.eta}: {task.etaSeconds}s
-                </span>
-              </>
-            )}
+            <div className="absolute top-1 left-1 p-0.5 rounded bg-black/60 backdrop-blur-xs">
+              <PlatformIcon platform={task.platform} size={12} />
+            </div>
+            <div className="absolute bottom-1 right-1 px-1 py-0.2 rounded bg-black/80 text-[9px] font-mono font-bold text-white uppercase">
+              {task.format.format}
+            </div>
           </div>
 
-          {/* TubeMate Single Direct Stream Progress Bar */}
-          <div className="relative w-full h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden mb-1.5 input-3d">
-            <div
-              className={`h-full rounded-full transition-all duration-300 ${
-                task.status === 'completed'
-                  ? 'bg-emerald-500'
-                  : task.status === 'paused'
-                  ? 'bg-amber-500'
-                  : task.status === 'error'
-                  ? 'bg-rose-500'
-                  : 'bg-gradient-to-r from-indigo-500 via-violet-500 to-cyan-400'
-              }`}
-              style={{ width: `${task.status === 'error' ? 100 : task.progressPercent}%` }}
-            />
-          </div>
+          {/* Task Details & Metrics */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="w-5 h-5 rounded-lg bg-indigo-600 text-white font-black text-[11px] flex items-center justify-center shrink-0 shadow-xs">
+                  {isRtl ? toFaDigits(index) : index}
+                </span>
+                <h4 className="font-extrabold text-xs sm:text-sm text-slate-900 dark:text-white truncate">
+                  {task.title}
+                </h4>
+              </div>
+              <div className="shrink-0">{renderStatusBadge(task.status)}</div>
+            </div>
 
-          <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
-            <span className="truncate max-w-[220px] sm:max-w-md">{task.fileName}</span>
-            <span
-              className={`font-bold ${
-                task.status === 'error'
-                  ? 'text-rose-500'
-                  : task.status === 'completed'
-                  ? 'text-emerald-600 dark:text-emerald-400'
-                  : 'text-slate-700 dark:text-slate-300'
-              }`}
-            >
-              {task.status === 'error'
-                ? task.speedFormatted ||
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 mb-1.5 font-mono">
+              <span className="font-bold text-indigo-600 dark:text-indigo-400">
+                {task.format.qualityLabel}
+              </span>
+              <span>•</span>
+              <span dir="ltr">{sizeInfoLabel}</span>
+              {task.status === 'completed' && (
+                <>
+                  <span>•</span>
+                  <span
+                    className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-500 dark:text-slate-400"
+                    dir="ltr"
+                  >
+                    <Clock className="w-2.5 h-2.5 text-emerald-500 shrink-0" />
+                    <span>
+                      {formatDownloadTimestamp(task.completedAt || task.createdAt, language)}
+                    </span>
+                  </span>
+                </>
+              )}
+              {task.status === 'downloading' && (
+                <>
+                  <span>•</span>
+                  <span className="flex items-center gap-1 text-slate-700 dark:text-slate-200 font-bold">
+                    <Gauge className="w-3 h-3 text-emerald-500" />
+                    <span>{task.speedFormatted}</span>
+                  </span>
+                  <span>•</span>
+                  <span>
+                    {t.eta}: {task.etaSeconds}s
+                  </span>
+                </>
+              )}
+            </div>
+
+            {/* Single Direct Stream Progress Bar (no duplicate title or status below) */}
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1 h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden input-3d">
+                <div
+                  className={`h-full rounded-full transition-all duration-300 ${
+                    task.status === 'completed'
+                      ? 'bg-emerald-500'
+                      : task.status === 'paused'
+                      ? 'bg-amber-500'
+                      : task.status === 'error'
+                      ? 'bg-rose-500'
+                      : 'bg-gradient-to-r from-indigo-500 via-violet-500 to-cyan-400'
+                  }`}
+                  style={{ width: `${task.status === 'error' ? 100 : task.progressPercent}%` }}
+                />
+              </div>
+              <span
+                className={`text-[10px] font-mono font-bold shrink-0 ${
+                  task.status === 'error'
+                    ? 'text-rose-500'
+                    : task.status === 'completed'
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-slate-600 dark:text-slate-300'
+                }`}
+                dir="ltr"
+              >
+                {task.status === 'error' ? '!' : `${task.progressPercent}%`}
+              </span>
+            </div>
+
+            {task.status === 'error' && (
+              <div className="mt-1 text-[10px] text-rose-500 font-bold truncate">
+                {task.speedFormatted ||
                   (isFa
                     ? 'خطا در دریافت — تلاش مجدد'
                     : isAr
                     ? 'خطأ في التحميل — أعد المحاولة'
-                    : 'Download failed — Retry')
-                : task.status === 'completed'
-                ? isFa
-                  ? 'پایان یافت • 100%'
-                  : isAr
-                  ? 'مكتمل • 100%'
-                  : 'Completed • 100%'
-                : `${task.progressPercent}%`}
-            </span>
+                    : 'Download failed — Retry')}
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Action Buttons */}
-        <div className="flex items-center gap-1.5 self-end sm:self-center shrink-0">
+        {/* Ultra-Compact Single-Row Action Bar Under Video */}
+        <div className="flex items-center justify-end gap-1.5 pt-1 border-t border-slate-100 dark:border-slate-800/70">
           {(task.status === 'downloading' || task.status === 'queued') && (
             <button
               type="button"
               onClick={() => onPause(task)}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-2xl text-xs font-black text-amber-700 dark:text-amber-300 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/60 dark:hover:bg-amber-900/60 border border-amber-500/30 btn-3d-secondary transition-colors cursor-pointer"
+              className="flex items-center justify-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-black text-amber-700 dark:text-amber-300 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/60 dark:hover:bg-amber-900/60 border border-amber-500/30 transition-colors cursor-pointer"
               title={
                 task.status === 'queued'
                   ? isFa
@@ -661,7 +733,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
                   : t.pause
               }
             >
-              <Pause className="w-4 h-4 shrink-0" />
+              <Pause className="w-3 h-3 shrink-0" />
               <span>
                 {task.status === 'queued'
                   ? isFa
@@ -682,81 +754,78 @@ const TaskCard: React.FC<TaskCardProps> = ({
             <button
               type="button"
               onClick={() => onResume(task)}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-2xl text-xs font-black text-indigo-600 dark:text-indigo-300 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 border border-indigo-500/30 btn-3d-secondary transition-colors cursor-pointer"
+              className="flex items-center justify-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-black text-indigo-600 dark:text-indigo-300 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 border border-indigo-500/30 transition-colors cursor-pointer"
               title={t.resume}
             >
-              <Play className="w-4 h-4 shrink-0" />
-              <span>
-                {isFa ? 'ادامه دانلود' : isAr ? 'استئناف التحميل' : 'Resume'}
-              </span>
+              <Play className="w-3 h-3 shrink-0" />
+              <span>{isFa ? 'ادامه دانلود' : isAr ? 'استئناف التحميل' : 'Resume'}</span>
             </button>
           )}
 
           {(task.status === 'downloading' || task.status === 'queued') && (
             <button
+              type="button"
               onClick={() => onCancel(task)}
-              className="p-2.5 rounded-2xl text-slate-400 hover:text-rose-500 hover:bg-slate-100 dark:hover:bg-slate-800 btn-3d-secondary transition-colors"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
               title={t.cancel}
             >
-              <XCircle className="w-4 h-4" />
+              <XCircle className="w-3.5 h-3.5" />
             </button>
           )}
 
           {task.status === 'completed' && (
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => onPlay(task)}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-2xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 btn-3d-primary active:scale-95 cursor-pointer"
+                className="flex items-center justify-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold text-white bg-indigo-600 hover:bg-indigo-500 active:scale-95 cursor-pointer whitespace-nowrap"
                 title={isFa ? 'پخش آفلاین' : isAr ? 'تشغيل بدون نت' : 'Play Offline'}
               >
-                <Play className="w-3.5 h-3.5 fill-current" />
+                <Play className="w-3 h-3 fill-current shrink-0" />
                 <span>{isFa ? 'پخش' : isAr ? 'تشغيل' : 'Play'}</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => onSave(task)}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-2xl text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 btn-3d-amber active:scale-95 cursor-pointer"
+                className="flex items-center justify-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 active:scale-95 cursor-pointer whitespace-nowrap"
                 title={isFa ? 'ذخیره در دستگاه' : isAr ? 'حفظ في الجهاز' : 'Save to Device'}
               >
-                <HardDrive className="w-3.5 h-3.5" />
-                <span>
-                  {isFa ? 'ذخیره در دستگاه' : isAr ? 'حفظ في الجهاز' : 'Save to Device'}
-                </span>
+                <HardDrive className="w-3 h-3 shrink-0" />
+                <span>{isFa ? 'ذخیره' : isAr ? 'حفظ' : 'Save'}</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => shareDownloadedMediaFile(task)}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-2xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 btn-3d-emerald active:scale-95 cursor-pointer"
+                className="p-1.5 rounded-lg text-white bg-emerald-600 hover:bg-emerald-500 active:scale-95 cursor-pointer shrink-0"
                 title={isFa ? 'اشتراک‌گذاری' : isAr ? 'مشاركة' : 'Share'}
+                aria-label={isFa ? 'اشتراک‌گذاری' : isAr ? 'مشاركة' : 'Share'}
               >
                 <Share2 className="w-3.5 h-3.5" />
-                <span>{isFa ? 'اشتراک‌گذاری' : isAr ? 'مشاركة' : 'Share'}</span>
               </button>
             </div>
           )}
 
           {(task.status === 'cancelled' || task.status === 'error') && (
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => onRetry(task)}
-                className="flex items-center gap-1 px-3 py-2 rounded-2xl text-xs font-bold text-amber-600 dark:text-amber-400 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/60 dark:hover:bg-amber-900/60 btn-3d-secondary transition-colors"
-                title={t.retry}
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>{isFa ? 'تلاش مجدد' : isAr ? 'إعادة المحاولة' : t.retry}</span>
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => onRetry(task)}
+              className="flex items-center justify-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold text-amber-600 dark:text-amber-400 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/60 dark:hover:bg-amber-900/60 transition-colors whitespace-nowrap cursor-pointer"
+              title={t.retry}
+            >
+              <RotateCcw className="w-3 h-3 shrink-0" />
+              <span>{isFa ? 'تلاش مجدد' : isAr ? 'إعادة المحاولة' : t.retry}</span>
+            </button>
           )}
 
           <button
+            type="button"
             onClick={() => onDelete(task.id)}
-            className="p-2.5 rounded-2xl text-slate-400 hover:text-rose-500 hover:bg-slate-100 dark:hover:bg-slate-800 btn-3d-secondary transition-colors"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0 cursor-pointer"
             title={t.deleteTask}
           >
-            <Trash2 className="w-4 h-4" />
+            <Trash2 className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>

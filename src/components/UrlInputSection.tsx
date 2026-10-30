@@ -88,6 +88,22 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
   const [showBatchQueue, setShowBatchQueue] = useState(false);
   const [batchText, setBatchText] = useState('');
   const [batchQuality, setBatchQuality] = useState<'1080p' | '720p' | 'mp3'>('1080p');
+  const [hideSpeedTip, setHideSpeedTip] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('od_hide_speed_tip_v1') === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleDismissSpeedTip = () => {
+    setHideSpeedTip(true);
+    try {
+      localStorage.setItem('od_hide_speed_tip_v1', '1');
+    } catch {
+      // ignore
+    }
+  };
 
   // Auto-sniff clipboard on app startup, visibility change, and window focus when enabled
   useEffect(() => {
@@ -454,17 +470,30 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
             </div>
           </div>
 
-          {/* Internet / VPN Speed & Foreground Keep-Alive Notice */}
-          <div className="flex items-start gap-2 px-3.5 py-2.5 rounded-2xl bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/30 text-[11px] sm:text-xs font-bold text-amber-800 dark:text-amber-300 leading-relaxed">
-            <Zap className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-            <span>
-              {isFa
-                ? 'نکته مهم: سرعت دانلود مستقیماً به سرعت اینترنت و کیفیت فیلترشکن (VPN) شما بستگی دارد. برای جلوگیری از کند شدن یا توقف دانلود توسط سیستم‌عامل گوشی، لطفاً تا پایان دانلود در صفحه برنامه بمانید.'
-                : isAr
-                ? 'ملاحظة هامة: تعتمد سرعة التحميل بشكل مباشر على سرعة الإنترنت وجودة الـ VPN لديك. لتجنب بطء أو توقف التحميل، يرجى البقاء داخل التطبيق حتى اكتمال التحميل.'
-                : 'Note: Download speed depends directly on your internet speed and VPN quality. Please stay in the app until the download finishes so your phone OS does not throttle background data.'}
-            </span>
-          </div>
+          {/* Minimal Single-Line Dismissible Speed & VPN Notice Bar */}
+          {!hideSpeedTip && (
+            <div className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/30 text-[11px] font-bold text-amber-800 dark:text-amber-300">
+              <div className="flex items-center gap-1.5 min-w-0 truncate">
+                <AlertCircle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                <span className="truncate">
+                  {isFa
+                    ? 'نکته: سرعت دانلود به پایداری اینترنت و فیلترشکن شما بستگی دارد.'
+                    : isAr
+                    ? 'ملاحظة: تعتمد سرعة التحميل على استقرار الإنترنت والـ VPN لديك.'
+                    : 'Tip: Download speed depends on your internet & VPN stability.'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleDismissSpeedTip}
+                className="p-0.5 rounded-md text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 transition-colors shrink-0 cursor-pointer"
+                title={isFa ? 'بستن' : isAr ? 'إغلاق' : 'Close'}
+                aria-label="Close notice"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
 
           {/* Custom File Name & Scheduled Time Row */}
           <div className="grid grid-cols-1 md:grid-cols-12 gap-2.5 pt-2.5 border-t border-slate-200/80 dark:border-slate-800/80">

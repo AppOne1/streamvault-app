@@ -178,13 +178,27 @@ export async function resolveViaAparat(
   const probed = await probeAparatIsolated(originalUrl);
   if (!probed) return null;
 
-  const requestedHeight = String(parseQualityHeight(qualityLabel));
+  const reqNum = parseQualityHeight(qualityLabel);
+  const requestedHeight = String(reqNum);
+  const availableHeights = Object.keys(probed.formatsMap)
+    .map((k) => Number(k))
+    .filter((n) => !isNaN(n) && n > 0)
+    .sort((a, b) => a - b);
+
+  // Pick exact height, or highest available <= reqNum, or lowest available if all are > reqNum
+  let matchedHeightKey = requestedHeight;
+  if (!probed.formatsMap[matchedHeightKey] && availableHeights.length > 0) {
+    const lowerOrEqual = availableHeights.filter((h) => h <= reqNum);
+    const picked =
+      lowerOrEqual.length > 0
+        ? lowerOrEqual[lowerOrEqual.length - 1]
+        : availableHeights[0];
+    matchedHeightKey = String(picked);
+  }
+
   const chosenUrl =
+    probed.formatsMap[matchedHeightKey] ||
     probed.formatsMap[requestedHeight] ||
-    probed.formatsMap['1080'] ||
-    probed.formatsMap['720'] ||
-    probed.formatsMap['480'] ||
-    probed.formatsMap['360'] ||
     probed.directVideoUrl;
 
   if (!chosenUrl) return null;
@@ -195,7 +209,10 @@ export async function resolveViaAparat(
     title: probed.title,
     thumbnail: probed.thumbnail,
     duration: probed.duration,
-    estimatedSize: probed.est[requestedHeight] || Math.round(probed.duration * 180000),
+    estimatedSize:
+      probed.est[matchedHeightKey] ||
+      probed.est[requestedHeight] ||
+      Math.round(probed.duration * 180000),
     formatsMap: probed.formatsMap
   };
 }
