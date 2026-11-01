@@ -4,6 +4,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Bundle;
@@ -21,12 +22,30 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Lock main app UI in Portrait so it never rotates when phone rotation lock is enabled
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
         if (this.bridge != null && this.bridge.getWebView() != null) {
             this.bridge.getWebView().addJavascriptInterface(new OneDownloadNativeBridge(), "OneDownloadNative");
         }
     }
 
     public class OneDownloadNativeBridge {
+
+        @JavascriptInterface
+        public void setScreenOrientation(final String mode) {
+            runOnUiThread(() -> {
+                try {
+                    if ("landscape".equalsIgnoreCase(mode)) {
+                        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                    } else if ("user".equalsIgnoreCase(mode)) {
+                        // SCREEN_ORIENTATION_USER strictly obeys the phone's system Auto-Rotate lock
+                        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER);
+                    } else {
+                        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+                    }
+                } catch (Exception ignored) {}
+            });
+        }
 
         @JavascriptInterface
         public boolean shareInstalledApk(final String referralMessage) {

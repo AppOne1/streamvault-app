@@ -119,20 +119,18 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   }, [task]);
 
   useEffect(() => {
-    // Unlock native screen orientation while the video player is open so physical rotation works
+    // Use 'user' orientation mode in native APK so OS rotation ONLY occurs if the user's phone Auto-Rotate is unlocked
     try {
-      if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any)?.unlock) {
-        (screen.orientation as any).unlock();
-      }
+      (window as any).OneDownloadNative?.setScreenOrientation?.('user');
     } catch {
-      // ignore if browser restricts unlock
+      // ignore
     }
 
     const updateViewportAndFullscreen = () => {
       if (typeof window !== 'undefined') {
         const portrait = window.innerHeight >= window.innerWidth;
         setIsViewportPortrait(portrait);
-        // If native viewport rotated into landscape, use native full-screen landscape without double CSS rotation
+        // If native OS viewport rotated into landscape (when phone Auto-Rotate is ON), clear manual CSS rotation
         if (!portrait) {
           setIsLandscapeRotated(false);
         }
@@ -144,35 +142,21 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
       setIsFullscreen(Boolean(fsEl));
     };
 
-    // Gyroscope / Accelerometer physical tilt listener (works even if phone auto-rotate is locked in portrait)
-    const handleDeviceOrientation = (e: DeviceOrientationEvent) => {
-      if (task?.format.type !== 'video') return;
-      const gamma = typeof e.gamma === 'number' ? Math.abs(e.gamma) : 0;
-      const beta = typeof e.beta === 'number' ? Math.abs(e.beta) : 0;
-      const viewportIsPortrait =
-        typeof window !== 'undefined' ? window.innerHeight >= window.innerWidth : true;
-
-      if (viewportIsPortrait) {
-        if (gamma > 60 && beta < 42) {
-          setIsLandscapeRotated(true);
-        } else if (gamma < 28 && beta > 48) {
-          setIsLandscapeRotated(false);
-        }
-      }
-    };
-
     window.addEventListener('resize', updateViewportAndFullscreen);
     window.addEventListener('orientationchange', updateViewportAndFullscreen);
-    window.addEventListener('deviceorientation', handleDeviceOrientation, true);
     document.addEventListener('fullscreenchange', updateViewportAndFullscreen);
     document.addEventListener('webkitfullscreenchange', updateViewportAndFullscreen as any);
 
     return () => {
       window.removeEventListener('resize', updateViewportAndFullscreen);
       window.removeEventListener('orientationchange', updateViewportAndFullscreen);
-      window.removeEventListener('deviceorientation', handleDeviceOrientation, true);
       document.removeEventListener('fullscreenchange', updateViewportAndFullscreen);
       document.removeEventListener('webkitfullscreenchange', updateViewportAndFullscreen as any);
+      try {
+        (window as any).OneDownloadNative?.setScreenOrientation?.('portrait');
+      } catch {
+        // ignore
+      }
       try {
         if (typeof screen !== 'undefined' && 'orientation' in screen && (screen.orientation as any)?.lock) {
           (screen.orientation as any).lock('portrait-primary').catch(() => {});

@@ -1558,10 +1558,8 @@ async function startServer() {
       // D. TikTok (tiktok.com, vt.tiktok.com, vm.tiktok.com) — Resolution-Locked Stream & Volume Binding
       const isTikTok = /(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/i.test(url);
       if (isTikTok) {
-        const [d, ytdlpTikTok] = await Promise.all([
-          resolveViaTikWMServer(url, 720, false),
-          extractViaYtDlp(url)
-        ]);
+        const d = await resolveViaTikWMServer(url, 720, false);
+        const ytdlpTikTok = d ? null : await extractViaYtDlp(url);
         if (d || ytdlpTikTok) {
           const meta = computeTikTokResolutionMeta(d, ytdlpTikTok);
           const cleanTikTokUrl = url.trim();
@@ -1804,37 +1802,44 @@ async function startServer() {
       if (isTikTok) {
         const reqH = Number(height) || 720;
         const heightBucket = reqH <= 360 ? '360' : reqH <= 480 ? '480' : reqH <= 720 ? '720' : '1080';
-        const [d, ytdlpTikTok] = await Promise.all([
-          resolveViaTikWMServer(url, Number(heightBucket), !!audio),
-          extractViaYtDlp(url, Number(heightBucket))
-        ]);
+        const d = await resolveViaTikWMServer(url, Number(heightBucket), !!audio);
+        const ytdlpTikTok = d ? null : await extractViaYtDlp(url, Number(heightBucket));
         if (d || ytdlpTikTok) {
           const meta = computeTikTokResolutionMeta(d, ytdlpTikTok);
           let chosenSize = meta.est[heightBucket as keyof typeof meta.est] || meta.est['720'];
           const rawChosenUrl = meta.rawUrls[heightBucket as keyof typeof meta.rawUrls] || meta.rawUrls['720'];
 
-          // If user requested 360p or 480p and upstream only gave a single high-bitrate stream, pre-transcode to exact target height
-          if (!audio && Number(heightBucket) <= 480 && !meta.hasDistinctLowResStream && rawChosenUrl) {
-            const transcoded = await transcodeTikTokToTargetHeight(
-              url,
-              rawChosenUrl,
-              Number(heightBucket)
-            );
-            if (transcoded && transcoded.size > 0) {
-              chosenSize = transcoded.size;
-            }
+          // Check if a cached transcoded file already exists for 360p/480p to report its exact size
+          const cleanCacheKey = `${url.trim().split('?')[0]}::${Number(heightBucket)}::v`;
+          const cachedTranscode = tikTokTranscodeCache.get(cleanCacheKey);
+          if (!audio && Number(heightBucket) <= 480 && cachedTranscode && cachedTranscode.size > 0) {
+            chosenSize = cachedTranscode.size;
           }
 
           const streamBoundUrl = `/api/media/stream?url=${encodeURIComponent(
             url.trim()
           )}&quality=${heightBucket}&audio=${audio ? '1' : '0'}`;
+          const proxyRawUrl = rawChosenUrl
+            ? `/api/media/proxy-download?url=${encodeURIComponent(rawChosenUrl)}`
+            : '';
+
+          // For 720p/1080p or distinct low-res streams, prioritize fast direct proxy/CDN streaming
+          const needsLowResTranscode =
+            !audio && Number(heightBucket) <= 480 && !meta.hasDistinctLowResStream;
+          const primaryDirectUrl = audio
+            ? meta.musicUrl || streamBoundUrl
+            : needsLowResTranscode
+            ? streamBoundUrl
+            : proxyRawUrl || streamBoundUrl;
 
           return res.json({
             status: 'done',
-            direct_url: audio ? meta.musicUrl || streamBoundUrl : streamBoundUrl,
+            direct_url: primaryDirectUrl,
             fallback_urls: audio
-              ? [meta.musicUrl, streamBoundUrl, rawChosenUrl].filter(Boolean)
-              : [streamBoundUrl, rawChosenUrl].filter(Boolean),
+              ? [meta.musicUrl, streamBoundUrl, proxyRawUrl, rawChosenUrl].filter(Boolean)
+              : needsLowResTranscode
+              ? [streamBoundUrl, proxyRawUrl, rawChosenUrl].filter(Boolean)
+              : [proxyRawUrl, streamBoundUrl, rawChosenUrl].filter(Boolean),
             title: d?.title || ytdlpTikTok?.title || 'TikTok Video',
             file_size: audio ? Math.round(meta.est['720'] * 0.25) : chosenSize,
             thumbnail: d?.cover || ytdlpTikTok?.thumbnail || ''
@@ -2710,10 +2715,8 @@ async function startServer() {
         if (!resolvedDirect && /(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/i.test(sourceUrl)) {
           const reqQ = parseInt(quality, 10) || 720;
           const heightBucket = reqQ <= 360 ? '360' : reqQ <= 480 ? '480' : reqQ <= 720 ? '720' : '1080';
-          const [d, ytdlpTikTok] = await Promise.all([
-            resolveViaTikWMServer(sourceUrl, Number(heightBucket), isAudio),
-            extractViaYtDlp(sourceUrl, Number(heightBucket))
-          ]);
+          const d = await resolveViaTikWMServer(sourceUrl, Number(heightBucket), isAudio);
+          const ytdlpTikTok = d ? null : await extractViaYtDlp(sourceUrl, Number(heightBucket));
           if (d || ytdlpTikTok) {
             const meta = computeTikTokResolutionMeta(d, ytdlpTikTok);
             if (isAudio) {
@@ -2773,7 +2776,7 @@ async function startServer() {
           const entry = {
             directUrl: resolvedDirect,
             mimeType: resolvedMime,
-            expiresAt: Date.now() + 45 * 1000
+            expiresAt: Date.now() + 10 * 60 * 1000
           };
           streamUrlCache.set(cacheKey, entry);
           return entry;
@@ -2788,6 +2791,10 @@ async function startServer() {
       if (!cached || !cached.directUrl) {
         return res.status(404).json({ error: 'Progressive stream not resolved' });
       }
+
+      const incomingRangeHeader =
+        (req.headers.range as string) ||
+        (req.query.range ? `bytes=${String(req.query.range).replace(/^bytes=/i, '')}` : undefined);
 
       // Serve locally transcoded resolution-locked MP4 (e.g. TikTok 360p / 480p) with full HTTP Range & HEAD support
       if (cached.directUrl.startsWith('file://')) {
@@ -2813,10 +2820,14 @@ async function startServer() {
             `${isDownload ? 'attachment' : 'inline'}; filename="onedownload_${quality}p_${Date.now()}.${ext}"`
           );
 
-          const rangeHeader = req.headers.range;
-          if (rangeHeader && /^bytes=\d*-\d*$/i.test(rangeHeader)) {
-            const parts = rangeHeader.replace(/bytes=/i, '').split('-');
+          if (incomingRangeHeader && /^bytes=\d*-\d*$/i.test(incomingRangeHeader)) {
+            const parts = incomingRangeHeader.replace(/bytes=/i, '').split('-');
             const start = parseInt(parts[0], 10) || 0;
+            if (start >= totalSize) {
+              res.status(416);
+              res.setHeader('Content-Range', `bytes */${totalSize}`);
+              return res.end();
+            }
             const end = parts[1] ? Math.min(totalSize - 1, parseInt(parts[1], 10)) : totalSize - 1;
             const chunkSize = Math.max(0, end - start + 1);
             res.status(req.method === 'HEAD' ? 200 : 206);
@@ -2855,8 +2866,8 @@ async function startServer() {
         } else if (entryUrl.includes('aparat.com')) {
           streamHeaders['Accept'] = '*/*';
         }
-        if (req.headers.range) {
-          streamHeaders['Range'] = req.headers.range as string;
+        if (incomingRangeHeader) {
+          streamHeaders['Range'] = incomingRangeHeader;
         } else if (req.method === 'HEAD') {
           streamHeaders['Range'] = 'bytes=0-0';
         }

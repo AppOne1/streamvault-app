@@ -416,9 +416,17 @@ export class DownloadEngine {
     let lastUiNotify = 0;
     let sliceRetries = 0;
 
-    // Brief initial pause before hitting backend stream so /api/media/start QPS window settles
-    if (isBackendRoute && receivedBytes === 0) {
-      await this.paceDelay(350);
+    // If resuming a task that already downloaded >= 95% of its known/estimated bytes, check if already complete
+    if (
+      canReusePartial &&
+      receivedBytes >= minRequiredBytes &&
+      knownTotalBytes > 0 &&
+      receivedBytes >= knownTotalBytes
+    ) {
+      const existingBlob = new Blob(chunks, { type: canonicalMime });
+      if (await isBlobGenuineMedia(existingBlob, isAudio)) {
+        return existingBlob;
+      }
     }
 
     while (true) {
@@ -430,16 +438,9 @@ export class DownloadEngine {
         break;
       }
 
-      let rangeHeader: string | undefined;
-      if (isBackendRoute) {
-        const sliceEnd =
-          knownTotalBytes > 0
-            ? Math.min(knownTotalBytes - 1, receivedBytes + BACKEND_SLICE_BYTES - 1)
-            : receivedBytes + BACKEND_SLICE_BYTES - 1;
-        rangeHeader = `bytes=${receivedBytes}-${sliceEnd}`;
-      } else {
-        rangeHeader = receivedBytes > 0 ? `bytes=${receivedBytes}-` : undefined;
-      }
+      // Continuous full-speed GET when starting from 0 (Simple CORS request in APK with zero preflight overhead);
+      // open-ended Range `bytes=${receivedBytes}-` only when resuming from a pause or mid-stream drop.
+      const rangeHeader = receivedBytes > 0 ? `bytes=${receivedBytes}-` : undefined;
 
       let res: Response;
       try {
@@ -451,10 +452,18 @@ export class DownloadEngine {
         );
       } catch (err: any) {
         if (signal.aborted || err?.name === 'AbortError') throw err;
-        const maxRetries = isBackendRoute ? 8 : receivedBytes > 0 ? 4 : 0;
+        // If we already downloaded a valid media file (e.g. 2.8MB when estimate was 3.3MB, i.e. 98%) and a resume Range request hits 416 EOF, finalize immediately!
+        const estOrKnown = knownTotalBytes || task.totalBytes || 0;
+        if (
+          receivedBytes >= minRequiredBytes &&
+          (estOrKnown === 0 || receivedBytes >= estOrKnown * 0.8)
+        ) {
+          break;
+        }
+        const maxRetries = isBackendRoute ? 4 : receivedBytes > 0 ? 3 : 0;
         if (sliceRetries < maxRetries) {
           sliceRetries++;
-          const cooldownMs = Math.min(5000, 1500 * sliceRetries);
+          const cooldownMs = Math.min(3000, 900 * sliceRetries);
           await new Promise((r) => setTimeout(r, cooldownMs));
           continue;
         }
@@ -509,10 +518,7 @@ export class DownloadEngine {
           });
           this.notify(task);
         }
-        if (!isPartialRange || (knownTotalBytes > 0 && receivedBytes >= knownTotalBytes)) {
-          break;
-        }
-        continue;
+        break;
       }
 
       const reader = res.body.getReader();
@@ -545,7 +551,7 @@ export class DownloadEngine {
             });
 
             if (receivedBytes > task.totalBytes) {
-              task.totalBytes = Math.round(receivedBytes * 1.08);
+              task.totalBytes = Math.round(receivedBytes * 1.05);
               task.totalSizeFormatted = formatBytes(task.totalBytes);
             }
 
@@ -583,36 +589,38 @@ export class DownloadEngine {
       }
 
       if (streamInterrupted) {
-        const maxReadRetries = isBackendRoute ? 8 : 4;
+        // If stream closed after delivering >= 95% of known bytes (or >= minRequiredBytes when total was only estimated), accept as complete
+        if (
+          receivedBytes >= minRequiredBytes &&
+          ((knownTotalBytes > 0 && receivedBytes >= knownTotalBytes * 0.96) ||
+            (knownTotalBytes === 0 && receivedBytes >= (task.totalBytes || 0) * 0.85))
+        ) {
+          break;
+        }
+        const maxReadRetries = isBackendRoute ? 4 : 3;
         if (sliceRetries < maxReadRetries) {
           sliceRetries++;
-          const cooldownMs = Math.min(5000, 1500 * sliceRetries);
+          const cooldownMs = Math.min(3000, 1000 * sliceRetries);
           await new Promise((r) => setTimeout(r, cooldownMs));
           continue;
         }
         throw new Error('وقفه در دریافت استریم — لطفاً تلاش مجدد کنید');
       }
 
-      if (isBackendRoute && isPartialRange) {
-        if (knownTotalBytes > 0 && receivedBytes >= knownTotalBytes) {
-          break;
-        }
+      // Stream finished reading cleanly (`done === true`):
+      // Only loop again if we have an exact Content-Length/Content-Range (`knownTotalBytes > 0`) AND received < 95% of it.
+      if (knownTotalBytes > 0 && receivedBytes > 0 && receivedBytes < knownTotalBytes * 0.95) {
         if (passBytesRead === 0) {
           break;
         }
-        // Paced inter-slice delay (280ms in foreground; 0ms in background so background tab isn't throttled)
-        await this.paceDelay(280);
-        continue;
-      }
-
-      // Non-sliced or 200 OK full stream completed
-      if (knownTotalBytes > 0 && receivedBytes > 0 && receivedBytes < knownTotalBytes * 0.98) {
-        if (sliceRetries < 4) {
+        if (sliceRetries < 3) {
           sliceRetries++;
-          await new Promise((r) => setTimeout(r, 1200 * sliceRetries));
+          await new Promise((r) => setTimeout(r, 800 * sliceRetries));
           continue;
         }
-        throw new Error('وقفه در دریافت استریم — لطفاً تلاش مجدد کنید');
+        if (receivedBytes < minRequiredBytes) {
+          throw new Error('وقفه در دریافت استریم — لطفاً تلاش مجدد کنید');
+        }
       }
 
       break;
@@ -722,10 +730,12 @@ export class DownloadEngine {
         }
       };
 
-      // If resuming from a paused state with a known working URL, try that exact URL first without re-probing!
+      // If resuming from a paused state with a known working URL, prioritize that exact URL first
       if (isResumingPartial && savedPartial?.workingUrl) {
         addCandidate(savedPartial.workingUrl);
-      } else if (task.platform === 'aparat' || isAparatUrl(task.originalUrl)) {
+      }
+
+      if (task.platform === 'aparat' || isAparatUrl(task.originalUrl)) {
         const aparatStream = await resolveViaAparat(
           task.originalUrl,
           task.format.qualityLabel,
@@ -735,7 +745,7 @@ export class DownloadEngine {
           addCandidate(aparatStream.rawUrl);
           addCandidate(aparatStream.url);
         }
-      } else {
+      } else if (!isResumingPartial || !savedPartial?.workingUrl) {
         const resolved = await resolveDirectMediaStream(
           task.originalUrl,
           task.format.type,
@@ -770,7 +780,7 @@ export class DownloadEngine {
 
       clearInterval(prepTimer);
 
-      // 2. Include 1 clean universal stream fallback if needed
+      // 2. Include clean universal stream fallback if needed
       addCandidate(
         getApiUrl(
           `/api/media/stream?url=${encodeURIComponent(
