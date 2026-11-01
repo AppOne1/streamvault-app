@@ -56,6 +56,40 @@ export const CLOUD_BACKEND_URLS = [
 ];
 
 /**
+ * Returns the local native stream proxy base URL (`http://127.0.0.1:<port>`) running inside MainActivity.java
+ * on Android APK, or empty string on Web.
+ */
+export function getNativeLocalProxyUrl(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    const base = (window as any).OneDownloadNative?.getLocalProxyUrl?.();
+    if (base && typeof base === 'string' && base.startsWith('http://127.0.0.1:')) {
+      return base.replace(/\/+$/, '');
+    }
+  } catch {
+    // ignore
+  }
+  return '';
+}
+
+/**
+ * Wraps an upstream media URL with the Android APK's local 127.0.0.1 stream proxy if available.
+ */
+export function wrapWithNativeLocalProxy(rawUrl: string): string {
+  if (!rawUrl || (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://'))) {
+    return rawUrl;
+  }
+  if (rawUrl.startsWith('http://127.0.0.1:')) {
+    return rawUrl;
+  }
+  const localBase = getNativeLocalProxyUrl();
+  if (localBase) {
+    return `${localBase}/stream?url=${encodeURIComponent(rawUrl)}`;
+  }
+  return rawUrl;
+}
+
+/**
  * Resolves a `/api/...` path for both Web and Native Android APK.
  * On Native Android APK, prefixes relative `/api/...` paths with the live Cloud Run backend origin.
  */
@@ -660,13 +694,21 @@ async function probeTwitterClientSide(url: string): Promise<{
         variants.sort((a, b) => b.bitrate - a.bitrate);
         const bestMp4 = variants[0]?.url || videoItem.url;
         if (bestMp4) {
+          const midMp4 = variants[Math.min(1, variants.length - 1)]?.url || bestMp4;
+          const lowMp4 = variants[variants.length - 1]?.url || midMp4;
+          const durSec = videoItem.duration_millis ? Math.max(5, Math.round(videoItem.duration_millis / 1000)) : 35;
           return {
             title: (tweet.text || `X Video (${tweetId})`).replace(/\s+/g, ' ').trim().slice(0, 95),
             author: tweet.user_name ? `${tweet.user_name} (@${tweet.user_screen_name || 'x'})` : 'X / Twitter',
-            duration: videoItem.duration_millis ? Math.round(videoItem.duration_millis / 1000) : 35,
+            duration: durSec,
             thumbnail: videoItem.thumbnail_url ? getSafeThumbnail(videoItem.thumbnail_url) : '',
             directVideoUrl: bestMp4,
-            formatsMap: { '1080': bestMp4, '720': bestMp4 }
+            formatsMap: {
+              '1080': bestMp4,
+              '720': bestMp4,
+              '480': midMp4,
+              '360': lowMp4
+            }
           };
         }
       }
@@ -743,6 +785,49 @@ async function probeViaSaveVideoClientSide(
     };
   }
 
+  // Fast Native Instagram Embed Extractor via CapacitorHttp (< 1.5s response on Android APK)
+  if (platform === 'instagram' && shortcode && isNative) {
+    try {
+      const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
+      const embedResp = await CapacitorHttp.get({
+        url: embedUrl,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
+          Accept: 'text/html,application/xhtml+xml'
+        },
+        connectTimeout: 8000,
+        readTimeout: 8000
+      });
+      if (embedResp.status >= 200 && embedResp.status < 300 && typeof embedResp.data === 'string') {
+        const html = embedResp.data;
+        const videoMatch =
+          html.match(/"video_url"\s*:\s*"([^"]+)"/i) ||
+          html.match(/\\"video_url\\"\s*:\s*\\"([^\\"]+)\\"/i) ||
+          html.match(/class="EmbeddedMediaVideo"[^>]*src="([^"]+)"/i);
+        if (videoMatch && videoMatch[1]) {
+          const decodedUrl = videoMatch[1]
+            .replace(/\\u0026/g, '&')
+            .replace(/\\\//g, '/')
+            .replace(/&amp;/g, '&');
+          const usernameMatch =
+            html.match(/"username"\s*:\s*"([^"]+)"/i) ||
+            html.match(/\\"username\\"\s*:\s*\\"([^\\"]+)\\"/i);
+          const author = usernameMatch ? `@${usernameMatch[1]}` : 'Instagram Creator';
+          return {
+            title: `Instagram Reel (${author})`,
+            author,
+            duration: 35,
+            thumbnail: realThumb,
+            directVideoUrl: wrapWithNativeLocalProxy(decodedUrl)
+          };
+        }
+      }
+    } catch {
+      // Fall through to SaveVideo below
+    }
+  }
+
   const cleanTargetUrl =
     platform === 'instagram' && shortcode && !/\/stories\//i.test(url)
       ? `https://www.instagram.com/reel/${shortcode}/`
@@ -756,7 +841,7 @@ async function probeViaSaveVideoClientSide(
   });
 
   if (startData && startData.task_id) {
-    for (let attempt = 0; attempt < 15; attempt++) {
+    for (let attempt = 0; attempt < 18; attempt++) {
       await new Promise((r) => setTimeout(r, 950));
       const stData = await smartFetchJson(`https://savevideo.uz/api/status/${startData.task_id}`, {
         method: 'GET',
@@ -767,8 +852,9 @@ async function probeViaSaveVideoClientSide(
       if (stData.status === 'done') {
         const token = stData.file_token || '';
         const ext = stData.ext || 'mp4';
+        const rawSvFileUrl = `https://savevideo.uz/api/file/${startData.task_id}?t=${encodeURIComponent(token)}`;
         const fileUrl = isNative
-          ? `https://savevideo.uz/api/file/${startData.task_id}?t=${encodeURIComponent(token)}`
+          ? wrapWithNativeLocalProxy(rawSvFileUrl)
           : `/api/media/file/${startData.task_id}?t=${encodeURIComponent(token)}&ext=${ext}&title=${encodeURIComponent(
               stData.title || 'video'
             )}`;
@@ -813,7 +899,7 @@ async function probeViaSaveVideoClientSide(
             author: 'Instagram Creator',
             duration: 45,
             thumbnail: realThumb,
-            directVideoUrl: decodedUrl
+            directVideoUrl: isNative ? wrapWithNativeLocalProxy(decodedUrl) : decodedUrl
           };
         }
       }
@@ -870,8 +956,9 @@ export async function parseMediaUrl(url: string): Promise<ParsedMediaInfo> {
     }
   }
 
-  // 1. Primary Probe: Our Full-Stack Express Backend `/api/media/probe`
-  if (!directVideoUrl || platform !== 'aparat') {
+  // 1. Primary Probe on Web/Preview: Full-Stack Express Backend `/api/media/probe`
+  // (On standalone Android APK, skip dead Cloud Run probe and use direct native CapacitorHttp resolvers immediately)
+  if (!isCapacitorOrNative() && (!directVideoUrl || platform !== 'aparat')) {
     try {
       const probeRes = await fetchBackendApi('/api/media/probe', {
         method: 'POST',
@@ -928,8 +1015,8 @@ export async function parseMediaUrl(url: string): Promise<ParsedMediaInfo> {
     }
   }
 
-  // 2. TikTok TikWM Direct Resolver (Cached to avoid 1-req/sec rate limit; only runs if backend probe didn't already populate)
-  if (platform === 'tiktok' && (!directVideoUrl || Object.keys(formatsMap).length === 0)) {
+  // 2. TikTok TikWM Direct Resolver (Cached to avoid 1-req/sec rate limit)
+  if (platform === 'tiktok' && (!directVideoUrl || !formatsMap || Object.keys(formatsMap).length === 0)) {
     const d = await fetchTikWmCached(cleanUrl);
     if (d) {
       if (d.title) resolvedTitle = d.title;
@@ -998,11 +1085,10 @@ export async function parseMediaUrl(url: string): Promise<ParsedMediaInfo> {
     }
   }
 
-  // 3. Instagram, Facebook & YouTube Native APK Resolver via SaveVideo API (CapacitorHttp)
+  // 3. Instagram, Facebook & YouTube Native APK / Fallback Resolver via SaveVideo API (CapacitorHttp)
   if (
-    isCapacitorOrNative() &&
     (platform === 'instagram' || platform === 'facebook' || platform === 'youtube') &&
-    !directVideoUrl
+    (!directVideoUrl || isCapacitorOrNative())
   ) {
     const svInfo = await probeViaSaveVideoClientSide(cleanUrl, platform);
     if (svInfo) {
@@ -1011,7 +1097,7 @@ export async function parseMediaUrl(url: string): Promise<ParsedMediaInfo> {
       if (svInfo.duration) durationSeconds = svInfo.duration;
       if (svInfo.thumbnail) resolvedThumbnail = svInfo.thumbnail;
       if (svInfo.heights) probedHeights = svInfo.heights;
-      if (svInfo.est) probedEst = svInfo.est;
+      if (svInfo.est && Object.keys(svInfo.est).length > 0) probedEst = svInfo.est;
       if (svInfo.audioEst) audioEst = svInfo.audioEst;
       if (svInfo.directVideoUrl) {
         directVideoUrl = svInfo.directVideoUrl;
@@ -1019,21 +1105,23 @@ export async function parseMediaUrl(url: string): Promise<ParsedMediaInfo> {
         formatsMap = {
           '1080': svInfo.directVideoUrl,
           '720': svInfo.directVideoUrl,
-          '480': svInfo.directVideoUrl
+          '480': svInfo.directVideoUrl,
+          '360': svInfo.directVideoUrl
         };
       }
       if (svInfo.fileSize && svInfo.fileSize > 30000) {
         probedEst = {
           '1080': svInfo.fileSize,
           '720': Math.round(svInfo.fileSize * 0.8),
-          '480': Math.round(svInfo.fileSize * 0.55)
+          '480': Math.round(svInfo.fileSize * 0.55),
+          '360': Math.round(svInfo.fileSize * 0.38)
         };
       }
     }
   }
 
-  // Ensure YouTube always has signed direct muxed MP4 stream URLs ready for every resolution
-  if (platform === 'youtube') {
+  // Ensure YouTube on Web/Preview has signed direct muxed MP4 stream URLs ready for every resolution
+  if (platform === 'youtube' && !isCapacitorOrNative()) {
     const canonicalYtUrl = ytVideoId ? `https://www.youtube.com/watch?v=${ytVideoId}` : cleanUrl;
     if (!formatsMap || Object.keys(formatsMap).length === 0) {
       formatsMap = {
@@ -1061,7 +1149,7 @@ export async function parseMediaUrl(url: string): Promise<ParsedMediaInfo> {
       if (twInfo.thumbnail) resolvedThumbnail = getSafeThumbnail(twInfo.thumbnail);
       directVideoUrl = twInfo.directVideoUrl;
       directAudioUrl = twInfo.directVideoUrl;
-      formatsMap = { '1080': twInfo.directVideoUrl, '720': twInfo.directVideoUrl };
+      formatsMap = twInfo.formatsMap || { '1080': twInfo.directVideoUrl, '720': twInfo.directVideoUrl };
     }
   }
 

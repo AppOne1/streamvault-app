@@ -1,5 +1,5 @@
 import { DownloadTask, FormatOption, ParsedMediaInfo } from '../types';
-import { formatBytes, getApiUrl } from './platformDetector';
+import { formatBytes, getApiUrl, isCapacitorOrNative } from './platformDetector';
 import {
   saveOfflineMedia,
   getOfflineMedia,
@@ -13,7 +13,6 @@ import {
 } from './mediaExtractor';
 import {
   forceDeviceDownload,
-  triggerSilentAttachmentDownload,
   saveBlobToDevice,
   isBlobGenuineMedia,
   ensureMediaFileName,
@@ -384,7 +383,7 @@ export class DownloadEngine {
   /**
    * Dual-Mode Binary Stream Reader with Pause/Resume Byte-Offset Preservation:
    * - Restores already-downloaded `chunks` and `receivedBytes` from `this.partialTaskState` when resuming a paused task.
-   * - For direct external CORS CDNs (`!isBackendRoute`, e.g. tiktokcdn, tikwm, aparat, twimg):
+   * - For direct external CORS CDNs (`!isBackendRoute`, e.g. tiktokcdn, tikwm, aparat, twimg, or Local Native Stream Proxy):
    *   Streams directly in the browser with a continuous GET (or `Range: bytes=${receivedBytes}-` on resume).
    * - For backend routes (`isBackendRoute`, e.g. `/api/media/file/:taskId`, `/api/media/proxy-stream`):
    *   Streams in paced 1.5 MB sequential `Range` slices with up to 8 exponential cooldown retries per slice.
@@ -460,7 +459,7 @@ export class DownloadEngine {
         ) {
           break;
         }
-        const maxRetries = isBackendRoute ? 4 : receivedBytes > 0 ? 3 : 0;
+        const maxRetries = isBackendRoute ? 4 : receivedBytes > 0 ? 3 : 1;
         if (sliceRetries < maxRetries) {
           sliceRetries++;
           const cooldownMs = Math.min(3000, 900 * sliceRetries);
@@ -645,7 +644,7 @@ export class DownloadEngine {
    * Silent Native Blob Download Engine:
    * 1. Enforces 1 active download at a time (queuing additional tasks) so concurrent streams never trip Cloud Run quotas.
    * 2. Preserves partial downloaded chunks when paused, resuming from the exact byte offset (`Range: bytes=receivedBytes-...`).
-   * 3. Resolves the direct media stream via backend `/api/media/start` (or platform extractors).
+   * 3. Resolves the direct media stream via Local Native Stream Proxy (on APK) or backend `/api/media/start`.
    * 4. Downloads the real binary stream into a verified `Blob` object (`video/mp4` or `audio/mpeg`)
    *    while showing real-time downloaded MB and MB/s speed.
    * 5. Stores the `Blob` in internal app storage (IndexedDB + CacheStorage + memory) so the built-in player works 100% offline.
@@ -715,12 +714,12 @@ export class DownloadEngine {
     this.notify(task);
 
     const prepTimer = setInterval(() => {
-      if (task.status === 'downloading' && task.downloadedBytes === 0 && task.progressPercent < 10) {
-        task.progressPercent = Math.min(10, task.progressPercent + 1);
+      if (task.status === 'downloading' && task.downloadedBytes === 0 && task.progressPercent < 15) {
+        task.progressPercent = Math.min(15, task.progressPercent + 1);
         task.speedFormatted = 'در حال آماده‌سازی سرور...';
         this.notify(task);
       }
-    }, 1200);
+    }, 1500);
 
     try {
       const candidateUrls: string[] = [];
@@ -753,11 +752,11 @@ export class DownloadEngine {
           task.directUrl,
           (prepPercent) => {
             if (task.status === 'downloading' && task.downloadedBytes === 0) {
-              const cappedPrep = Math.min(12, Math.max(2, prepPercent));
+              const cappedPrep = Math.min(18, Math.max(2, prepPercent));
               if (cappedPrep > task.progressPercent) {
                 task.progressPercent = cappedPrep;
               }
-              task.speedFormatted = 'در حال آماده‌سازی سرور...';
+              task.speedFormatted = 'در حال آماده‌سازی استریم...';
               this.notify(task);
             }
           }
@@ -780,14 +779,16 @@ export class DownloadEngine {
 
       clearInterval(prepTimer);
 
-      // 2. Include clean universal stream fallback if needed
-      addCandidate(
-        getApiUrl(
-          `/api/media/stream?url=${encodeURIComponent(
-            task.originalUrl
-          )}&quality=${reqQuality}&audio=${isAudio ? '1' : '0'}`
-        )
-      );
+      // 2. Include universal backend stream fallback only on Web (never on standalone APK where ais-pre is 404)
+      if (!isCapacitorOrNative()) {
+        addCandidate(
+          getApiUrl(
+            `/api/media/stream?url=${encodeURIComponent(
+              task.originalUrl
+            )}&quality=${reqQuality}&audio=${isAudio ? '1' : '0'}`
+          )
+        );
+      }
 
       const basePrepProgress =
         isResumingPartial && savedPartial
@@ -796,15 +797,15 @@ export class DownloadEngine {
       let downloadedBlob: Blob | null = null;
       let workingStreamUrl = candidateUrls[0] || '';
 
-      // 3. Try candidate stream URLs (up to 3 top candidates) until we obtain a verified binary Blob
-      const topCandidates = candidateUrls.slice(0, 3);
+      // 3. Try candidate stream URLs (up to 4 top candidates) until we obtain a verified binary Blob
+      const topCandidates = candidateUrls.slice(0, 4);
       for (let i = 0; i < topCandidates.length; i++) {
         const candidateUrl = topCandidates[i];
         if (controller.signal.aborted) {
           throw new DOMException('Aborted', 'AbortError');
         }
         if (i > 0) {
-          await new Promise((r) => setTimeout(r, 1500));
+          await new Promise((r) => setTimeout(r, 1200));
         }
         try {
           downloadedBlob = await this.streamResponseToBlob(
@@ -824,13 +825,13 @@ export class DownloadEngine {
 
       // 4. If primary candidates failed, query extra fallback resolvers (Piped / Invidious / Cobalt)
       if (!downloadedBlob) {
-        await new Promise((r) => setTimeout(r, 1500));
+        await new Promise((r) => setTimeout(r, 1200));
         const extraFallbacks = await resolveFallbackMediaStreams(
           task.originalUrl,
           task.format.type,
           task.format.qualityLabel
         );
-        for (const extraUrl of extraFallbacks.slice(0, 2)) {
+        for (const extraUrl of extraFallbacks.slice(0, 3)) {
           if (controller.signal.aborted) {
             throw new DOMException('Aborted', 'AbortError');
           }
@@ -852,46 +853,8 @@ export class DownloadEngine {
         }
       }
 
-      // 4b. APK WebView / Native Direct Stream Fallback:
-      // If binary stream reading via fetch/proxies was blocked by Android WebView security restrictions,
-      // immediately hand off the extracted direct stream URL to Android's Native Download Intent so the download never stalls!
       if (!downloadedBlob) {
-        const directCandidate =
-          workingStreamUrl ||
-          candidateUrls[0] ||
-          getApiUrl(
-            `/api/media/stream?url=${encodeURIComponent(
-              task.originalUrl
-            )}&quality=${reqQuality}&audio=${isAudio ? '1' : '0'}&download=1`
-          );
-
-        if (directCandidate) {
-          const finalDirectUrl = directCandidate.includes('/api/media/') && !directCandidate.includes('download=1')
-            ? `${directCandidate}${directCandidate.includes('?') ? '&' : '?'}download=1`
-            : directCandidate;
-
-          triggerSilentAttachmentDownload(finalDirectUrl, task.fileName);
-
-          this.partialTaskState.delete(task.id);
-          const estBytes = task.totalBytes || task.format.estimatedSizeBytes || 4500000;
-          task.directUrl = finalDirectUrl;
-          task.totalBytes = estBytes;
-          task.downloadedBytes = estBytes;
-          task.totalSizeFormatted = formatBytes(estBytes);
-          task.downloadedSizeFormatted = formatBytes(estBytes);
-          task.progressPercent = 100;
-          task.speedBytesPerSec = 0;
-          task.speedFormatted = 'پایان یافت';
-          task.etaSeconds = 0;
-          task.completedAt = Date.now();
-          task.status = 'completed';
-          task.isSaved = true;
-          task.errorMessage = undefined;
-          this.notify(task);
-          return;
-        }
-
-        throw new Error('خطا در دریافت فایل باینری مدیا — لطفاً تلاش مجدد کنید');
+        throw new Error('خطا در دریافت فایل باینری مدیا — لطفاً اتصال اینترنت یا فیلترشکن خود را بررسی کرده و مجدداً تلاش کنید');
       }
 
       // 5. Persist binary Blob in internal app storage (Memory + IndexedDB + CacheStorage) for 100% offline playback

@@ -1,3 +1,4 @@
+import { CapacitorHttp } from '@capacitor/core';
 import { MediaType } from '../types';
 import {
   extractInstagramShortcode,
@@ -6,10 +7,12 @@ import {
   fetchBackendApi,
   fetchTikWmCached,
   getApiUrl,
+  getNativeLocalProxyUrl,
   getSafeThumbnail,
   isAparatUrl,
   isCapacitorOrNative,
-  smartFetchJson
+  smartFetchJson,
+  wrapWithNativeLocalProxy
 } from './platformDetector';
 import {
   AparatResolvedStream,
@@ -51,7 +54,11 @@ const COBALT_INSTANCES = [
  */
 export function unwrapRawMediaUrl(url: string): string {
   if (!url) return '';
-  if (url.includes('/api/media/proxy-stream')) {
+  if (
+    url.includes('/api/media/proxy-stream') ||
+    url.includes('/api/media/proxy-download') ||
+    url.includes('127.0.0.1:')
+  ) {
     try {
       const qsIndex = url.indexOf('?');
       if (qsIndex !== -1) {
@@ -159,7 +166,14 @@ export function wrapStreamUrl(
   quality?: string
 ): string {
   if (!rawUrl) return '';
-  if (rawUrl.startsWith('blob:')) return rawUrl;
+  if (rawUrl.startsWith('blob:') || rawUrl.startsWith('http://127.0.0.1:')) return rawUrl;
+
+  const unwrapped = unwrapRawMediaUrl(rawUrl);
+  const localProxyBase = getNativeLocalProxyUrl();
+  if (localProxyBase && unwrapped.startsWith('http') && !unwrapped.includes('/api/media/')) {
+    return `${localProxyBase}/stream?url=${encodeURIComponent(unwrapped)}`;
+  }
+
   if (rawUrl.startsWith('/api/media/') || rawUrl.includes('/api/media/')) {
     let updated = rawUrl;
     if (
@@ -176,6 +190,9 @@ export function wrapStreamUrl(
   }
   if (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://')) {
     return '';
+  }
+  if (isCapacitorOrNative()) {
+    return wrapWithNativeLocalProxy(rawUrl);
   }
   let built = `/api/media/proxy-stream?url=${encodeURIComponent(rawUrl)}&title=${encodeURIComponent(
     title || 'media'
@@ -251,11 +268,14 @@ export async function resolveViaTikWM(
       const base360Size = Math.round(baseStdSize * 0.36);
 
       const heightBucket = reqH <= 360 ? 360 : reqH <= 480 ? 480 : reqH <= 720 ? 720 : 1080;
-      const serverResolutionStream = getApiUrl(
-        `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${heightBucket}&audio=${
-          isAudio ? '1' : '0'
-        }`
-      );
+      const isNative = isCapacitorOrNative();
+      const serverResolutionStream = !isNative
+        ? getApiUrl(
+            `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${heightBucket}&audio=${
+              isAudio ? '1' : '0'
+            }`
+          )
+        : '';
 
       let orderedRawCandidates: string[];
       let chosenSize = baseStdSize;
@@ -264,10 +284,10 @@ export async function resolveViaTikWM(
         orderedRawCandidates = [musicUrl, serverResolutionStream, stdPlayUrl, idPlayUrl].filter(Boolean);
         chosenSize = Math.round(baseStdSize * 0.25);
       } else if (heightBucket >= 1080) {
-        orderedRawCandidates = [serverResolutionStream, hdPlayUrl, stdPlayUrl, idPlayUrl].filter(Boolean);
+        orderedRawCandidates = [hdPlayUrl, serverResolutionStream, stdPlayUrl, idPlayUrl].filter(Boolean);
         chosenSize = baseHdSize;
       } else if (heightBucket === 720) {
-        orderedRawCandidates = [serverResolutionStream, stdPlayUrl, idPlayUrl, hdPlayUrl].filter(Boolean);
+        orderedRawCandidates = [stdPlayUrl, idPlayUrl, serverResolutionStream, hdPlayUrl].filter(Boolean);
         chosenSize = baseStdSize;
       } else if (heightBucket === 480) {
         orderedRawCandidates = [
@@ -544,139 +564,145 @@ export async function resolveDirectMediaStream(
   // 0c. For TikTok, try fast client-side cached TikWM first if available, or backend /api/media/start
   const isTikTok = /(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/i.test(originalUrl);
 
-  // 1. Primary Full-Stack Express Backend (/api/media/start + /api/media/status) on both Web and Native APK
-  try {
-    onProgress?.(4);
-    const startRes = await fetchBackendApi('/api/media/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        url: originalUrl,
-        height: requestedHeight,
-        audio: isAudio
-      })
-    });
+  // 1. Primary Full-Stack Express Backend (/api/media/start + /api/media/status) on Web/Preview
+  // (On standalone Android APK, skip dead Cloud Run and resolve directly via native CapacitorHttp + Local Proxy)
+  if (!isCapacitorOrNative()) {
+    try {
+      onProgress?.(4);
+      const startRes = await fetchBackendApi('/api/media/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: originalUrl,
+          height: requestedHeight,
+          audio: isAudio
+        })
+      });
 
-    if (startRes.ok) {
-      const startData = await startRes.json();
+      if (startRes.ok) {
+        const startData = await startRes.json();
 
-      if (startData.status === 'done' && startData.direct_url) {
-        onProgress?.(12);
-        const rawUrl = unwrapRawMediaUrl(String(startData.direct_url));
-        const wrappedPrimary = wrapStreamUrl(
-          String(startData.direct_url),
-          startData.title || 'media',
-          isAudio,
-          originalUrl,
-          String(requestedHeight)
-        );
-        const extraFallbacks: string[] = [];
-        if (Array.isArray(startData.fallback_urls)) {
-          for (const u of startData.fallback_urls) {
-            const rawF = unwrapRawMediaUrl(String(u));
-            if (isCorsDirectCdnUrl(rawF) && !extraFallbacks.includes(rawF)) {
-              extraFallbacks.push(rawF);
+        if (startData.status === 'done' && startData.direct_url) {
+          onProgress?.(14);
+          const rawUrl = unwrapRawMediaUrl(String(startData.direct_url));
+          const wrappedPrimary = wrapStreamUrl(
+            String(startData.direct_url),
+            startData.title || 'media',
+            isAudio,
+            originalUrl,
+            String(requestedHeight)
+          );
+          const extraFallbacks: string[] = [];
+          if (Array.isArray(startData.fallback_urls)) {
+            for (const u of startData.fallback_urls) {
+              const rawF = unwrapRawMediaUrl(String(u));
+              if (isCorsDirectCdnUrl(rawF) && !extraFallbacks.includes(rawF)) {
+                extraFallbacks.push(rawF);
+              }
+              const wrappedF = wrapStreamUrl(
+                String(u),
+                startData.title || 'media',
+                isAudio,
+                originalUrl,
+                String(requestedHeight)
+              );
+              if (wrappedF && !extraFallbacks.includes(wrappedF)) {
+                extraFallbacks.push(wrappedF);
+              }
             }
-            const wrappedF = wrapStreamUrl(
-              String(u),
-              startData.title || 'media',
-              isAudio,
-              originalUrl,
-              String(requestedHeight)
-            );
-            if (wrappedF && !extraFallbacks.includes(wrappedF)) {
-              extraFallbacks.push(wrappedF);
+          }
+          const streamFallback = getApiUrl(
+            `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${requestedHeight}&audio=${
+              isAudio ? '1' : '0'
+            }`
+          );
+
+          const useRawFirst = isCorsDirectCdnUrl(rawUrl);
+          const primaryUrl = useRawFirst ? rawUrl : wrappedPrimary;
+          const allFallbacks = useRawFirst
+            ? [wrappedPrimary, ...extraFallbacks, streamFallback]
+            : [...extraFallbacks, streamFallback];
+
+          return {
+            url: primaryUrl,
+            fallbackUrls: allFallbacks.filter((u) => u && u !== primaryUrl),
+            isRealExtracted: true,
+            mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
+            estimatedBytes: startData.file_size,
+            title: startData.title,
+            thumbnail: startData.thumbnail
+          };
+        }
+
+        const taskId = startData.task_id;
+        if (taskId) {
+          for (let attempt = 0; attempt < 95; attempt++) {
+            const simulatedPrep = Math.min(16, 4 + Math.floor(attempt / 4));
+            onProgress?.(simulatedPrep);
+            await sleep(2000);
+            try {
+              const statusRes = await fetchBackendApi(`/api/media/status/${taskId}`);
+              if (!statusRes.ok) continue;
+
+              const statusData = await statusRes.json();
+              if (typeof statusData.progress === 'number' && statusData.progress > 0) {
+                onProgress?.(Math.min(18, Math.max(simulatedPrep, 3 + Math.round(statusData.progress * 0.15))));
+              }
+              if (statusData.status === 'done') {
+                onProgress?.(18);
+                const resolvedTaskId = statusData.task_id || taskId;
+                const token = statusData.file_token || '';
+                const ext = isAudio ? 'mp3' : statusData.ext || 'mp4';
+                const streamEndpoint = getApiUrl(
+                  isAudio
+                    ? `/api/media/audio/${resolvedTaskId}?t=${encodeURIComponent(token)}&quality=${requestedHeight}&sourceUrl=${encodeURIComponent(
+                        originalUrl
+                      )}`
+                    : `/api/media/file/${resolvedTaskId}?t=${encodeURIComponent(token)}&ext=${ext}&quality=${requestedHeight}&title=${encodeURIComponent(
+                        statusData.title || 'video'
+                      )}&sourceUrl=${encodeURIComponent(originalUrl)}`
+                );
+                const streamFallback = getApiUrl(
+                  `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${requestedHeight}&audio=${
+                    isAudio ? '1' : '0'
+                  }`
+                );
+
+                return {
+                  url: streamEndpoint,
+                  fallbackUrls: [streamFallback],
+                  isRealExtracted: true,
+                  mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
+                  estimatedBytes: statusData.file_size,
+                  title: statusData.title,
+                  thumbnail: statusData.thumbnail
+                };
+              } else if (statusData.status === 'error') {
+                break;
+              }
+            } catch {
+              // continue polling
             }
           }
         }
-        const streamFallback = getApiUrl(
-          `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${requestedHeight}&audio=${
-            isAudio ? '1' : '0'
-          }`
-        );
-
-        // If rawUrl is a CORS-enabled direct CDN (e.g. tiktokcdn-us.com, tikwm.com, aparat.com, twimg.com),
-        // use rawUrl FIRST so the browser downloads directly with 0 Cloud Run container bandwidth!
-        const useRawFirst = isCorsDirectCdnUrl(rawUrl);
-        const primaryUrl = useRawFirst ? rawUrl : wrappedPrimary;
-        const allFallbacks = useRawFirst
-          ? [wrappedPrimary, ...extraFallbacks, streamFallback]
-          : [...extraFallbacks, streamFallback];
-
-        return {
-          url: primaryUrl,
-          fallbackUrls: allFallbacks.filter((u) => u && u !== primaryUrl),
-          isRealExtracted: true,
-          mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
-          estimatedBytes: startData.file_size,
-          title: startData.title,
-          thumbnail: startData.thumbnail
-        };
       }
-
-      const taskId = startData.task_id;
-      if (taskId) {
-        for (let attempt = 0; attempt < 45; attempt++) {
-          const simulatedPrep = Math.min(14, 5 + Math.round((attempt / 25) * 9));
-          onProgress?.(simulatedPrep);
-          await sleep(2500);
-          try {
-            const statusRes = await fetchBackendApi(`/api/media/status/${taskId}`);
-            if (!statusRes.ok) continue;
-
-            const statusData = await statusRes.json();
-            if (typeof statusData.progress === 'number' && statusData.progress > 0) {
-              onProgress?.(Math.min(14, Math.max(simulatedPrep, Math.round(statusData.progress * 0.14))));
-            }
-            if (statusData.status === 'done') {
-              onProgress?.(15);
-              const resolvedTaskId = statusData.task_id || taskId;
-              const token = statusData.file_token || '';
-              const ext = isAudio ? 'mp3' : statusData.ext || 'mp4';
-              const streamEndpoint = getApiUrl(
-                isAudio
-                  ? `/api/media/audio/${resolvedTaskId}?t=${encodeURIComponent(token)}&quality=${requestedHeight}&sourceUrl=${encodeURIComponent(
-                      originalUrl
-                    )}`
-                  : `/api/media/file/${resolvedTaskId}?t=${encodeURIComponent(token)}&ext=${ext}&quality=${requestedHeight}&title=${encodeURIComponent(
-                      statusData.title || 'video'
-                    )}&sourceUrl=${encodeURIComponent(originalUrl)}`
-              );
-              const streamFallback = getApiUrl(
-                `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${requestedHeight}&audio=${
-                  isAudio ? '1' : '0'
-                }`
-              );
-
-              return {
-                url: streamEndpoint,
-                fallbackUrls: [streamFallback],
-                isRealExtracted: true,
-                mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
-                estimatedBytes: statusData.file_size,
-                title: statusData.title,
-                thumbnail: statusData.thumbnail
-              };
-            } else if (statusData.status === 'error') {
-              break;
-            }
-          } catch {
-            // continue polling
-          }
-        }
-      }
+    } catch {
+      // fall through to client-side / native resolvers below
     }
-  } catch {
-    // fall through to client-side / native resolvers below
   }
 
-  // 2. TikTok Direct Stream API Fallback (Client/Native, strictly respects qualityLabel)
+  // 2. TikTok Direct Stream API (Client/Native, strictly respects qualityLabel)
   if (isTikTok) {
+    onProgress?.(8);
     const tikResolved = await resolveViaTikWM(originalUrl, mediaType, qualityLabel);
     if (tikResolved && tikResolved.url) {
+      onProgress?.(14);
+      const primary = isCapacitorOrNative()
+        ? wrapWithNativeLocalProxy(tikResolved.url)
+        : tikResolved.url;
       return {
-        url: tikResolved.url,
-        fallbackUrls: tikResolved.fallbackUrls,
+        url: primary,
+        fallbackUrls: [tikResolved.url, ...tikResolved.fallbackUrls].filter((u) => u && u !== primary),
         isRealExtracted: true,
         mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
         estimatedBytes: tikResolved.estimatedSize,
@@ -686,7 +712,7 @@ export async function resolveDirectMediaStream(
     }
   }
 
-  // 2b. If preResolvedDirectUrl is already a concrete permanent CDN link (not a generic /api/media/stream wrapper or single-use SaveVideo token), use it with fallbacks
+  // 2b. If preResolvedDirectUrl is already a concrete CDN or local proxy link, use it immediately
   if (
     preResolvedDirectUrl &&
     preResolvedDirectUrl.trim() &&
@@ -697,33 +723,72 @@ export async function resolveDirectMediaStream(
   ) {
     const raw = unwrapRawMediaUrl(preResolvedDirectUrl.trim());
     const wrapped = wrapStreamUrl(
-      preResolvedDirectUrl.trim(),
+      raw,
       'media',
       isAudio,
       originalUrl,
       String(requestedHeight)
     );
-    const streamFallback = getApiUrl(
-      `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${requestedHeight}&audio=${
-        isAudio ? '1' : '0'
-      }`
-    );
-    const useRawFirst = isCorsDirectCdnUrl(raw);
+    const useRawFirst = isCorsDirectCdnUrl(raw) && !getNativeLocalProxyUrl();
     return {
-      url: useRawFirst ? raw : wrapped,
-      fallbackUrls: useRawFirst ? [wrapped, streamFallback] : [raw, streamFallback].filter(Boolean),
+      url: useRawFirst ? raw : wrapped || raw,
+      fallbackUrls: [raw, wrapped].filter((u) => Boolean(u)),
       isRealExtracted: true,
       mimeType: isAudio ? 'audio/mpeg' : 'video/mp4'
     };
   }
 
-  // 3. Direct SaveVideo Engine via smartFetchJson (with automatic 1080p -> 720p -> 360p fallback)
   const ytId = extractYouTubeVideoId(originalUrl);
   const igShortcode = extractInstagramShortcode(originalUrl);
   const isInstagram = Boolean(igShortcode || /(?:instagram\.com|instagr\.am)/i.test(originalUrl));
   const isFacebook = /(?:facebook\.com|fb\.watch|fb\.com)/i.test(originalUrl);
   const tweetId = extractTwitterStatusId(originalUrl);
 
+  // 2c. Fast Direct Instagram Embed Extraction on Android APK (< 1.5s response, zero queue delay)
+  if (isInstagram && igShortcode && isCapacitorOrNative()) {
+    try {
+      onProgress?.(6);
+      const embedUrl = `https://www.instagram.com/p/${igShortcode}/embed/captioned/`;
+      const embedResp = await CapacitorHttp.get({
+        url: embedUrl,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
+          Accept: 'text/html,application/xhtml+xml'
+        },
+        connectTimeout: 8000,
+        readTimeout: 8000
+      });
+      if (embedResp.status >= 200 && embedResp.status < 300 && typeof embedResp.data === 'string') {
+        const html = embedResp.data;
+        const videoMatch =
+          html.match(/"video_url"\s*:\s*"([^"]+)"/i) ||
+          html.match(/\\"video_url\\"\s*:\s*\\"([^\\"]+)\\"/i) ||
+          html.match(/class="EmbeddedMediaVideo"[^>]*src="([^"]+)"/i);
+        if (videoMatch && videoMatch[1]) {
+          const decodedUrl = videoMatch[1]
+            .replace(/\\u0026/g, '&')
+            .replace(/\\\//g, '/')
+            .replace(/&amp;/g, '&');
+          if (decodedUrl.startsWith('http')) {
+            onProgress?.(14);
+            const proxiedIg = wrapWithNativeLocalProxy(decodedUrl);
+            return {
+              url: proxiedIg,
+              fallbackUrls: [decodedUrl],
+              isRealExtracted: true,
+              mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
+              thumbnail: getSafeThumbnail(`/api/media/thumbnail?ig=${igShortcode}`)
+            };
+          }
+        }
+      }
+    } catch {
+      // Fall through to SaveVideo below
+    }
+  }
+
+  // 3. Direct SaveVideo Engine via smartFetchJson (Supports Long YouTube Videos 60+ min, Shorts, Instagram, Facebook)
   if (ytId || isInstagram || isFacebook || tweetId) {
     const normalizedTargetUrl = ytId
       ? `https://www.youtube.com/watch?v=${ytId}`
@@ -742,6 +807,7 @@ export async function resolveDirectMediaStream(
       : [requestedHeight];
 
     for (const tryHeight of heightsToTry) {
+      onProgress?.(4);
       const startEndpoint = ytId
         ? 'https://savevideo.uz/api/yt/start'
         : 'https://savevideo.uz/api/download';
@@ -753,46 +819,68 @@ export async function resolveDirectMediaStream(
         method: 'POST',
         headers: { Referer: 'https://savevideo.uz/' },
         body: startPayload,
-        timeoutMs: 11000
+        timeoutMs: 12000
       });
 
       if (data && data.task_id) {
-        for (let attempt = 0; attempt < 25; attempt++) {
-          await sleep(1800);
+        // Poll up to 120 times (3 minutes) so even 60-minute Long YouTube videos finish muxing cleanly!
+        for (let attempt = 0; attempt < 120; attempt++) {
+          const fallbackSimPrep = Math.min(16, 4 + Math.floor(attempt / 4));
+          onProgress?.(fallbackSimPrep);
+          await sleep(1500);
           const stData = await smartFetchJson(`https://savevideo.uz/api/status/${data.task_id}`, {
             method: 'GET',
             headers: { Referer: 'https://savevideo.uz/' },
-            timeoutMs: 7000
+            timeoutMs: 8000
           });
           if (!stData) continue;
+
+          if (typeof stData.progress === 'number' && stData.progress > 0) {
+            const mappedPrep = Math.min(18, Math.max(fallbackSimPrep, 3 + Math.round(stData.progress * 0.15)));
+            onProgress?.(mappedPrep);
+          }
+
           if (stData.status === 'done') {
             const fileSize = typeof stData.file_size === 'number' ? stData.file_size : 0;
             const minRequired = isAudio ? MIN_VALID_AUDIO_BYTES : MIN_VALID_VIDEO_BYTES;
             if (fileSize > 0 && fileSize < minRequired) {
               break; // Reject corrupt/tiny file and try next resolution
             }
+            onProgress?.(18);
+            const resolvedTaskId = stData.task_id || data.task_id;
             const token = stData.file_token || '';
-            const proxiedUrl = getApiUrl(
-              isAudio
-                ? `/api/media/audio/${data.task_id}?t=${encodeURIComponent(token)}&sourceUrl=${encodeURIComponent(
-                    originalUrl
-                  )}`
-                : `/api/media/file/${data.task_id}?t=${encodeURIComponent(token)}&ext=${
-                    stData.ext || 'mp4'
-                  }&title=${encodeURIComponent(stData.title || 'video')}&sourceUrl=${encodeURIComponent(
-                    originalUrl
-                  )}`
-            );
+            const rawSaveVideoUrl = isAudio
+              ? `https://savevideo.uz/api/audio/${resolvedTaskId}?t=${encodeURIComponent(token)}`
+              : `https://savevideo.uz/api/file/${resolvedTaskId}?t=${encodeURIComponent(token)}`;
+
+            const isNative = isCapacitorOrNative();
+            const primaryStreamUrl = isNative
+              ? wrapWithNativeLocalProxy(rawSaveVideoUrl)
+              : getApiUrl(
+                  isAudio
+                    ? `/api/media/audio/${resolvedTaskId}?t=${encodeURIComponent(token)}&sourceUrl=${encodeURIComponent(
+                        originalUrl
+                      )}`
+                    : `/api/media/file/${resolvedTaskId}?t=${encodeURIComponent(token)}&ext=${
+                        stData.ext || 'mp4'
+                      }&title=${encodeURIComponent(stData.title || 'video')}&sourceUrl=${encodeURIComponent(
+                        originalUrl
+                      )}`
+                );
+
+            const fallbackList = isNative
+              ? [rawSaveVideoUrl].filter((u) => u !== primaryStreamUrl)
+              : [
+                  getApiUrl(
+                    `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${tryHeight}&audio=${
+                      isAudio ? '1' : '0'
+                    }`
+                  )
+                ];
 
             return {
-              url: proxiedUrl,
-              fallbackUrls: [
-                getApiUrl(
-                  `/api/media/stream?url=${encodeURIComponent(originalUrl)}&quality=${tryHeight}&audio=${
-                    isAudio ? '1' : '0'
-                  }`
-                )
-              ],
+              url: primaryStreamUrl,
+              fallbackUrls: fallbackList,
               isRealExtracted: true,
               mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
               estimatedBytes: fileSize > 0 ? fileSize : undefined,
@@ -810,7 +898,7 @@ export async function resolveDirectMediaStream(
     }
   }
 
-  // 4. Client/Native Engine for Twitter / X (FXTwitter & VXTwitter highest bitrate .mp4)
+  // 4. Client/Native Engine for Twitter / X (FXTwitter & VXTwitter resolution-aware .mp4)
   if (tweetId) {
     for (const apiUrl of [
       `https://api.fxtwitter.com/status/${tweetId}`,
@@ -843,12 +931,18 @@ export async function resolveDirectMediaStream(
             variants.push({ url: videoItem.url, bitrate: Number(videoItem.bitrate) || 9999999 });
           }
           variants.sort((a, b) => b.bitrate - a.bitrate);
-          const bestMp4 = variants[0]?.url || videoItem.url;
-          if (bestMp4) {
-            const wrapped = wrapStreamUrl(bestMp4, tweet.text || `x_${tweetId}`, isAudio);
+          const chosenMp4 =
+            requestedHeight <= 360
+              ? variants[variants.length - 1]?.url
+              : requestedHeight <= 480
+              ? variants[Math.min(1, variants.length - 1)]?.url
+              : variants[0]?.url || videoItem.url;
+          if (chosenMp4) {
+            const wrapped = wrapStreamUrl(chosenMp4, tweet.text || `x_${tweetId}`, isAudio);
+            const useProxyFirst = Boolean(getNativeLocalProxyUrl());
             return {
-              url: bestMp4,
-              fallbackUrls: [wrapped],
+              url: useProxyFirst ? wrapped : chosenMp4,
+              fallbackUrls: useProxyFirst ? [chosenMp4] : [wrapped],
               isRealExtracted: true,
               mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
               title: tweet.text,
@@ -988,22 +1082,41 @@ export async function fetchMediaStreamWithCorsFallback(
     throw new Error('لینک مستقیم ویدیو استخراج نشد.');
   }
 
-  const isBackendTarget =
-    targetUrl.startsWith('/api/media/') || targetUrl.includes('/api/media/');
-
   const candidateUrls: string[] = [];
+  const addCandidate = (u?: string) => {
+    if (u && u.trim() && !candidateUrls.includes(u.trim())) {
+      candidateUrls.push(u.trim());
+    }
+  };
 
-  if (isBackendTarget) {
-    candidateUrls.push(getApiUrl(targetUrl));
-    const unwrapped = unwrapRawMediaUrl(targetUrl);
-    if (unwrapped && unwrapped.startsWith('http') && !candidateUrls.includes(unwrapped)) {
-      candidateUrls.push(unwrapped);
+  const unwrapped = unwrapRawMediaUrl(targetUrl);
+  const localProxyBase = getNativeLocalProxyUrl();
+
+  if (localProxyBase) {
+    // In Android APK: route any http/https stream through our Local Native Stream Proxy (127.0.0.1) first!
+    if (targetUrl.startsWith('http://127.0.0.1:')) {
+      addCandidate(targetUrl);
+    }
+    if (unwrapped && unwrapped.startsWith('http') && !unwrapped.includes('/api/media/')) {
+      addCandidate(`${localProxyBase}/stream?url=${encodeURIComponent(unwrapped)}`);
+      if (isCorsDirectCdnUrl(unwrapped)) {
+        addCandidate(unwrapped);
+      }
     }
   } else {
-    candidateUrls.push(targetUrl);
-    const wrapped = wrapStreamUrl(targetUrl, 'media', isAudio);
-    if (wrapped && !candidateUrls.includes(wrapped)) {
-      candidateUrls.push(wrapped);
+    const isBackendTarget =
+      targetUrl.startsWith('/api/media/') || targetUrl.includes('/api/media/');
+    if (isBackendTarget) {
+      addCandidate(getApiUrl(targetUrl));
+      if (unwrapped && unwrapped.startsWith('http')) {
+        addCandidate(unwrapped);
+      }
+    } else {
+      addCandidate(targetUrl);
+      const wrapped = wrapStreamUrl(targetUrl, 'media', isAudio);
+      if (wrapped) {
+        addCandidate(wrapped);
+      }
     }
   }
 
@@ -1018,7 +1131,10 @@ export async function fetchMediaStreamWithCorsFallback(
       const reqHeaders: Record<string, string> = {};
       if (rangeHeader) {
         reqHeaders['Range'] = rangeHeader;
-        if (fetchUrl.includes('/api/media/') && !fetchUrl.includes('range=')) {
+        if (
+          (fetchUrl.includes('/api/media/') || fetchUrl.startsWith('http://127.0.0.1:')) &&
+          !fetchUrl.includes('range=')
+        ) {
           const sep = fetchUrl.includes('?') ? '&' : '?';
           fetchUrl = `${fetchUrl}${sep}range=${encodeURIComponent(rangeHeader)}`;
         }

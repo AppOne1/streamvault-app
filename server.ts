@@ -1873,27 +1873,9 @@ async function startServer() {
           });
         }
 
-        // 1. Resolve via SaveVideo Backend directly inside /api/media/start (up to 20s server-side polling)
-        // so the browser receives status: 'done' + direct_url in a single HTTP request (0 polling QPS!)
-        const svDirect = await resolveViaSaveVideoBackend(
-          canonicalYtUrl,
-          20,
-          false,
-          reqHeight,
-          !!audio
-        );
-        if (svDirect && svDirect.taskId) {
-          return res.json({
-            status: 'done',
-            task_id: svDirect.taskId,
-            file_token: svDirect.fileToken,
-            direct_url: audio ? svDirect.directAudioUrl : svDirect.directVideoUrl,
-            title: svDirect.title,
-            file_size: svDirect.fileSize
-          });
-        }
-
-        // 1b. If video is still muxing after 20s, start/return task_id for client status polling
+        // 1. Start SaveVideo /api/yt/start for the requested height, poll up to 8s for fast videos,
+        // and if a long YouTube video (e.g. 50+ min) is still muxing, return the active task_id immediately
+        // so the client polls /api/media/status/:taskId with live progress without restarting the job!
         for (const candidateYtUrl of [canonicalYtUrl, url]) {
           try {
             const startRes = await fetch(`${SAVEVIDEO_BASE}/api/yt/start`, {
@@ -1911,16 +1893,68 @@ async function startServer() {
             });
 
             if (startRes.ok) {
-              const data = await startRes.json();
-              if (data && (data.task_id || data.status === 'done')) {
-                if (data.task_id) {
-                  taskSourceUrlMap.set(data.task_id, {
-                    url: candidateYtUrl,
-                    height: reqHeight,
-                    audio: !!audio
+              const startData = await startRes.json();
+              const taskId = startData?.task_id;
+              if (taskId) {
+                taskSourceUrlMap.set(taskId, {
+                  url: candidateYtUrl,
+                  height: reqHeight,
+                  audio: !!audio
+                });
+
+                let taskErrored = false;
+                for (let i = 0; i < 8; i++) {
+                  await new Promise((r) => setTimeout(r, 1000));
+                  try {
+                    const stRes = await fetch(`${SAVEVIDEO_BASE}/api/status/${taskId}`, {
+                      headers: {
+                        'Referer': `${SAVEVIDEO_BASE}/`,
+                        'User-Agent': DESKTOP_CHROME_UA
+                      }
+                    });
+                    if (!stRes.ok) continue;
+                    const stData = await stRes.json();
+                    if (stData.status === 'done') {
+                      const fileToken = stData.file_token || '';
+                      const directUrl = `/api/media/file/${encodeURIComponent(taskId)}${
+                        fileToken ? `?token=${encodeURIComponent(fileToken)}` : ''
+                      }`;
+                      const resolvedObj: SaveVideoResolved = {
+                        taskId,
+                        fileToken,
+                        title: stData.title || 'YouTube Video',
+                        fileSize: Number(stData.file_size || stData.filesize || 0),
+                        directVideoUrl: directUrl,
+                        directAudioUrl: `${directUrl}${directUrl.includes('?') ? '&' : '?'}audio=1`,
+                        createdAt: Date.now()
+                      };
+                      saveVideoResultCache.set(exactKey, resolvedObj);
+                      return res.json({
+                        status: 'done',
+                        task_id: taskId,
+                        file_token: fileToken,
+                        direct_url: audio ? resolvedObj.directAudioUrl : resolvedObj.directVideoUrl,
+                        title: resolvedObj.title,
+                        file_size: resolvedObj.fileSize
+                      });
+                    }
+                    if (stData.status === 'error') {
+                      taskErrored = true;
+                      break;
+                    }
+                  } catch {
+                    // continue polling
+                  }
+                }
+
+                if (!taskErrored) {
+                  return res.json({
+                    status: 'processing',
+                    task_id: taskId
                   });
                 }
-                return res.json(data);
+              } else if (startData?.status === 'done') {
+                return res.json(startData);
               }
             }
           } catch (svErr) {
