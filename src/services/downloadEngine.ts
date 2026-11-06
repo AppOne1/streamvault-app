@@ -145,7 +145,11 @@ function getCanonicalExtension(format: FormatOption): 'mp4' | 'mp3' | 'm4a' {
   return 'mp4';
 }
 
-const BACKEND_SLICE_BYTES = 1572864; // 1.5 MB per slice (stays well under Cloud Run 32MB limit and BW burst quota)
+const BACKEND_SLICE_BYTES = 2 * 1024 * 1024; // 2 MB per slice (bypasses Cloud Run 32MB response cap & proxy buffering)
+
+// 1-second silent WAV data URI to prevent mobile OS / browser background tab suspension during active downloads
+const SILENT_WAV_DATA_URI =
+  'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
 
 interface PartialDownloadState {
   chunks: Uint8Array[];
@@ -168,14 +172,21 @@ export class DownloadEngine {
   private activeWakeLock: any = null;
   private swKeepAliveTimer: any = null;
   private audioKeepAliveCtx: any = null;
+  private silentAudioElement: HTMLAudioElement | null = null;
+  private webLockRelease: (() => void) | null = null;
 
   constructor() {
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'hidden') {
-          if (this.activeTaskLocks.size > 0) {
+          if (this.activeTaskLocks.size > 0 || this.waitingQueue.length > 0) {
             this.pingServiceWorkerKeepAlive();
             this.startSilentAudioKeepAlive();
+            try {
+              (window as any).OneDownloadNative?.setBackgroundDownloadActive?.(true);
+            } catch {
+              // ignore
+            }
           }
         } else if (document.visibilityState === 'visible') {
           if (this.activeTaskLocks.size > 0) {
@@ -233,6 +244,20 @@ export class DownloadEngine {
   private startSilentAudioKeepAlive(): void {
     if (typeof window === 'undefined') return;
     try {
+      if (!this.silentAudioElement && typeof Audio !== 'undefined') {
+        const audioEl = new Audio(SILENT_WAV_DATA_URI);
+        audioEl.loop = true;
+        audioEl.volume = 0.01;
+        (audioEl as any).playsInline = true;
+        this.silentAudioElement = audioEl;
+      }
+      if (this.silentAudioElement && this.silentAudioElement.paused) {
+        this.silentAudioElement.play().catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
+    try {
       const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return;
       if (!this.audioKeepAliveCtx) {
@@ -255,6 +280,13 @@ export class DownloadEngine {
 
   private stopSilentAudioKeepAlive(): void {
     try {
+      if (this.silentAudioElement && this.activeTaskLocks.size === 0) {
+        this.silentAudioElement.pause();
+      }
+    } catch {
+      // ignore
+    }
+    try {
       if (this.audioKeepAliveCtx && this.activeTaskLocks.size === 0) {
         this.audioKeepAliveCtx.close().catch(() => {});
         this.audioKeepAliveCtx = null;
@@ -265,13 +297,36 @@ export class DownloadEngine {
   }
 
   private async acquireKeepAwake(): Promise<void> {
-    if (typeof navigator === 'undefined') return;
-    try {
-      if ('wakeLock' in navigator && !this.activeWakeLock) {
-        this.activeWakeLock = await (navigator as any).wakeLock.request('screen');
+    if (typeof window !== 'undefined') {
+      try {
+        (window as any).OneDownloadNative?.setBackgroundDownloadActive?.(true);
+      } catch {
+        // ignore
       }
-    } catch {
-      // Ignore if WakeLock is not permitted
+    }
+    if (typeof navigator !== 'undefined') {
+      try {
+        if ('wakeLock' in navigator && !this.activeWakeLock) {
+          this.activeWakeLock = await (navigator as any).wakeLock.request('screen');
+        }
+      } catch {
+        // Ignore if WakeLock is not permitted
+      }
+      try {
+        if ('locks' in navigator && (navigator as any).locks?.request && !this.webLockRelease) {
+          (navigator as any).locks
+            .request(
+              'onedownload-active-bg-transfer',
+              () =>
+                new Promise<void>((resolve) => {
+                  this.webLockRelease = resolve;
+                })
+            )
+            .catch(() => {});
+        }
+      } catch {
+        // ignore
+      }
     }
     this.startSilentAudioKeepAlive();
     this.pingServiceWorkerKeepAlive();
@@ -285,13 +340,31 @@ export class DownloadEngine {
   }
 
   private async releaseKeepAwake(): Promise<void> {
-    if (this.activeTaskLocks.size === 0 && this.swKeepAliveTimer) {
+    if (this.activeTaskLocks.size > 0 || this.waitingQueue.length > 0) {
+      return;
+    }
+    if (this.swKeepAliveTimer) {
       clearInterval(this.swKeepAliveTimer);
       this.swKeepAliveTimer = null;
     }
+    if (this.webLockRelease) {
+      try {
+        this.webLockRelease();
+      } catch {
+        // ignore
+      }
+      this.webLockRelease = null;
+    }
+    if (typeof window !== 'undefined') {
+      try {
+        (window as any).OneDownloadNative?.setBackgroundDownloadActive?.(false);
+      } catch {
+        // ignore
+      }
+    }
     this.stopSilentAudioKeepAlive();
     try {
-      if (this.activeWakeLock && this.activeTaskLocks.size === 0) {
+      if (this.activeWakeLock) {
         await this.activeWakeLock.release();
         this.activeWakeLock = null;
       }
@@ -302,10 +375,11 @@ export class DownloadEngine {
 
   /**
    * Avoids mobile browser background timer throttling when the user switches apps:
-   * Only waits `ms` when the document is visible in the foreground.
+   * Uses a short delay when hidden so background downloads never pause or stall.
    */
   private async paceDelay(ms: number): Promise<void> {
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      await new Promise((r) => setTimeout(r, Math.min(ms, 200)));
       return;
     }
     await new Promise((r) => setTimeout(r, ms));
@@ -392,7 +466,7 @@ export class DownloadEngine {
     task: DownloadTask,
     targetUrl: string,
     signal: AbortSignal,
-    baseProgressPercent: number = 0
+    _baseProgressPercent: number = 0
   ): Promise<Blob> {
     const isAudio = task.format.type === 'audio';
     const canonicalMime = getCanonicalMimeType(task.format);
@@ -401,28 +475,28 @@ export class DownloadEngine {
       targetUrl.startsWith('/api/media/') || targetUrl.includes('/api/media/');
 
     const savedPartial = this.partialTaskState.get(task.id);
-    const canReusePartial =
+    const canReusePartial = Boolean(
       savedPartial &&
-      savedPartial.receivedBytes > 0 &&
-      savedPartial.chunks.length > 0 &&
-      (!savedPartial.workingUrl || savedPartial.workingUrl === targetUrl);
+        savedPartial.receivedBytes > 0 &&
+        savedPartial.chunks.length > 0
+    );
 
-    const chunks: Uint8Array[] = canReusePartial ? [...savedPartial.chunks] : [];
-    let receivedBytes = canReusePartial ? savedPartial.receivedBytes : 0;
-    let knownTotalBytes = canReusePartial ? savedPartial.knownTotalBytes : 0;
+    const chunks: Uint8Array[] = canReusePartial && savedPartial ? [...savedPartial.chunks] : [];
+    let receivedBytes = canReusePartial && savedPartial ? savedPartial.receivedBytes : 0;
+    let knownTotalBytes = canReusePartial && savedPartial ? savedPartial.knownTotalBytes : 0;
     const initialBytesAtSessionStart = receivedBytes;
     const startTime = Date.now();
     let lastUiNotify = 0;
     let sliceRetries = 0;
 
-    // If resuming a task that already downloaded >= 95% of its known/estimated bytes, check if already complete
+    // If resuming a task that already downloaded >= 98% of its known bytes, check if already complete
     if (
       canReusePartial &&
       receivedBytes >= minRequiredBytes &&
       knownTotalBytes > 0 &&
       receivedBytes >= knownTotalBytes
     ) {
-      const existingBlob = new Blob(chunks, { type: canonicalMime });
+      const existingBlob = new Blob(chunks as unknown as BlobPart[], { type: canonicalMime });
       if (await isBlobGenuineMedia(existingBlob, isAudio)) {
         return existingBlob;
       }
@@ -437,9 +511,19 @@ export class DownloadEngine {
         break;
       }
 
-      // Continuous full-speed GET when starting from 0 (Simple CORS request in APK with zero preflight overhead);
-      // open-ended Range `bytes=${receivedBytes}-` only when resuming from a pause or mid-stream drop.
-      const rangeHeader = receivedBytes > 0 ? `bytes=${receivedBytes}-` : undefined;
+      // For backend routes (/api/media/...), ALWAYS use bounded 2 MB Range slices from byte 0
+      // so Cloud Run's reverse proxy never buffers or cuts off large (>32 MB) videos!
+      // For direct external CORS CDNs / Local Native Proxy, use continuous GET from 0 or open Range on resume.
+      let rangeHeader: string | undefined;
+      if (isBackendRoute) {
+        const sliceEnd =
+          knownTotalBytes > 0
+            ? Math.min(knownTotalBytes - 1, receivedBytes + BACKEND_SLICE_BYTES - 1)
+            : receivedBytes + BACKEND_SLICE_BYTES - 1;
+        rangeHeader = `bytes=${receivedBytes}-${sliceEnd}`;
+      } else {
+        rangeHeader = receivedBytes > 0 ? `bytes=${receivedBytes}-` : undefined;
+      }
 
       let res: Response;
       try {
@@ -451,19 +535,19 @@ export class DownloadEngine {
         );
       } catch (err: any) {
         if (signal.aborted || err?.name === 'AbortError') throw err;
-        // If we already downloaded a valid media file (e.g. 2.8MB when estimate was 3.3MB, i.e. 98%) and a resume Range request hits 416 EOF, finalize immediately!
+        // If we already downloaded a valid media file (e.g. 95%+ of estimated size) and a resume Range request hits 416 EOF, finalize immediately!
         const estOrKnown = knownTotalBytes || task.totalBytes || 0;
         if (
           receivedBytes >= minRequiredBytes &&
-          (estOrKnown === 0 || receivedBytes >= estOrKnown * 0.8)
+          (estOrKnown === 0 || receivedBytes >= estOrKnown * 0.85)
         ) {
           break;
         }
-        const maxRetries = isBackendRoute ? 4 : receivedBytes > 0 ? 3 : 1;
+        const maxRetries = isBackendRoute ? 6 : receivedBytes > 0 ? 4 : 2;
         if (sliceRetries < maxRetries) {
           sliceRetries++;
-          const cooldownMs = Math.min(3000, 900 * sliceRetries);
-          await new Promise((r) => setTimeout(r, cooldownMs));
+          const cooldownMs = Math.min(2500, 700 * sliceRetries);
+          await this.paceDelay(cooldownMs);
           continue;
         }
         throw err;
@@ -493,27 +577,34 @@ export class DownloadEngine {
           task.totalBytes = contentLengthHeader;
           task.totalSizeFormatted = formatBytes(contentLengthHeader);
         }
-        // If server returned 200 OK (ignored Range) after we already had partial chunks, reset chunks so we don't duplicate
-        if (receivedBytes > 0) {
-          chunks.length = 0;
-          receivedBytes = 0;
-        }
       }
 
       if (!res.body) {
         const arrayBuf = await res.arrayBuffer();
         const u8 = new Uint8Array(arrayBuf);
         if (u8.byteLength > 0) {
-          chunks.push(u8);
-          receivedBytes += u8.byteLength;
+          if (!isPartialRange && receivedBytes > 0) {
+            if (u8.byteLength > receivedBytes) {
+              const sliced = u8.subarray(receivedBytes);
+              chunks.push(sliced);
+              receivedBytes += sliced.byteLength;
+            }
+          } else {
+            chunks.push(u8);
+            receivedBytes += u8.byteLength;
+          }
           task.downloadedBytes = receivedBytes;
           task.downloadedSizeFormatted = formatBytes(receivedBytes);
+          task.progressPercent =
+            task.totalBytes > 0
+              ? Math.min(99, Math.max(1, Math.round((receivedBytes / task.totalBytes) * 100)))
+              : 50;
           this.partialTaskState.set(task.id, {
             chunks,
             receivedBytes,
             knownTotalBytes,
             workingUrl: targetUrl,
-            baseProgressPercent
+            baseProgressPercent: 0
           });
           this.notify(task);
         }
@@ -523,6 +614,9 @@ export class DownloadEngine {
       const reader = res.body.getReader();
       let passBytesRead = 0;
       let streamInterrupted = false;
+      // If upstream returned 200 OK (ignored Range) while we already have `receivedBytes > 0`,
+      // fast-forward through the first `receivedBytes` bytes instead of resetting to 0!
+      let streamByteOffset = isPartialRange ? receivedBytes : 0;
 
       try {
         while (true) {
@@ -535,9 +629,30 @@ export class DownloadEngine {
           if (done) break;
 
           if (value && value.byteLength > 0) {
-            chunks.push(value);
-            receivedBytes += value.byteLength;
-            passBytesRead += value.byteLength;
+            let chunkToAppend: Uint8Array | null = value;
+
+            if (streamByteOffset < receivedBytes) {
+              const nextOffset = streamByteOffset + value.byteLength;
+              if (nextOffset <= receivedBytes) {
+                streamByteOffset = nextOffset;
+                passBytesRead += value.byteLength;
+                continue;
+              } else {
+                const skipBytes = receivedBytes - streamByteOffset;
+                chunkToAppend = value.subarray(skipBytes);
+                streamByteOffset = nextOffset;
+              }
+            } else {
+              streamByteOffset += value.byteLength;
+            }
+
+            if (!chunkToAppend || chunkToAppend.byteLength === 0) {
+              continue;
+            }
+
+            chunks.push(chunkToAppend);
+            receivedBytes += chunkToAppend.byteLength;
+            passBytesRead += chunkToAppend.byteLength;
             task.downloadedBytes = receivedBytes;
             task.downloadedSizeFormatted = formatBytes(receivedBytes);
 
@@ -546,7 +661,7 @@ export class DownloadEngine {
               receivedBytes,
               knownTotalBytes,
               workingUrl: targetUrl,
-              baseProgressPercent
+              baseProgressPercent: 0
             });
 
             if (receivedBytes > task.totalBytes) {
@@ -556,7 +671,10 @@ export class DownloadEngine {
 
             const now = Date.now();
             const elapsedSec = Math.max(0.25, (now - startTime) / 1000);
-            const sessionBytes = Math.max(value.byteLength, receivedBytes - initialBytesAtSessionStart);
+            const sessionBytes = Math.max(
+              chunkToAppend.byteLength,
+              receivedBytes - initialBytesAtSessionStart
+            );
             const speedBps = Math.round(sessionBytes / elapsedSec);
             task.speedBytesPerSec = speedBps;
             task.speedFormatted = `${formatBytes(speedBps)}/s`;
@@ -565,12 +683,11 @@ export class DownloadEngine {
             const remainingBytes = Math.max(0, task.totalBytes - receivedBytes);
             task.etaSeconds = speedBps > 0 ? Math.max(0, Math.round(remainingBytes / speedBps)) : 0;
 
-            const streamFraction =
-              task.totalBytes > 0 ? Math.min(0.99, receivedBytes / task.totalBytes) : 0.5;
-            const scaledProgress = Math.round(
-              baseProgressPercent + streamFraction * (99 - baseProgressPercent)
-            );
-            task.progressPercent = Math.min(99, Math.max(task.progressPercent, scaledProgress));
+            const exactPercent =
+              task.totalBytes > 0
+                ? Math.min(99, Math.max(1, Math.round((receivedBytes / task.totalBytes) * 100)))
+                : 50;
+            task.progressPercent = exactPercent;
 
             if (now - lastUiNotify >= 120) {
               lastUiNotify = now;
@@ -588,7 +705,7 @@ export class DownloadEngine {
       }
 
       if (streamInterrupted) {
-        // If stream closed after delivering >= 95% of known bytes (or >= minRequiredBytes when total was only estimated), accept as complete
+        // If stream closed after delivering >= 96% of known bytes (or >= minRequiredBytes when total was only estimated), accept as complete
         if (
           receivedBytes >= minRequiredBytes &&
           ((knownTotalBytes > 0 && receivedBytes >= knownTotalBytes * 0.96) ||
@@ -596,25 +713,27 @@ export class DownloadEngine {
         ) {
           break;
         }
-        const maxReadRetries = isBackendRoute ? 4 : 3;
+        const maxReadRetries = isBackendRoute ? 6 : 4;
         if (sliceRetries < maxReadRetries) {
           sliceRetries++;
-          const cooldownMs = Math.min(3000, 1000 * sliceRetries);
-          await new Promise((r) => setTimeout(r, cooldownMs));
+          const cooldownMs = Math.min(2500, 700 * sliceRetries);
+          await this.paceDelay(cooldownMs);
           continue;
         }
         throw new Error('وقفه در دریافت استریم — لطفاً تلاش مجدد کنید');
       }
 
-      // Stream finished reading cleanly (`done === true`):
-      // Only loop again if we have an exact Content-Length/Content-Range (`knownTotalBytes > 0`) AND received < 95% of it.
-      if (knownTotalBytes > 0 && receivedBytes > 0 && receivedBytes < knownTotalBytes * 0.95) {
-        if (passBytesRead === 0) {
-          break;
+      // Slice or stream finished reading cleanly (`done === true`):
+      // If we are fetching sequential 2MB Range slices (or partial stream) and still have remaining bytes to fetch,
+      // continue immediately to the next slice without counting it as an error retry!
+      if (knownTotalBytes > 0 && receivedBytes > 0 && receivedBytes < knownTotalBytes) {
+        if (passBytesRead > 0) {
+          sliceRetries = 0;
+          continue;
         }
-        if (sliceRetries < 3) {
+        if (sliceRetries < 4) {
           sliceRetries++;
-          await new Promise((r) => setTimeout(r, 800 * sliceRetries));
+          await this.paceDelay(600 * sliceRetries);
           continue;
         }
         if (receivedBytes < minRequiredBytes) {
@@ -625,7 +744,7 @@ export class DownloadEngine {
       break;
     }
 
-    const mediaBlob = new Blob(chunks, { type: canonicalMime });
+    const mediaBlob = new Blob(chunks as unknown as BlobPart[], { type: canonicalMime });
     if (!(await isBlobGenuineMedia(mediaBlob, isAudio))) {
       throw new Error(`Invalid or undersized media payload (${mediaBlob.size} bytes)`);
     }
@@ -646,9 +765,8 @@ export class DownloadEngine {
    * 2. Preserves partial downloaded chunks when paused, resuming from the exact byte offset (`Range: bytes=receivedBytes-...`).
    * 3. Resolves the direct media stream via Local Native Stream Proxy (on APK) or backend `/api/media/start`.
    * 4. Downloads the real binary stream into a verified `Blob` object (`video/mp4` or `audio/mpeg`)
-   *    while showing real-time downloaded MB and MB/s speed.
+   *    while showing real-time downloaded MB and MB/s speed that 100% match progressPercent.
    * 5. Stores the `Blob` in internal app storage (IndexedDB + CacheStorage + memory) so the built-in player works 100% offline.
-   * 6. Triggers `saveBlobToDevice(mediaBlob, task.fileName)` strictly ONCE with NO `target="_blank"` and NO new tab.
    */
   public async startTask(task: DownloadTask): Promise<void> {
     if (this.activeTaskLocks.has(task.id)) return;
@@ -689,7 +807,27 @@ export class DownloadEngine {
       task.format.qualityLabel.match(/(\d{3,4})p/);
     const reqQuality = heightMatch ? heightMatch[1] : '720';
 
-    const savedPartial = this.partialTaskState.get(task.id);
+    // Restore partial chunks from CacheStorage if page was reloaded while task was paused/interrupted
+    let savedPartial = this.partialTaskState.get(task.id);
+    if (!savedPartial && task.downloadedBytes > 0) {
+      try {
+        const persistedPartialBlob = await getBlobFromCacheStorage(`partial_${task.id}`, isAudio);
+        if (persistedPartialBlob && persistedPartialBlob.size > 0) {
+          const buf = await persistedPartialBlob.arrayBuffer();
+          savedPartial = {
+            chunks: [new Uint8Array(buf)],
+            receivedBytes: persistedPartialBlob.size,
+            knownTotalBytes: task.totalBytes || 0,
+            workingUrl: task.directUrl || '',
+            baseProgressPercent: 0
+          };
+          this.partialTaskState.set(task.id, savedPartial);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     const isResumingPartial = Boolean(
       savedPartial && savedPartial.receivedBytes > 0 && savedPartial.chunks.length > 0
     );
@@ -703,23 +841,18 @@ export class DownloadEngine {
         task.totalBytes = savedPartial.knownTotalBytes;
         task.totalSizeFormatted = formatBytes(savedPartial.knownTotalBytes);
       }
-      task.progressPercent = Math.max(task.progressPercent, 5);
+      task.progressPercent =
+        task.totalBytes > 0
+          ? Math.min(99, Math.max(1, Math.round((savedPartial.receivedBytes / task.totalBytes) * 100)))
+          : task.progressPercent;
       task.speedFormatted = 'در حال ادامه دانلود...';
     } else {
       task.downloadedBytes = 0;
       task.downloadedSizeFormatted = '0 B';
-      task.progressPercent = 2;
+      task.progressPercent = 0;
       task.speedFormatted = 'در حال آماده‌سازی استریم...';
     }
     this.notify(task);
-
-    const prepTimer = setInterval(() => {
-      if (task.status === 'downloading' && task.downloadedBytes === 0 && task.progressPercent < 15) {
-        task.progressPercent = Math.min(15, task.progressPercent + 1);
-        task.speedFormatted = 'در حال آماده‌سازی سرور...';
-        this.notify(task);
-      }
-    }, 1500);
 
     try {
       const candidateUrls: string[] = [];
@@ -744,19 +877,27 @@ export class DownloadEngine {
           addCandidate(aparatStream.rawUrl);
           addCandidate(aparatStream.url);
         }
-      } else if (!isResumingPartial || !savedPartial?.workingUrl) {
+      } else if (
+        !(
+          isResumingPartial &&
+          savedPartial?.workingUrl &&
+          (savedPartial.workingUrl.includes('/api/media/file/') ||
+            savedPartial.workingUrl.includes('/api/media/audio/') ||
+            savedPartial.workingUrl.startsWith('http://127.0.0.1:'))
+        )
+      ) {
         const resolved = await resolveDirectMediaStream(
           task.originalUrl,
           task.format.type,
           task.format.qualityLabel,
           task.directUrl,
-          (prepPercent) => {
+          (prepPct?: number) => {
             if (task.status === 'downloading' && task.downloadedBytes === 0) {
-              const cappedPrep = Math.min(18, Math.max(2, prepPercent));
-              if (cappedPrep > task.progressPercent) {
-                task.progressPercent = cappedPrep;
-              }
-              task.speedFormatted = 'در حال آماده‌سازی استریم...';
+              task.progressPercent = 0;
+              task.speedFormatted =
+                typeof prepPct === 'number' && prepPct > 0
+                  ? `در حال آماده‌سازی در سرور (${prepPct}٪)...`
+                  : 'در حال آماده‌سازی استریم...';
               this.notify(task);
             }
           }
@@ -769,15 +910,14 @@ export class DownloadEngine {
           if (
             resolved.estimatedBytes &&
             resolved.estimatedBytes > 120000 &&
-            (!task.format.estimatedSizeBytes || task.format.estimatedSizeBytes <= 0)
+            (!task.format.estimatedSizeBytes || task.format.estimatedSizeBytes <= 0) &&
+            !isResumingPartial
           ) {
             task.totalBytes = resolved.estimatedBytes;
             task.totalSizeFormatted = formatBytes(resolved.estimatedBytes);
           }
         }
       }
-
-      clearInterval(prepTimer);
 
       // 2. Include universal backend stream fallback only on Web (never on standalone APK where ais-pre is 404)
       if (!isCapacitorOrNative()) {
@@ -790,10 +930,6 @@ export class DownloadEngine {
         );
       }
 
-      const basePrepProgress =
-        isResumingPartial && savedPartial
-          ? savedPartial.baseProgressPercent
-          : task.progressPercent;
       let downloadedBlob: Blob | null = null;
       let workingStreamUrl = candidateUrls[0] || '';
 
@@ -805,14 +941,14 @@ export class DownloadEngine {
           throw new DOMException('Aborted', 'AbortError');
         }
         if (i > 0) {
-          await new Promise((r) => setTimeout(r, 1200));
+          await this.paceDelay(800);
         }
         try {
           downloadedBlob = await this.streamResponseToBlob(
             task,
             candidateUrl,
             controller.signal,
-            basePrepProgress
+            0
           );
           if (downloadedBlob) {
             workingStreamUrl = candidateUrl;
@@ -825,7 +961,7 @@ export class DownloadEngine {
 
       // 4. If primary candidates failed, query extra fallback resolvers (Piped / Invidious / Cobalt)
       if (!downloadedBlob) {
-        await new Promise((r) => setTimeout(r, 1200));
+        await this.paceDelay(800);
         const extraFallbacks = await resolveFallbackMediaStreams(
           task.originalUrl,
           task.format.type,
@@ -841,7 +977,7 @@ export class DownloadEngine {
               task,
               extraUrl,
               controller.signal,
-              basePrepProgress
+              0
             );
             if (downloadedBlob) {
               workingStreamUrl = extraUrl;
@@ -857,15 +993,43 @@ export class DownloadEngine {
         throw new Error('خطا در دریافت فایل باینری مدیا — لطفاً اتصال اینترنت یا فیلترشکن خود را بررسی کرده و مجدداً تلاش کنید');
       }
 
-      // 5. Persist binary Blob in internal app storage (Memory + IndexedDB + CacheStorage) for 100% offline playback
+      // 5. Persist binary Blob in internal app storage (IndexedDB) for 100% offline playback
       this.partialTaskState.delete(task.id);
       const finalBytes = downloadedBlob.size;
-      const offlineBlobUrl =
-        typeof window !== 'undefined' ? window.URL.createObjectURL(downloadedBlob) : '';
 
-      this.blobMemoryCache.set(task.id, downloadedBlob);
-      task.mediaBlob = downloadedBlob;
-      task.blobUrl = offlineBlobUrl;
+      // Save to IndexedDB first so offline storage is 100% guaranteed
+      await saveOfflineMedia({
+        id: task.id,
+        mediaBlob: downloadedBlob,
+        mimeType: canonicalMime,
+        title: task.title,
+        thumbnail: task.thumbnail,
+        duration: task.durationSeconds || 60,
+        fileSize: finalBytes,
+        fileName: task.fileName,
+        format: task.format.format,
+        quality: task.format.qualityLabel,
+        downloadedAt: Date.now(),
+        platform: task.platform,
+        sourceUrl: task.originalUrl,
+        directUrl: workingStreamUrl || task.directUrl
+      });
+
+      // Only duplicate small media (< 20 MB) in CacheStorage/RAM; large videos stay in IndexedDB to prevent Android WebView OOM
+      if (finalBytes <= 20 * 1024 * 1024) {
+        if (this.blobMemoryCache.size >= 2) {
+          const oldestKey = this.blobMemoryCache.keys().next().value;
+          if (oldestKey) this.blobMemoryCache.delete(oldestKey);
+        }
+        this.blobMemoryCache.set(task.id, downloadedBlob);
+        await saveBlobToCacheStorage(task.id, downloadedBlob, canonicalMime);
+      } else {
+        this.blobMemoryCache.clear();
+      }
+
+      // Do not pin giant Blobs on the React `task` state object (BuiltInMediaPlayer & saveFileToDisk load from IndexedDB on-demand)
+      task.mediaBlob = undefined;
+      task.blobUrl = undefined;
       task.directUrl = workingStreamUrl || task.directUrl;
       task.totalBytes = finalBytes;
       task.downloadedBytes = finalBytes;
@@ -879,30 +1043,25 @@ export class DownloadEngine {
       task.status = 'completed';
       task.errorMessage = undefined;
 
-      await saveOfflineMedia({
-        id: task.id,
-        mediaBlob: downloadedBlob,
-        mimeType: canonicalMime,
-        title: task.title,
-        thumbnail: task.thumbnail,
-        duration: task.durationSeconds || 60,
-        fileSize: finalBytes,
-        fileName: task.fileName,
-        format: task.format.format,
-        quality: task.format.qualityLabel,
-        downloadedAt: task.completedAt,
-        platform: task.platform,
-        sourceUrl: task.originalUrl,
-        directUrl: task.directUrl
-      });
-
-      await saveBlobToCacheStorage(task.id, downloadedBlob, canonicalMime);
-
       this.notify(task);
     } catch (err: any) {
-      clearInterval(prepTimer);
       if (controller.signal.aborted || err?.name === 'AbortError') {
         return;
+      }
+      // Preserve partial downloaded bytes on error so user can resume from the stopped point!
+      const latestPartial = this.partialTaskState.get(task.id);
+      if (latestPartial && latestPartial.receivedBytes > 0) {
+        task.downloadedBytes = latestPartial.receivedBytes;
+        task.downloadedSizeFormatted = formatBytes(latestPartial.receivedBytes);
+        task.progressPercent =
+          task.totalBytes > 0
+            ? Math.min(99, Math.max(1, Math.round((latestPartial.receivedBytes / task.totalBytes) * 100)))
+            : task.progressPercent;
+        saveBlobToCacheStorage(
+          `partial_${task.id}`,
+          new Blob(latestPartial.chunks as unknown as BlobPart[], { type: canonicalMime }),
+          canonicalMime
+        ).catch(() => {});
       }
       task.status = 'error';
       task.speedBytesPerSec = 0;
@@ -910,7 +1069,6 @@ export class DownloadEngine {
       task.errorMessage = err?.message || 'Download failed';
       this.notify(task);
     } finally {
-      clearInterval(prepTimer);
       this.activeControllers.delete(task.id);
       this.activeTaskLocks.delete(task.id);
       this.activeTaskMap.delete(task.id);
@@ -934,6 +1092,23 @@ export class DownloadEngine {
       this.activeControllers.delete(task.id);
     }
     this.activeTaskLocks.delete(task.id);
+
+    const savedPartial = this.partialTaskState.get(task.id);
+    if (savedPartial && savedPartial.receivedBytes > 0) {
+      task.downloadedBytes = savedPartial.receivedBytes;
+      task.downloadedSizeFormatted = formatBytes(savedPartial.receivedBytes);
+      task.progressPercent =
+        task.totalBytes > 0
+          ? Math.min(99, Math.max(1, Math.round((savedPartial.receivedBytes / task.totalBytes) * 100)))
+          : task.progressPercent;
+      const canonicalMime = getCanonicalMimeType(task.format);
+      saveBlobToCacheStorage(
+        `partial_${task.id}`,
+        new Blob(savedPartial.chunks as unknown as BlobPart[], { type: canonicalMime }),
+        canonicalMime
+      ).catch(() => {});
+    }
+
     task.status = 'paused';
     task.speedBytesPerSec = 0;
     task.speedFormatted =
@@ -954,8 +1129,7 @@ export class DownloadEngine {
   public resumeTask(task: DownloadTask): void {
     if (task.status === 'paused' || task.status === 'error' || task.status === 'queued') {
       task.scheduledTime = undefined;
-      // Preserve partialTaskState and working directUrl if we already downloaded partial bytes!
-      const hasPartial = this.partialTaskState.has(task.id);
+      const hasPartial = this.partialTaskState.has(task.id) || task.downloadedBytes > 0;
       if (!hasPartial) {
         task.directUrl = undefined;
         if (task.format) {
@@ -977,13 +1151,13 @@ export class DownloadEngine {
     }
     this.activeTaskLocks.delete(task.id);
     this.savedTaskIds.delete(task.id);
-    const hasPartial = this.partialTaskState.has(task.id);
+    const hasPartial = this.partialTaskState.has(task.id) || task.downloadedBytes > 0;
     if (!hasPartial) {
       task.directUrl = undefined;
       if (task.format) {
         task.format.directUrl = undefined;
       }
-      task.progressPercent = 2;
+      task.progressPercent = 0;
     }
     task.isSaved = false;
     task.status = 'queued';
@@ -1000,6 +1174,9 @@ export class DownloadEngine {
     this.activeTaskLocks.delete(task.id);
     this.partialTaskState.delete(task.id);
     this.blobMemoryCache.delete(task.id);
+    task.downloadedBytes = 0;
+    task.downloadedSizeFormatted = '0 B';
+    task.progressPercent = 0;
     task.status = 'cancelled';
     task.speedBytesPerSec = 0;
     task.speedFormatted = '0 KB/s';
@@ -1018,15 +1195,12 @@ export class DownloadEngine {
     }
 
     if (task.mediaBlob && (await isBlobGenuineMedia(task.mediaBlob, isAudio))) {
-      this.blobMemoryCache.set(task.id, task.mediaBlob);
       return task.mediaBlob;
     }
 
     try {
       const record = await getOfflineMedia(task.id);
       if (record && record.mediaBlob && (await isBlobGenuineMedia(record.mediaBlob, isAudio))) {
-        this.blobMemoryCache.set(task.id, record.mediaBlob);
-        task.mediaBlob = record.mediaBlob;
         return record.mediaBlob;
       }
     } catch {
@@ -1036,8 +1210,6 @@ export class DownloadEngine {
     try {
       const idbBlob = await getMediaBlobFromIDB(task.id);
       if (idbBlob && (await isBlobGenuineMedia(idbBlob, isAudio))) {
-        this.blobMemoryCache.set(task.id, idbBlob);
-        task.mediaBlob = idbBlob;
         return idbBlob;
       }
     } catch {
@@ -1046,8 +1218,6 @@ export class DownloadEngine {
 
     const cachedBlob = await getBlobFromCacheStorage(task.id, isAudio);
     if (cachedBlob && (await isBlobGenuineMedia(cachedBlob, isAudio))) {
-      this.blobMemoryCache.set(task.id, cachedBlob);
-      task.mediaBlob = cachedBlob;
       return cachedBlob;
     }
 
@@ -1056,7 +1226,7 @@ export class DownloadEngine {
 
   /**
    * Manual "Save to Device" button action from user on completed download cards or player.
-   * Uses the cached offline Blob (or silent same-origin attachment stream) with zero new tabs.
+   * Uses the cached offline Blob with 768 KB chunked streaming (zero OOM, zero external browser tabs).
    */
   public async saveFileToDisk(
     task: DownloadTask,
@@ -1076,26 +1246,7 @@ export class DownloadEngine {
       }
     }
 
-    const isAudio = task.format.type === 'audio';
-    const heightMatch =
-      task.format.resolution?.match(/x(\d+)/) ||
-      task.format.qualityLabel.match(/(\d{3,4})p/);
-    const reqQuality = heightMatch ? heightMatch[1] : '720';
-    const streamUrl =
-      (task.directUrl && task.directUrl.includes('/api/media/'))
-        ? task.directUrl
-        : getApiUrl(
-            `/api/media/stream?url=${encodeURIComponent(
-              task.originalUrl
-            )}&quality=${reqQuality}&audio=${isAudio ? '1' : '0'}`
-          );
-
-    triggerSilentAttachmentDownload(streamUrl, task.fileName);
-    task.isSaved = true;
-    this.savedTaskIds.add(task.id);
-    this.notifyFileSaved(task);
-    this.notify(task);
-    return true;
+    return false;
   }
 }
 

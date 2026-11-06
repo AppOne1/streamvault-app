@@ -235,14 +235,13 @@ export function loadTasksFromStorage(): DownloadTask[] {
     if (!Array.isArray(parsed)) return [];
     return parsed.map((t: DownloadTask) => {
       const cleanThumb = normalizeStoredThumbnail(t.thumbnail, t.videoId);
-      if (t.status === 'downloading' || t.status === 'queued' || t.status === 'merging') {
+      if (t.status === 'downloading' || t.status === 'queued' || (t.status as string) === 'merging') {
         return {
           ...t,
           thumbnail: cleanThumb,
           status: 'paused',
           speedBytesPerSec: 0,
-          speedFormatted: 'آماده ادامه دانلود',
-          etaFormatted: '--:--'
+          speedFormatted: 'آماده ادامه دانلود'
         };
       }
       return {
@@ -301,14 +300,14 @@ export async function hydrateTasksFromIndexedDB(
       return mb >= 1 ? `${mb.toFixed(1)} MB` : `${(bytes / 1024).toFixed(0)} KB`;
     };
 
+    // IMPORTANT OOM PREVENTION:
+    // Do NOT attach `rec.mediaBlob` or call `URL.createObjectURL(rec.mediaBlob)` for every video on startup!
+    // Keeping 300MB+ of video Blobs pinned in React state causes Android WebView OutOfMemoryError.
+    // BuiltInMediaPlayer, saveFileToDisk, and shareDownloadedMediaFile load `getOfflineMedia(task.id)` on-demand.
     const updatedTasks = existingTasks.map((task) => {
       const rec = recordMap.get(task.id);
       if (rec) {
         recordMap.delete(task.id);
-        const blobUrl =
-          rec.mediaBlob && typeof window !== 'undefined'
-            ? window.URL.createObjectURL(rec.mediaBlob)
-            : task.blobUrl;
         return {
           ...task,
           status: 'completed' as const,
@@ -320,8 +319,8 @@ export async function hydrateTasksFromIndexedDB(
           totalSizeFormatted: formatSize(rec.fileSize || task.totalBytes),
           downloadedSizeFormatted: formatSize(rec.fileSize || task.downloadedBytes),
           completedAt: task.completedAt || rec.downloadedAt,
-          mediaBlob: rec.mediaBlob || task.mediaBlob,
-          blobUrl
+          mediaBlob: undefined,
+          blobUrl: undefined
         };
       }
       return task;
@@ -335,25 +334,24 @@ export async function hydrateTasksFromIndexedDB(
         rec.format === 'mp3' ||
         rec.format === 'm4a';
       const sizeStr = formatSize(rec.fileSize);
-      const blobUrl =
-        rec.mediaBlob && typeof window !== 'undefined'
-          ? window.URL.createObjectURL(rec.mediaBlob)
-          : undefined;
       restoredFromIdb.push({
         id: rec.id,
+        mediaId: rec.id,
         originalUrl: rec.sourceUrl || '',
         title: rec.title || rec.fileName || 'Downloaded Media',
         platform: (rec.platform as any) || 'youtube',
         thumbnail: normalizeStoredThumbnail(rec.thumbnail),
+        durationFormatted: '01:00',
         durationSeconds: rec.duration || 60,
         format: {
           id: `${rec.id}-fmt`,
           type: isAudio ? 'audio' : 'video',
           format: (rec.format as any) || (isAudio ? 'mp3' : 'mp4'),
           qualityLabel: rec.quality || (isAudio ? '320kbps' : '720p HD'),
-          codec: isAudio ? 'AAC / MP3' : 'H.264',
-          sizeBytes: rec.fileSize || 0,
-          sizeFormatted: sizeStr
+          vCodec: isAudio ? undefined : 'H.264',
+          aCodec: 'AAC',
+          estimatedSizeBytes: rec.fileSize || 0,
+          estimatedSizeFormatted: sizeStr
         },
         status: 'completed',
         progressPercent: 100,
@@ -363,14 +361,14 @@ export async function hydrateTasksFromIndexedDB(
         totalSizeFormatted: sizeStr,
         speedBytesPerSec: 0,
         speedFormatted: 'پایان یافت',
+        elapsedSeconds: 0,
         etaSeconds: 0,
-        chunks: [],
         createdAt: rec.downloadedAt || Date.now(),
         completedAt: rec.downloadedAt || Date.now(),
         fileName: rec.fileName || `${rec.title || 'video'}.${isAudio ? 'mp3' : 'mp4'}`,
         directUrl: rec.directUrl,
-        mediaBlob: rec.mediaBlob,
-        blobUrl
+        mediaBlob: undefined,
+        blobUrl: undefined
       });
     });
 
@@ -546,12 +544,140 @@ export async function loadSessionFromIDB(): Promise<UserSession | null> {
   }
 }
 
+const ACCOUNT_VAULT_STORAGE_KEY = 'onedownload_account_vault_v1';
+
+export interface AccountVaultEntry {
+  identifier: string;
+  user: UserSession['user'];
+  tasks: DownloadTask[];
+  updatedAt: number;
+}
+
+export function normalizeAccountKey(identifier?: string): string {
+  return (identifier || '').trim().toLowerCase();
+}
+
+export function saveAccountVaultSnapshot(session: UserSession, tasks?: DownloadTask[]): void {
+  try {
+    if (!session?.isLoggedIn || !session.user) return;
+    const key = normalizeAccountKey(session.user.email || session.user.name);
+    if (!key) return;
+
+    const currentTasks = (tasks || loadTasksFromStorage()).map((t) => ({
+      ...t,
+      blobUrl: undefined,
+      mediaBlob: undefined
+    }));
+
+    const rawVault = localStorage.getItem(ACCOUNT_VAULT_STORAGE_KEY);
+    const vaultMap: Record<string, AccountVaultEntry> = rawVault ? JSON.parse(rawVault) : {};
+
+    const existingEntry = vaultMap[key];
+    // Merge task lists so previously downloaded videos are never lost
+    const mergedTaskMap = new Map<string, DownloadTask>();
+    if (existingEntry?.tasks) {
+      for (const t of existingEntry.tasks) {
+        if (t && t.id) mergedTaskMap.set(t.id, t);
+      }
+    }
+    for (const t of currentTasks) {
+      if (t && t.id) mergedTaskMap.set(t.id, t);
+    }
+
+    const entry: AccountVaultEntry = {
+      identifier: key,
+      user: {
+        ...existingEntry?.user,
+        ...session.user,
+        passwordHash: session.user.passwordHash || existingEntry?.user?.passwordHash
+      },
+      tasks: Array.from(mergedTaskMap.values()),
+      updatedAt: Date.now()
+    };
+
+    vaultMap[key] = entry;
+    localStorage.setItem(ACCOUNT_VAULT_STORAGE_KEY, JSON.stringify(vaultMap));
+
+    getDB()
+      .then((db) => {
+        const tx = db.transaction(LEGACY_BLOB_STORE, 'readwrite');
+        const store = tx.objectStore(LEGACY_BLOB_STORE);
+        store.put({
+          id: `account_vault::${key}`,
+          vaultEntry: entry,
+          updatedAt: Date.now()
+        });
+      })
+      .catch(() => {});
+  } catch (err) {
+    console.warn('saveAccountVaultSnapshot notice:', err);
+  }
+}
+
+export async function restoreAccountVaultSnapshot(
+  identifier: string
+): Promise<AccountVaultEntry | null> {
+  const key = normalizeAccountKey(identifier);
+  if (!key) return null;
+
+  let localEntry: AccountVaultEntry | null = null;
+  try {
+    const rawVault = localStorage.getItem(ACCOUNT_VAULT_STORAGE_KEY);
+    if (rawVault) {
+      const vaultMap: Record<string, AccountVaultEntry> = JSON.parse(rawVault);
+      if (vaultMap[key]) {
+        localEntry = vaultMap[key];
+      } else {
+        // Also allow matching by username or email prefix if user typed username vs email
+        const match = Object.values(vaultMap).find(
+          (v) =>
+            normalizeAccountKey(v.user?.email) === key ||
+            normalizeAccountKey(v.user?.name) === key
+        );
+        if (match) localEntry = match;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
+    const db = await getDB();
+    const tx = db.transaction(LEGACY_BLOB_STORE, 'readonly');
+    const store = tx.objectStore(LEGACY_BLOB_STORE);
+    const request = store.get(`account_vault::${key}`);
+    const idbEntry = await new Promise<AccountVaultEntry | null>((resolve) => {
+      request.onsuccess = () => {
+        const res = request.result;
+        resolve(res?.vaultEntry ? (res.vaultEntry as AccountVaultEntry) : null);
+      };
+      request.onerror = () => resolve(null);
+    });
+    if (idbEntry && (!localEntry || idbEntry.updatedAt >= localEntry.updatedAt)) {
+      return idbEntry;
+    }
+  } catch {
+    // ignore
+  }
+
+  return localEntry;
+}
+
 /**
- * Complete Logout & State Reset:
- * Clears `od_user_session`, `onedownload_session_v2`, `onedownload_tasks_v2`, and all IndexedDB
- * offline media blobs & session records, returning a 100% clean Guest session.
+ * Logout while 100% preserving all downloaded videos, audios, and account vault data!
+ * When the user logs back in with the same username/email and password, all their videos,
+ * audios, coins, referrals, and VIP status are immediately restored.
  */
 export async function resetUserSessionAndClearAllData(language: Language): Promise<UserSession> {
+  try {
+    const currentSession = loadSessionFromStorage();
+    if (currentSession.isLoggedIn) {
+      saveAccountVaultSnapshot(currentSession);
+    }
+  } catch {
+    // ignore
+  }
+
   const freshGuestSession: UserSession = {
     isLoggedIn: false,
     user: {
@@ -569,18 +695,17 @@ export async function resetUserSessionAndClearAllData(language: Language): Promi
 
   try {
     localStorage.removeItem(STORAGE_KEYS.OD_USER_SESSION);
-    localStorage.removeItem(STORAGE_KEYS.SESSION);
-    localStorage.removeItem(STORAGE_KEYS.TASKS);
-    localStorage.removeItem(STORAGE_KEYS.ACCOUNT_CURRENCY_LOCK);
     localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(freshGuestSession));
+    // Delete only the active session marker in IDB, NEVER delete offline_media videos/audios!
+    getDB()
+      .then((db) => {
+        const tx = db.transaction(LEGACY_BLOB_STORE, 'readwrite');
+        const store = tx.objectStore(LEGACY_BLOB_STORE);
+        store.delete(IDB_SESSION_RECORD_KEY);
+      })
+      .catch(() => {});
   } catch {
     // ignore storage errors
-  }
-
-  try {
-    await clearAllOfflineMedia();
-  } catch {
-    // ignore IDB errors
   }
 
   return freshGuestSession;

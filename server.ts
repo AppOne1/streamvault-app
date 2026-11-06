@@ -42,11 +42,45 @@ interface CachedSaveVideoResult {
   createdAt: number;
 }
 
+interface SvSpoolEntry {
+  taskId: string;
+  filePath: string;
+  totalSize: number;
+  writtenBytes: number;
+  done: boolean;
+  error: string | null;
+  ext: string;
+  isAudio: boolean;
+  expiresAt: number;
+  waiters: Set<() => void>;
+}
+
 const saveVideoResultCache = new Map<string, CachedSaveVideoResult>();
+const svDiskFileCache = new Map<string, SvSpoolEntry>();
 const taskSourceUrlMap = new Map<string, { url: string; height?: number; audio?: boolean }>();
 const tikTokResultCache = new Map<string, { data: any; expiresAt: number }>();
 const ytDlpResultCache = new Map<string, { data: ExtractedPlatformMedia; expiresAt: number }>();
 const tikTokTranscodeCache = new Map<string, { filePath: string; size: number; expiresAt: number }>();
+
+function notifySpoolWaiters(entry: SvSpoolEntry) {
+  for (const w of Array.from(entry.waiters)) {
+    try {
+      w();
+    } catch {
+      // ignore waiter error
+    }
+  }
+}
+
+function hasValidSaveVideoSpool(taskId: string): boolean {
+  const entry = svDiskFileCache.get(taskId);
+  if (!entry || entry.error || entry.expiresAt < Date.now()) return false;
+  if (entry.done) {
+    return fs.existsSync(entry.filePath) && entry.writtenBytes > 64 * 1024;
+  }
+  return true;
+}
+
 
 async function resolveViaTikWMServer(url: string, requestedHeight = 720, isAudio = false): Promise<any | null> {
   const cleanBaseUrl = url.trim().split('?')[0].replace(/\/+$/, '') || url.trim();
@@ -272,12 +306,194 @@ async function transcodeTikTokToTargetHeight(
   return null;
 }
 
+function ensureSaveVideoSpooling(
+  taskId: string,
+  token: string,
+  ext: string = 'mp4',
+  isAudio: boolean = false,
+  recoveryInfo?: { url?: string; height?: number; audio?: boolean },
+  expectedSize: number = 0
+): SvSpoolEntry {
+  const existing = svDiskFileCache.get(taskId);
+  if (existing && !existing.error && existing.expiresAt > Date.now()) {
+    if (!existing.done || (fs.existsSync(existing.filePath) && existing.writtenBytes > 64 * 1024)) {
+      return existing;
+    }
+  }
+
+  const safeTaskId = taskId.replace(/[^A-Za-z0-9_-]/g, '') || String(Date.now());
+  const cleanExt = isAudio ? 'mp3' : ext.replace(/[^a-z0-9]/gi, '') || 'mp4';
+  const tmpFilePath = path.join('/tmp', `onedl_sv_${safeTaskId}.${cleanExt}`);
+
+  try {
+    if (fs.existsSync(tmpFilePath)) {
+      const st = fs.statSync(tmpFilePath);
+      if (
+        st.size > (isAudio ? 40 * 1024 : 120 * 1024) &&
+        expectedSize > 0 &&
+        st.size >= expectedSize * 0.98
+      ) {
+        const readyEntry: SvSpoolEntry = {
+          taskId,
+          filePath: tmpFilePath,
+          totalSize: st.size,
+          writtenBytes: st.size,
+          done: true,
+          error: null,
+          ext: cleanExt,
+          isAudio,
+          expiresAt: Date.now() + 30 * 60 * 1000,
+          waiters: new Set()
+        };
+        svDiskFileCache.set(taskId, readyEntry);
+        return readyEntry;
+      }
+    }
+  } catch {
+    // ignore stat check
+  }
+
+  const entry: SvSpoolEntry = {
+    taskId,
+    filePath: tmpFilePath,
+    totalSize: expectedSize > 64 * 1024 ? expectedSize : 0,
+    writtenBytes: 0,
+    done: false,
+    error: null,
+    ext: cleanExt,
+    isAudio,
+    expiresAt: Date.now() + 30 * 60 * 1000,
+    waiters: new Set()
+  };
+  svDiskFileCache.set(taskId, entry);
+
+  (async () => {
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(tmpFilePath, 'w');
+      const endpointType = isAudio ? 'audio' : 'file';
+      const primaryUrl = `${SAVEVIDEO_BASE}/api/${endpointType}/${taskId}?t=${encodeURIComponent(token)}`;
+      const headers: Record<string, string> = {
+        Referer: `${SAVEVIDEO_BASE}/`,
+        'User-Agent': DESKTOP_CHROME_UA
+      };
+
+      let remoteRes = await fetch(primaryUrl, {
+        method: 'GET',
+        headers,
+        redirect: 'follow'
+      });
+
+      if (!remoteRes.ok && remoteRes.status >= 400) {
+        for (const [k, v] of saveVideoResultCache.entries()) {
+          if (v.taskId === taskId) {
+            saveVideoResultCache.delete(k);
+          }
+        }
+        const mapped = taskSourceUrlMap.get(taskId);
+        const recUrl = recoveryInfo?.url || mapped?.url || '';
+        const recHeight = recoveryInfo?.height || mapped?.height || 480;
+        if (recUrl && isSafeUrl(recUrl)) {
+          const fresh = await resolveViaSaveVideoBackend(
+            recUrl,
+            65,
+            true,
+            recHeight,
+            isAudio,
+            false
+          );
+          if (fresh && fresh.taskId) {
+            svDiskFileCache.set(fresh.taskId, entry);
+            const freshUrl = `${SAVEVIDEO_BASE}/api/${endpointType}/${fresh.taskId}?t=${encodeURIComponent(
+              fresh.fileToken || ''
+            )}`;
+            remoteRes = await fetch(freshUrl, {
+              method: 'GET',
+              headers,
+              redirect: 'follow'
+            });
+          }
+        }
+      }
+
+      if (!remoteRes.ok || !remoteRes.body) {
+        throw new Error(`Upstream SaveVideo responded with HTTP ${remoteRes.status}`);
+      }
+
+      const upstreamCt = (remoteRes.headers.get('content-type') || '').toLowerCase();
+      if (
+        upstreamCt.includes('text/html') ||
+        upstreamCt.includes('application/xhtml') ||
+        upstreamCt.includes('application/json')
+      ) {
+        throw new Error('Upstream SaveVideo returned non-binary payload');
+      }
+
+      const contentLength = Number(remoteRes.headers.get('content-length') || '0');
+      if (contentLength > 32 * 1024) {
+        entry.totalSize = contentLength;
+      }
+      notifySpoolWaiters(entry);
+
+      const reader = (remoteRes.body as any).getReader();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          const buf = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+          fs.writeSync(fd, buf, 0, buf.length, entry.writtenBytes);
+          entry.writtenBytes += buf.length;
+          if (entry.totalSize > 0 && entry.writtenBytes > entry.totalSize) {
+            entry.totalSize = entry.writtenBytes;
+          }
+          entry.expiresAt = Date.now() + 30 * 60 * 1000;
+          notifySpoolWaiters(entry);
+        }
+      }
+
+      fs.closeSync(fd);
+      fd = null;
+
+      const minBytes = isAudio ? 32 * 1024 : 120 * 1024;
+      if (entry.writtenBytes < minBytes) {
+        throw new Error(`Spooled media file too small (${entry.writtenBytes} bytes)`);
+      }
+
+      entry.totalSize = entry.writtenBytes;
+      entry.done = true;
+      entry.expiresAt = Date.now() + 30 * 60 * 1000;
+      notifySpoolWaiters(entry);
+    } catch (err: any) {
+      entry.error = err?.message || 'SaveVideo spool error';
+      entry.done = true;
+      notifySpoolWaiters(entry);
+      if (fd !== null) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // ignore
+        }
+      }
+      try {
+        if (fs.existsSync(tmpFilePath)) fs.unlinkSync(tmpFilePath);
+      } catch {
+        // ignore
+      }
+      svDiskFileCache.delete(taskId);
+    }
+  })();
+
+  return entry;
+}
+
 async function resolveViaSaveVideoBackend(
   url: string,
   maxPollAttempts = 85,
   forceFresh = false,
   height = 720,
-  audio = false
+  audio = false,
+  autoSpool = true
 ): Promise<CachedSaveVideoResult | null> {
   const reqHeightNum = Number(height) || 720;
   const isYt = /(?:youtube\.com|youtu\.be)/i.test(url);
@@ -292,7 +508,11 @@ async function resolveViaSaveVideoBackend(
   const cleanKey = `${targetUrl}::${reqHeightNum}::${audio ? 'a' : 'v'}`;
   if (!forceFresh) {
     const existing = saveVideoResultCache.get(cleanKey);
-    if (existing && Date.now() - existing.createdAt < 10 * 60 * 1000) {
+    if (
+      existing &&
+      Date.now() - existing.createdAt < 10 * 60 * 1000 &&
+      hasValidSaveVideoSpool(existing.taskId)
+    ) {
       return existing;
     }
   }
@@ -380,6 +600,16 @@ async function resolveViaSaveVideoBackend(
           saveVideoResultCache.set(exactCandidateKey, result);
           if (candidateHeight === reqHeightNum) {
             saveVideoResultCache.set(cleanKey, result);
+          }
+          if (autoSpool) {
+            ensureSaveVideoSpooling(
+              taskId,
+              fileToken,
+              ext,
+              !!audio,
+              { url: targetUrl, height: candidateHeight, audio: !!audio },
+              validSize
+            );
           }
           return result;
         } else if (stData.status === 'error') {
@@ -1608,9 +1838,6 @@ async function startServer() {
         const canonicalYtUrl = ytId ? `https://www.youtube.com/watch?v=${ytId}` : url;
         const isShortsUrl = /\/shorts\//i.test(url);
 
-        // Background pre-warm of 720p progressive MP4 stream on SaveVideo so download starts immediately when user clicks
-        resolveViaSaveVideoBackend(canonicalYtUrl, 28, false, 720, false).catch(() => {});
-
         const signedFormatsMap: Record<string, string> = {
           '1080': `/api/media/stream?url=${encodeURIComponent(canonicalYtUrl)}&quality=1080&audio=0`,
           '720': `/api/media/stream?url=${encodeURIComponent(canonicalYtUrl)}&quality=720&audio=0`,
@@ -1862,7 +2089,11 @@ async function startServer() {
         const exactKey = `${canonicalYtUrl}::${reqHeight}::${audio ? 'a' : 'v'}`;
         const cachedYt = saveVideoResultCache.get(exactKey);
 
-        if (cachedYt && Date.now() - cachedYt.createdAt < 10 * 60 * 1000) {
+        if (
+          cachedYt &&
+          Date.now() - cachedYt.createdAt < 10 * 60 * 1000 &&
+          hasValidSaveVideoSpool(cachedYt.taskId)
+        ) {
           return res.json({
             status: 'done',
             task_id: cachedYt.taskId,
@@ -1873,7 +2104,7 @@ async function startServer() {
           });
         }
 
-        // 1. Start SaveVideo /api/yt/start for the requested height, poll up to 8s for fast videos,
+        // 1. Start SaveVideo /api/yt/start for the requested height, poll up to 5s for fast videos,
         // and if a long YouTube video (e.g. 50+ min) is still muxing, return the active task_id immediately
         // so the client polls /api/media/status/:taskId with live progress without restarting the job!
         for (const candidateYtUrl of [canonicalYtUrl, url]) {
@@ -1903,8 +2134,8 @@ async function startServer() {
                 });
 
                 let taskErrored = false;
-                for (let i = 0; i < 8; i++) {
-                  await new Promise((r) => setTimeout(r, 1000));
+                for (let i = 0; i < 4; i++) {
+                  await new Promise((r) => setTimeout(r, 900));
                   try {
                     const stRes = await fetch(`${SAVEVIDEO_BASE}/api/status/${taskId}`, {
                       headers: {
@@ -1915,20 +2146,43 @@ async function startServer() {
                     if (!stRes.ok) continue;
                     const stData = await stRes.json();
                     if (stData.status === 'done') {
+                      const fileSize = Number(stData.file_size || stData.filesize || 0);
+                      if (!audio && fileSize > 0 && fileSize < 200 * 1024) {
+                        taskErrored = true;
+                        break;
+                      }
                       const fileToken = stData.file_token || '';
-                      const directUrl = `/api/media/file/${encodeURIComponent(taskId)}${
-                        fileToken ? `?token=${encodeURIComponent(fileToken)}` : ''
-                      }`;
-                      const resolvedObj: SaveVideoResolved = {
+                      const ext = stData.ext || 'mp4';
+                      const title = stData.title || 'YouTube Video';
+                      const validSize = fileSize > 200000 ? fileSize : 8400000;
+                      const directVideoUrl = `/api/media/file/${encodeURIComponent(taskId)}?t=${encodeURIComponent(
+                        fileToken
+                      )}&ext=${ext}&quality=${reqHeight}&title=${encodeURIComponent(
+                        title
+                      )}&sourceUrl=${encodeURIComponent(canonicalYtUrl)}`;
+                      const directAudioUrl = `/api/media/audio/${encodeURIComponent(taskId)}?t=${encodeURIComponent(
+                        fileToken
+                      )}&quality=${reqHeight}&sourceUrl=${encodeURIComponent(canonicalYtUrl)}`;
+                      const resolvedObj: CachedSaveVideoResult = {
                         taskId,
                         fileToken,
-                        title: stData.title || 'YouTube Video',
-                        fileSize: Number(stData.file_size || stData.filesize || 0),
-                        directVideoUrl: directUrl,
-                        directAudioUrl: `${directUrl}${directUrl.includes('?') ? '&' : '?'}audio=1`,
+                        title,
+                        fileSize: validSize,
+                        ext,
+                        fileType: stData.file_type || 'video',
+                        directVideoUrl,
+                        directAudioUrl,
                         createdAt: Date.now()
                       };
                       saveVideoResultCache.set(exactKey, resolvedObj);
+                      ensureSaveVideoSpooling(
+                        taskId,
+                        fileToken,
+                        ext,
+                        !!audio,
+                        { url: canonicalYtUrl, height: reqHeight, audio: !!audio },
+                        validSize
+                      );
                       return res.json({
                         status: 'done',
                         task_id: taskId,
@@ -2088,7 +2342,7 @@ async function startServer() {
   });
 
   /**
-   * 3. Poll Download Status Endpoint (with automatic resolution fallback if upstream fails)
+   * 3. Poll Download Status Endpoint (with automatic resolution fallback and proactive /tmp spooling)
    */
   app.get('/api/media/status/:taskId', async (req, res) => {
     try {
@@ -2133,10 +2387,45 @@ async function startServer() {
 
         const fileToken = data.file_token || '';
         const ext = data.ext || 'mp4';
+        const srcUrl = mappedInfo?.url || '';
+        const reqH = mappedInfo?.height || 720;
+        const validSize = fileSize > 120000 ? fileSize : 8400000;
+        const fileUrl = `/api/media/file/${taskId}?t=${encodeURIComponent(
+          fileToken
+        )}&ext=${ext}&quality=${reqH}${srcUrl ? `&sourceUrl=${encodeURIComponent(srcUrl)}` : ''}`;
+        const audioUrl = `/api/media/audio/${taskId}?t=${encodeURIComponent(
+          fileToken
+        )}&quality=${reqH}${srcUrl ? `&sourceUrl=${encodeURIComponent(srcUrl)}` : ''}`;
+
+        if (srcUrl) {
+          const exactKey = `${srcUrl}::${reqH}::${mappedInfo?.audio ? 'a' : 'v'}`;
+          saveVideoResultCache.set(exactKey, {
+            taskId,
+            fileToken,
+            title: data.title || 'Media Video',
+            fileSize: validSize,
+            ext,
+            fileType: data.file_type || 'video',
+            directVideoUrl: fileUrl,
+            directAudioUrl: audioUrl,
+            createdAt: Date.now()
+          });
+        }
+
+        // Proactively start spooling the single-use SaveVideo file to /tmp so first 2MB Range slice is instant!
+        ensureSaveVideoSpooling(
+          taskId,
+          fileToken,
+          ext,
+          !!mappedInfo?.audio,
+          mappedInfo,
+          validSize
+        );
+
         return res.json({
           ...data,
-          file_url: `/api/media/file/${taskId}?t=${encodeURIComponent(fileToken)}&ext=${ext}`,
-          audio_url: `/api/media/audio/${taskId}?t=${encodeURIComponent(fileToken)}`
+          file_url: fileUrl,
+          audio_url: audioUrl
         });
       }
 
@@ -2145,7 +2434,7 @@ async function startServer() {
         if (mappedInfo?.url) {
           const fallbackResolved = await resolveViaSaveVideoBackend(
             mappedInfo.url,
-            18,
+            25,
             true,
             mappedInfo.height || 360,
             !!mappedInfo.audio
@@ -2176,8 +2465,146 @@ async function startServer() {
   const streamUrlCache = new Map<string, { directUrl: string; mimeType: string; expiresAt: number }>();
 
   /**
+   * Waits until the SaveVideo /tmp spool entry has enough bytes written to satisfy the requested Range slice
+   * (or completes/errors), then streams that exact byte range directly from disk.
+   * This solves both SaveVideo's single-use token deletion AND Cloud Run's 32 MB response limit!
+   */
+  const serveFromSaveVideoSpool = async (
+    req: express.Request,
+    res: express.Response,
+    entry: SvSpoolEntry,
+    mimeType: string,
+    isDownload: boolean,
+    dispositionHeader: string,
+    rangeHeader?: string
+  ): Promise<boolean> => {
+    const waitForCondition = (predicate: () => boolean, timeoutMs: number): Promise<void> => {
+      if (predicate()) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        let settled = false;
+        const onUpdate = () => {
+          if (!settled && (predicate() || entry.done || entry.error)) {
+            settled = true;
+            clearTimeout(timer);
+            entry.waiters.delete(onUpdate);
+            resolve();
+          }
+        };
+        const timer = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            entry.waiters.delete(onUpdate);
+            resolve();
+          }
+        }, timeoutMs);
+        entry.waiters.add(onUpdate);
+      });
+    };
+
+    // Wait for first bytes or completion (up to 45s if recovery task had to mux)
+    await waitForCondition(() => entry.writtenBytes > 0 || entry.done || Boolean(entry.error), 45000);
+
+    if (entry.error || !fs.existsSync(entry.filePath) || (entry.done && entry.writtenBytes <= 0)) {
+      return false;
+    }
+
+    res.setHeader('Content-Type', isDownload ? 'application/octet-stream' : mimeType);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.setHeader('Cache-Control', 'no-store, no-transform');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Length, Content-Range');
+    res.setHeader('Content-Disposition', dispositionHeader);
+
+    if (rangeHeader && /^bytes=\d*-\d*$/i.test(rangeHeader)) {
+      const parts = rangeHeader.replace(/bytes=/i, '').split('-');
+      const start = parseInt(parts[0], 10) || 0;
+      const hasExplicitEnd = Boolean(parts[1] && /^\d+$/.test(parts[1]));
+      const defaultSliceEnd = start + 2 * 1024 * 1024 - 1;
+      const requestedEnd = hasExplicitEnd
+        ? parseInt(parts[1], 10)
+        : entry.totalSize > 0
+        ? Math.min(entry.totalSize - 1, defaultSliceEnd)
+        : defaultSliceEnd;
+
+      // Wait until the spooler has written up to requestedEnd + 1 (or finished the whole file)
+      await waitForCondition(
+        () => entry.done || entry.writtenBytes >= requestedEnd + 1 || Boolean(entry.error),
+        35000
+      );
+
+      if (entry.error || !fs.existsSync(entry.filePath)) {
+        return false;
+      }
+
+      const currentWritten = entry.writtenBytes;
+      if (start >= currentWritten) {
+        if (entry.done) {
+          res.status(416);
+          res.setHeader('Content-Range', `bytes */${currentWritten}`);
+          res.end();
+          return true;
+        }
+        return false;
+      }
+
+      const actualEnd = Math.min(requestedEnd, currentWritten - 1);
+      const total = entry.done
+        ? currentWritten
+        : entry.totalSize >= currentWritten
+        ? entry.totalSize
+        : currentWritten + 2 * 1024 * 1024;
+      const chunkLen = Math.max(0, actualEnd - start + 1);
+
+      res.status(req.method === 'HEAD' ? 200 : 206);
+      res.setHeader('Content-Range', `bytes ${start}-${actualEnd}/${total}`);
+      res.setHeader('Content-Length', String(req.method === 'HEAD' ? total : chunkLen));
+      if (req.method === 'HEAD') {
+        res.end();
+        return true;
+      }
+
+      const fStream = fs.createReadStream(entry.filePath, { start, end: actualEnd });
+      res.on('close', () => fStream.destroy());
+      pipeline(fStream, res, () => {});
+      return true;
+    }
+
+    // Unbounded GET (e.g. direct <video> playback without Range): wait until file finishes or reaches 24 MB
+    await waitForCondition(
+      () => entry.done || entry.writtenBytes >= 24 * 1024 * 1024 || Boolean(entry.error),
+      45000
+    );
+
+    if (entry.error || !fs.existsSync(entry.filePath) || entry.writtenBytes <= 0) {
+      return false;
+    }
+
+    const serveBytes = Math.min(entry.writtenBytes, 28 * 1024 * 1024);
+    const total = entry.done ? entry.writtenBytes : entry.totalSize || entry.writtenBytes;
+
+    if (serveBytes < total) {
+      res.status(req.method === 'HEAD' ? 200 : 206);
+      res.setHeader('Content-Range', `bytes 0-${serveBytes - 1}/${total}`);
+      res.setHeader('Content-Length', String(req.method === 'HEAD' ? total : serveBytes));
+    } else {
+      res.status(200);
+      res.setHeader('Content-Length', String(serveBytes));
+    }
+
+    if (req.method === 'HEAD') {
+      res.end();
+      return true;
+    }
+
+    const fStream = fs.createReadStream(entry.filePath, { start: 0, end: serveBytes - 1 });
+    res.on('close', () => fStream.destroy());
+    pipeline(fStream, res, () => {});
+    return true;
+  };
+
   /**
-   * 4. Stream and Deliver Real Media File (Zero-VPN server pipeline, supports GET & HEAD + Range + Automatic Token Recovery)
+   * 4. Stream and Deliver Real Media File (Zero-VPN server pipeline, backed by /tmp spooler for unlimited 2MB Range slices & Pause/Resume)
    */
   app.all('/api/media/file/:taskId', async (req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -2185,128 +2612,47 @@ async function startServer() {
     }
     try {
       const { taskId } = req.params;
-      const token = req.query.t as string;
+      const token = String(req.query.t || req.query.token || '').trim();
       const ext = (req.query.ext as string) || 'mp4';
       const isDownload = req.query.download === '1' || req.query.dl === '1';
-
-      const targetUrl = `${SAVEVIDEO_BASE}/api/file/${taskId}?t=${encodeURIComponent(token || '')}`;
-
-      const headers: Record<string, string> = {
-        'Referer': `${SAVEVIDEO_BASE}/`,
-        'User-Agent': DESKTOP_CHROME_UA
-      };
-
-      const queryRange = (req.query.range as string) || '';
-      if (req.headers.range) {
-        headers['Range'] = req.headers.range as string;
-      } else if (queryRange) {
-        headers['Range'] = queryRange.startsWith('bytes=') ? queryRange : `bytes=${queryRange}`;
-      } else if (req.method === 'HEAD') {
-        headers['Range'] = 'bytes=0-0';
-      }
-
-      let remoteRes = await fetch(targetUrl, {
-        method: 'GET',
-        headers,
-        redirect: 'follow'
-      });
-
-      // Automatic Token Recovery: If SaveVideo taskId expired or single-use token was already consumed,
-      // automatically re-resolve a fresh SaveVideo task from sourceUrl and stream seamlessly!
-      if (!remoteRes.ok && remoteRes.status >= 400) {
-        for (const [k, v] of saveVideoResultCache.entries()) {
-          if (v.taskId === taskId) {
-            saveVideoResultCache.delete(k);
-          }
-        }
-        const mappedInfo = taskSourceUrlMap.get(taskId);
-        const recoveryUrl = (req.query.sourceUrl as string) || mappedInfo?.url || '';
-        if (recoveryUrl && isSafeUrl(recoveryUrl)) {
-          const reqHeight = parseInt((req.query.quality as string) || '', 10) || mappedInfo?.height || 480;
-          const freshResolved = await resolveViaSaveVideoBackend(
-            recoveryUrl,
-            75,
-            true,
-            reqHeight,
-            false
-          );
-          if (freshResolved && freshResolved.taskId) {
-            const freshTargetUrl = `${SAVEVIDEO_BASE}/api/file/${freshResolved.taskId}?t=${encodeURIComponent(
-              freshResolved.fileToken || ''
-            )}`;
-            remoteRes = await fetch(freshTargetUrl, {
-              method: 'GET',
-              headers,
-              redirect: 'follow'
-            });
-          }
-        }
-      }
-
-      if (!remoteRes.ok && remoteRes.status >= 400) {
-        return res.status(remoteRes.status).json({ error: `Remote error: ${remoteRes.statusText}` });
-      }
-
-      const upstreamCt = (remoteRes.headers.get('content-type') || '').toLowerCase();
-      if (upstreamCt.includes('text/html') || upstreamCt.includes('application/xhtml') || upstreamCt.includes('application/json')) {
-        return res.status(422).json({ error: 'Upstream returned HTML/JSON instead of binary media' });
-      }
-
       const mimeType = ext === 'mp3' ? 'audio/mpeg' : ext === 'm4a' ? 'audio/mp4' : 'video/mp4';
-      res.status(req.method === 'HEAD' ? 200 : remoteRes.status);
-      res.setHeader('Content-Type', isDownload ? 'application/octet-stream' : mimeType);
-      res.setHeader('Accept-Ranges', 'bytes');
-      res.setHeader('X-Accel-Buffering', 'no');
-      res.setHeader('Cache-Control', 'no-store, no-transform');
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Length, Content-Range');
-
-      const contentRange = remoteRes.headers.get('content-range');
-      if (contentRange && req.method !== 'HEAD') {
-        res.setHeader('Content-Range', contentRange);
-      }
-
-      let contentLength = remoteRes.headers.get('content-length');
-      if (req.method === 'HEAD' && contentRange && contentRange.includes('/')) {
-        const totalPart = contentRange.split('/')[1];
-        if (totalPart && /^\d+$/.test(totalPart)) {
-          contentLength = totalPart;
-        }
-      }
-      if (contentLength) {
-        res.setHeader('Content-Length', contentLength);
-      }
-
       const dispositionType = isDownload ? 'attachment' : 'inline';
       const rawTitle = (req.query.title as string) || `media_${taskId}`;
       const safeName = rawTitle.replace(/[\/\\?%*:|"<>]/g, '_').substring(0, 100);
-      res.setHeader(
-        'Content-Disposition',
-        `${dispositionType}; filename="media_${taskId}.${ext}"; filename*=UTF-8''${encodeURIComponent(safeName)}.${ext}`
+      const dispositionHeader = `${dispositionType}; filename="media_${taskId}.${ext}"; filename*=UTF-8''${encodeURIComponent(safeName)}.${ext}`;
+
+      const queryRange = (req.query.range as string) || '';
+      const activeRangeHeader =
+        (req.headers.range as string) ||
+        (queryRange ? (queryRange.startsWith('bytes=') ? queryRange : `bytes=${queryRange}`) : undefined);
+
+      const mappedInfo = taskSourceUrlMap.get(taskId);
+      const recoveryUrl = (req.query.sourceUrl as string) || mappedInfo?.url || '';
+      const reqHeight = parseInt((req.query.quality as string) || '', 10) || mappedInfo?.height || 480;
+
+      const spoolEntry = ensureSaveVideoSpooling(
+        taskId,
+        token,
+        ext,
+        ext === 'mp3',
+        { url: recoveryUrl, height: reqHeight, audio: ext === 'mp3' }
       );
 
-      if (req.method === 'HEAD') {
-        try {
-          await remoteRes.body?.cancel();
-        } catch {
-          // ignore
-        }
-        return res.end();
+      const served = await serveFromSaveVideoSpool(
+        req,
+        res,
+        spoolEntry,
+        mimeType,
+        isDownload,
+        dispositionHeader,
+        activeRangeHeader
+      );
+
+      if (served) {
+        return;
       }
 
-      if (remoteRes.body) {
-        const nodeStream = Readable.fromWeb(remoteRes.body as any);
-        req.on('close', () => {
-          nodeStream.destroy();
-        });
-        pipeline(nodeStream, res, (err) => {
-          if (err && (err as any).code !== 'ERR_STREAM_PREMATURE_CLOSE') {
-            console.warn('File stream notice:', err.message);
-          }
-        });
-      } else {
-        res.end();
-      }
+      return res.status(502).json({ error: 'Media stream spooling failed' });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'File proxy stream failed';
       console.error('File proxy stream error:', message);
@@ -2317,7 +2663,7 @@ async function startServer() {
   });
 
   /**
-   * 5. Stream and Deliver Audio File (Zero-VPN audio pipeline, supports GET & HEAD + Range + Automatic Token Recovery)
+   * 5. Stream and Deliver Audio File (Zero-VPN audio pipeline, backed by /tmp spooler for unlimited Range slices & Pause/Resume)
    */
   app.all('/api/media/audio/:taskId', async (req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -2325,118 +2671,43 @@ async function startServer() {
     }
     try {
       const { taskId } = req.params;
-      const token = req.query.t as string;
+      const token = String(req.query.t || req.query.token || '').trim();
       const isDownload = req.query.download === '1' || req.query.dl === '1';
-
-      const targetUrl = `${SAVEVIDEO_BASE}/api/audio/${taskId}?t=${encodeURIComponent(token || '')}`;
-
-      const headers: Record<string, string> = {
-        'Referer': `${SAVEVIDEO_BASE}/`,
-        'User-Agent': DESKTOP_CHROME_UA
-      };
+      const dispositionType = isDownload ? 'attachment' : 'inline';
+      const dispositionHeader = `${dispositionType}; filename="audio_${taskId}.mp3"`;
 
       const queryRange = (req.query.range as string) || '';
-      if (req.headers.range) {
-        headers['Range'] = req.headers.range as string;
-      } else if (queryRange) {
-        headers['Range'] = queryRange.startsWith('bytes=') ? queryRange : `bytes=${queryRange}`;
-      } else if (req.method === 'HEAD') {
-        headers['Range'] = 'bytes=0-0';
+      const activeRangeHeader =
+        (req.headers.range as string) ||
+        (queryRange ? (queryRange.startsWith('bytes=') ? queryRange : `bytes=${queryRange}`) : undefined);
+
+      const mappedInfo = taskSourceUrlMap.get(taskId);
+      const recoveryUrl = (req.query.sourceUrl as string) || mappedInfo?.url || '';
+      const reqHeight = parseInt((req.query.quality as string) || '', 10) || mappedInfo?.height || 720;
+
+      const spoolEntry = ensureSaveVideoSpooling(
+        taskId,
+        token,
+        'mp3',
+        true,
+        { url: recoveryUrl, height: reqHeight, audio: true }
+      );
+
+      const served = await serveFromSaveVideoSpool(
+        req,
+        res,
+        spoolEntry,
+        'audio/mpeg',
+        isDownload,
+        dispositionHeader,
+        activeRangeHeader
+      );
+
+      if (served) {
+        return;
       }
 
-      let remoteRes = await fetch(targetUrl, {
-        method: 'GET',
-        headers,
-        redirect: 'follow'
-      });
-
-      if (!remoteRes.ok && remoteRes.status >= 400) {
-        for (const [k, v] of saveVideoResultCache.entries()) {
-          if (v.taskId === taskId) {
-            saveVideoResultCache.delete(k);
-          }
-        }
-        const mappedInfo = taskSourceUrlMap.get(taskId);
-        const recoveryUrl = (req.query.sourceUrl as string) || mappedInfo?.url || '';
-        if (recoveryUrl && isSafeUrl(recoveryUrl)) {
-          const freshResolved = await resolveViaSaveVideoBackend(
-            recoveryUrl,
-            75,
-            true,
-            mappedInfo?.height || 720,
-            true
-          );
-          if (freshResolved && freshResolved.taskId) {
-            const freshTargetUrl = `${SAVEVIDEO_BASE}/api/audio/${freshResolved.taskId}?t=${encodeURIComponent(
-              freshResolved.fileToken || ''
-            )}`;
-            remoteRes = await fetch(freshTargetUrl, {
-              method: 'GET',
-              headers,
-              redirect: 'follow'
-            });
-          }
-        }
-      }
-
-      if (!remoteRes.ok && remoteRes.status >= 400) {
-        return res.status(remoteRes.status).json({ error: `Audio error: ${remoteRes.statusText}` });
-      }
-
-      const upstreamAudioCt = (remoteRes.headers.get('content-type') || '').toLowerCase();
-      if (upstreamAudioCt.includes('text/html') || upstreamAudioCt.includes('application/xhtml') || upstreamAudioCt.includes('application/json')) {
-        return res.status(422).json({ error: 'Upstream returned HTML/JSON instead of binary audio' });
-      }
-
-      res.status(req.method === 'HEAD' ? 200 : remoteRes.status);
-      res.setHeader('Content-Type', isDownload ? 'application/octet-stream' : 'audio/mpeg');
-      res.setHeader('Accept-Ranges', 'bytes');
-      res.setHeader('X-Accel-Buffering', 'no');
-      res.setHeader('Cache-Control', 'no-store, no-transform');
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Length, Content-Range');
-
-      const contentRange = remoteRes.headers.get('content-range');
-      if (contentRange && req.method !== 'HEAD') {
-        res.setHeader('Content-Range', contentRange);
-      }
-
-      let contentLength = remoteRes.headers.get('content-length');
-      if (req.method === 'HEAD' && contentRange && contentRange.includes('/')) {
-        const totalPart = contentRange.split('/')[1];
-        if (totalPart && /^\d+$/.test(totalPart)) {
-          contentLength = totalPart;
-        }
-      }
-      if (contentLength) {
-        res.setHeader('Content-Length', contentLength);
-      }
-
-      const dispositionType = isDownload ? 'attachment' : 'inline';
-      res.setHeader('Content-Disposition', `${dispositionType}; filename="audio_${taskId}.mp3"`);
-
-      if (req.method === 'HEAD') {
-        try {
-          await remoteRes.body?.cancel();
-        } catch {
-          // ignore
-        }
-        return res.end();
-      }
-
-      if (remoteRes.body) {
-        const nodeStream = Readable.fromWeb(remoteRes.body as any);
-        req.on('close', () => {
-          nodeStream.destroy();
-        });
-        pipeline(nodeStream, res, (err) => {
-          if (err && (err as any).code !== 'ERR_STREAM_PREMATURE_CLOSE') {
-            console.warn('Audio stream notice:', err.message);
-          }
-        });
-      } else {
-        res.end();
-      }
+      return res.status(502).json({ error: 'Audio stream spooling failed' });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Audio proxy stream failed';
       console.error('Audio proxy stream error:', message);
@@ -2470,13 +2741,46 @@ async function startServer() {
       const ext = (req.query.ext as string) || (activeTargetUrl.includes('.mp3') ? 'mp3' : 'mp4');
       const isDownload = req.query.download === '1' || req.query.dl === '1';
       const safeName = rawTitle.replace(/[\/\\?%*:|"<>]/g, '_').substring(0, 100);
+      const dispositionType = isDownload ? 'attachment' : 'inline';
+      const dispositionHeader = `${dispositionType}; filename="media_${Date.now()}.${ext}"; filename*=UTF-8''${encodeURIComponent(safeName)}.${ext}`;
+      const mimeType = ext === 'mp3' ? 'audio/mpeg' : ext === 'm4a' ? 'audio/mp4' : 'video/mp4';
+
+      const queryRange = (req.query.range as string) || '';
+      const activeRangeHeader =
+        (req.headers.range as string) ||
+        (queryRange ? (queryRange.startsWith('bytes=') ? queryRange : `bytes=${queryRange}`) : undefined);
+
+      // If proxy-stream was called with a single-use SaveVideo URL, route through the /tmp spooler!
+      const svMatch = activeTargetUrl.match(/savevideo\.uz\/api\/(file|audio)\/([A-Za-z0-9_-]+)\?(?:.*&)?(?:t|token)=([^&]*)/i);
+      if (svMatch) {
+        const svIsAudio = svMatch[1].toLowerCase() === 'audio';
+        const svTaskId = svMatch[2];
+        const svToken = decodeURIComponent(svMatch[3] || '');
+        const reqHeight = parseInt((req.query.quality as string) || '', 10) || 480;
+        const spoolEntry = ensureSaveVideoSpooling(
+          svTaskId,
+          svToken,
+          svIsAudio ? 'mp3' : ext,
+          svIsAudio,
+          { url: sourceUrl, height: reqHeight, audio: svIsAudio }
+        );
+        const served = await serveFromSaveVideoSpool(
+          req,
+          res,
+          spoolEntry,
+          mimeType,
+          isDownload,
+          dispositionHeader,
+          activeRangeHeader
+        );
+        if (served) return;
+      }
 
       const headers: Record<string, string> = {
         'User-Agent': DESKTOP_CHROME_UA
       };
 
       if (activeTargetUrl.includes('aparat.com') || activeTargetUrl.includes('cdn.asset.aparat.com')) {
-        // Neutral headers for Aparat CDN (no Origin/Referer that could trigger hotlink or proxy blocks)
         headers['Accept'] = '*/*';
       } else if (activeTargetUrl.includes('instagram') || activeTargetUrl.includes('cdninstagram')) {
         headers['Referer'] = 'https://www.instagram.com/';
@@ -2493,11 +2797,8 @@ async function startServer() {
         headers['Referer'] = 'https://www.youtube.com/';
       }
 
-      const queryRange = (req.query.range as string) || '';
-      if (req.headers.range) {
-        headers['Range'] = req.headers.range as string;
-      } else if (queryRange) {
-        headers['Range'] = queryRange.startsWith('bytes=') ? queryRange : `bytes=${queryRange}`;
+      if (activeRangeHeader) {
+        headers['Range'] = activeRangeHeader;
       }
 
       let remoteRes = await fetch(activeTargetUrl, {
@@ -2595,8 +2896,7 @@ async function startServer() {
       const upstreamClNum = Number(remoteRes.headers.get('content-length') || '0');
       if (
         req.method === 'GET' &&
-        !req.headers.range &&
-        !queryRange &&
+        !activeRangeHeader &&
         ext === 'mp4' &&
         upstreamClNum > 0 &&
         upstreamClNum < 120 * 1024
@@ -2604,7 +2904,6 @@ async function startServer() {
         return res.status(422).json({ error: `Upstream video payload too small (${upstreamClNum} bytes < 120 KB)` });
       }
 
-      const mimeType = ext === 'mp3' ? 'audio/mpeg' : ext === 'm4a' ? 'audio/mp4' : 'video/mp4';
       res.status(req.method === 'HEAD' ? 200 : remoteRes.status);
       res.setHeader('Content-Type', isDownload ? 'application/octet-stream' : mimeType);
       res.setHeader('Accept-Ranges', 'bytes');
@@ -2630,11 +2929,7 @@ async function startServer() {
         res.setHeader('Content-Length', contentLength);
       }
 
-      const dispositionType = isDownload ? 'attachment' : 'inline';
-      res.setHeader(
-        'Content-Disposition',
-        `${dispositionType}; filename="media_${Date.now()}.${ext}"; filename*=UTF-8''${encodeURIComponent(safeName)}.${ext}`
-      );
+      res.setHeader('Content-Disposition', dispositionHeader);
 
       if (req.method === 'HEAD') {
         try {
@@ -2647,7 +2942,7 @@ async function startServer() {
 
       if (remoteRes.body) {
         const nodeStream = Readable.fromWeb(remoteRes.body as any);
-        req.on('close', () => {
+        res.on('close', () => {
           nodeStream.destroy();
         });
         pipeline(nodeStream, res, (err) => {
@@ -2690,11 +2985,11 @@ async function startServer() {
       let cached = streamUrlCache.get(cacheKey);
 
       const unwrapLocalSaveVideoUrl = (candidate: string): string => {
-        const fileMatch = candidate.match(/\/api\/media\/file\/([A-Za-z0-9_-]+)\?t=([^&]*)/i);
+        const fileMatch = candidate.match(/\/api\/media\/file\/([A-Za-z0-9_-]+)\?(?:.*&)?(?:t|token)=([^&]*)/i);
         if (fileMatch) {
           return `${SAVEVIDEO_BASE}/api/file/${fileMatch[1]}?t=${fileMatch[2]}`;
         }
-        const audioMatch = candidate.match(/\/api\/media\/audio\/([A-Za-z0-9_-]+)\?t=([^&]*)/i);
+        const audioMatch = candidate.match(/\/api\/media\/audio\/([A-Za-z0-9_-]+)\?(?:.*&)?(?:t|token)=([^&]*)/i);
         if (audioMatch) {
           return `${SAVEVIDEO_BASE}/api/audio/${audioMatch[1]}?t=${audioMatch[2]}`;
         }
@@ -2785,9 +3080,7 @@ async function startServer() {
             isAudio
           );
           if (svData && svData.taskId) {
-            resolvedDirect = isAudio
-              ? `${SAVEVIDEO_BASE}/api/audio/${svData.taskId}?t=${encodeURIComponent(svData.fileToken || '')}`
-              : `${SAVEVIDEO_BASE}/api/file/${svData.taskId}?t=${encodeURIComponent(svData.fileToken || '')}`;
+            resolvedDirect = `svspool://${svData.taskId}::${encodeURIComponent(svData.fileToken || '')}::${svData.ext || (isAudio ? 'mp3' : 'mp4')}`;
           }
         }
 
@@ -2830,6 +3123,47 @@ async function startServer() {
         (req.headers.range as string) ||
         (req.query.range ? `bytes=${String(req.query.range).replace(/^bytes=/i, '')}` : undefined);
 
+      // Serve SaveVideo spooled file (svspool:// or savevideo.uz/api/...) with full Range support
+      if (cached.directUrl.startsWith('svspool://') || cached.directUrl.includes('savevideo.uz/api/')) {
+        let svTaskId = '';
+        let svToken = '';
+        let svExt = isAudio ? 'mp3' : 'mp4';
+        if (cached.directUrl.startsWith('svspool://')) {
+          const parts = cached.directUrl.slice('svspool://'.length).split('::');
+          svTaskId = parts[0] || '';
+          svToken = decodeURIComponent(parts[1] || '');
+          svExt = parts[2] || svExt;
+        } else {
+          const m = cached.directUrl.match(/savevideo\.uz\/api\/(?:file|audio)\/([A-Za-z0-9_-]+)\?(?:.*&)?(?:t|token)=([^&]*)/i);
+          if (m) {
+            svTaskId = m[1];
+            svToken = decodeURIComponent(m[2] || '');
+          }
+        }
+        if (svTaskId) {
+          const spoolEntry = ensureSaveVideoSpooling(
+            svTaskId,
+            svToken,
+            svExt,
+            isAudio,
+            { url: sourceUrl, height: parseInt(quality, 10) || 720, audio: isAudio }
+          );
+          const disp = `${isDownload ? 'attachment' : 'inline'}; filename="onedownload_${quality}p_${svTaskId}.${svExt}"`;
+          const served = await serveFromSaveVideoSpool(
+            req,
+            res,
+            spoolEntry,
+            cached.mimeType || (isAudio ? 'audio/mpeg' : 'video/mp4'),
+            isDownload,
+            disp,
+            incomingRangeHeader
+          );
+          if (served) return;
+        }
+        streamUrlCache.delete(cacheKey);
+        return res.status(502).json({ error: 'SaveVideo spool stream unavailable' });
+      }
+
       // Serve locally transcoded resolution-locked MP4 (e.g. TikTok 360p / 480p) with full HTTP Range & HEAD support
       if (cached.directUrl.startsWith('file://')) {
         const localPath = cached.directUrl.slice('file://'.length);
@@ -2869,7 +3203,7 @@ async function startServer() {
             res.setHeader('Content-Length', String(req.method === 'HEAD' ? totalSize : chunkSize));
             if (req.method === 'HEAD') return res.end();
             const fileStream = fs.createReadStream(localPath, { start, end });
-            req.on('close', () => fileStream.destroy());
+            res.on('close', () => fileStream.destroy());
             return pipeline(fileStream, res, () => {});
           }
 
@@ -2877,7 +3211,7 @@ async function startServer() {
           res.setHeader('Content-Length', String(totalSize));
           if (req.method === 'HEAD') return res.end();
           const fileStream = fs.createReadStream(localPath);
-          req.on('close', () => fileStream.destroy());
+          res.on('close', () => fileStream.destroy());
           return pipeline(fileStream, res, () => {});
         } else {
           streamUrlCache.delete(cacheKey);
@@ -2935,7 +3269,7 @@ async function startServer() {
       }
 
       const streamClNum = Number(upstream.headers.get('content-length') || '0');
-      if (req.method === 'GET' && !req.headers.range && !isAudio && streamClNum > 0 && streamClNum < 120 * 1024) {
+      if (req.method === 'GET' && !incomingRangeHeader && !isAudio && streamClNum > 0 && streamClNum < 120 * 1024) {
         streamUrlCache.delete(cacheKey);
         return res.status(422).json({ error: `Upstream video payload too small (${streamClNum} bytes < 120 KB)` });
       }
@@ -2967,7 +3301,7 @@ async function startServer() {
 
       if (upstream.body) {
         const nodeStream = Readable.fromWeb(upstream.body as any);
-        req.on('close', () => nodeStream.destroy());
+        res.on('close', () => nodeStream.destroy());
         pipeline(nodeStream, res, () => {});
       } else {
         res.end();

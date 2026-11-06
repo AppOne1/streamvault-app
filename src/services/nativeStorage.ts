@@ -193,10 +193,8 @@ export async function ensureStoragePermissions(): Promise<boolean> {
 }
 
 /**
- * Saves a verified binary media Blob to the device storage / Gallery ONCE and silently.
- * - Rejects any corrupt or HTML / 403 error payloads so corrupt 80 KB files are NEVER saved.
- * - On Android APK: writes directly to public Download/OneDownload or Documents/OneDownload.
- * - On Web/Mobile Browser: triggers `forceDeviceDownload(cleanMediaBlob, safeFileName)` with no new tab.
+ * Saves a verified binary media Blob to the device storage / Gallery ONCE and silently
+ * using 768 KB chunked streaming so even 500 MB+ HD videos never trigger OutOfMemoryError.
  */
 export async function saveBlobToDevice(
   blob: Blob,
@@ -220,38 +218,92 @@ export async function saveBlobToDevice(
     ? 'audio/mp4'
     : 'video/mp4';
 
-  const cleanMediaBlob =
-    blob.type === canonicalMime ? blob : new Blob([blob], { type: canonicalMime });
+  // 768 KB chunk size (786,432 bytes - exact multiple of 3 for Base64 & < 1.1 MB peak RAM)
+  const CHUNK_BYTES = 768 * 1024;
+  const nativeBridge = typeof window !== 'undefined' ? (window as any).OneDownloadNative : null;
 
-  if (Capacitor.isNativePlatform()) {
+  // 1. Direct Native Android Bridge Chunked Saver (Fastest, Zero OOM, Instant MediaScanner Gallery Registration)
+  if (nativeBridge && typeof nativeBridge.beginChunkedMediaSave === 'function') {
     try {
       await ensureStoragePermissions();
-      const base64Data = await blobToBase64(cleanMediaBlob);
-
-      try {
-        const result = await Filesystem.writeFile({
-          path: `Download/OneDownload/${safeFileName}`,
-          data: base64Data,
-          directory: Directory.ExternalStorage,
-          recursive: true
-        });
-        return { saved: true, path: result.uri };
-      } catch {
-        const fallbackResult = await Filesystem.writeFile({
-          path: `OneDownload/${safeFileName}`,
-          data: base64Data,
-          directory: Directory.Documents,
-          recursive: true
-        });
-        return { saved: true, path: fallbackResult.uri };
+      const startPath = nativeBridge.beginChunkedMediaSave(safeFileName);
+      if (startPath) {
+        let offset = 0;
+        let allChunksOk = true;
+        while (offset < blob.size) {
+          const end = Math.min(offset + CHUNK_BYTES, blob.size);
+          const slice = blob.slice(offset, end);
+          const chunkB64 = await blobToBase64(slice);
+          const appended = nativeBridge.appendChunkedMediaSave(safeFileName, chunkB64);
+          if (!appended) {
+            allChunksOk = false;
+            break;
+          }
+          offset = end;
+        }
+        if (allChunksOk) {
+          const finalPath = nativeBridge.finishChunkedMediaSave(safeFileName, canonicalMime);
+          if (finalPath) {
+            return { saved: true, path: String(finalPath) };
+          }
+        }
       }
-    } catch (err) {
-      console.error('Native filesystem write failed:', err);
+    } catch (nativeErr) {
+      console.warn('OneDownloadNative chunked save fallback notice:', nativeErr);
     }
   }
 
-  // Standard Web / Mobile Browser silent single-execution Blob save (no target="_blank", no new tab)
+  // 2. Capacitor Filesystem Chunked Write + Append Fallback (Never allocates full-file Base64 in RAM)
+  if (Capacitor.isNativePlatform()) {
+    try {
+      await ensureStoragePermissions();
+      const targetCandidates: Array<{ path: string; directory: Directory }> = [
+        { path: `Download/OneDownload/${safeFileName}`, directory: Directory.ExternalStorage },
+        { path: `OneDownload/${safeFileName}`, directory: Directory.Documents },
+        { path: `OneDownload/${safeFileName}`, directory: Directory.Data }
+      ];
+
+      for (const candidate of targetCandidates) {
+        try {
+          let offset = 0;
+          let finalUri = '';
+          while (offset < blob.size) {
+            const end = Math.min(offset + CHUNK_BYTES, blob.size);
+            const slice = blob.slice(offset, end);
+            const chunkB64 = await blobToBase64(slice);
+            if (offset === 0) {
+              const res = await Filesystem.writeFile({
+                path: candidate.path,
+                data: chunkB64,
+                directory: candidate.directory,
+                recursive: true
+              });
+              finalUri = res.uri;
+            } else {
+              await Filesystem.appendFile({
+                path: candidate.path,
+                data: chunkB64,
+                directory: candidate.directory
+              });
+            }
+            offset = end;
+          }
+          if (finalUri) {
+            return { saved: true, path: finalUri };
+          }
+        } catch {
+          // Try next directory candidate
+        }
+      }
+    } catch (err) {
+      console.error('Native filesystem chunked write failed:', err);
+    }
+  }
+
+  // 3. Standard Web / Mobile Browser silent single-execution Blob save (no target="_blank", no new tab)
   try {
+    const cleanMediaBlob =
+      blob.type === canonicalMime ? blob : new Blob([blob], { type: canonicalMime });
     forceDeviceDownload(cleanMediaBlob, safeFileName);
     return { saved: true, path: `Downloads/${safeFileName}` };
   } catch (e) {

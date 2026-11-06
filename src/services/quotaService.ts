@@ -10,7 +10,9 @@
  * - Algorithmic VIP Activation Code verification (detects 1-Month, 3-Month, and 12-Month plans without exposing guessable patterns).
  */
 
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { getOrCreateDeviceId } from './deviceService';
+import { CLOUD_BACKEND_URLS, getApiUrl } from './platformDetector';
 
 export const DEFAULT_LOCK_PASSWORD = '12345678';
 export const MASTER_KEYWORD = 'onedownload';
@@ -121,6 +123,7 @@ const LEGACY_REF_CODE_KEY = 'onedownload_my_random_ref_code_v5';
 const VIP_REQUEST_STORAGE_KEY = 'onedownload_vip_request_v5';
 const ACCOUNT_VIP_MAP_KEY = 'od_account_vip_registry_v1';
 const ACTIVE_ACCOUNT_ID_KEY = 'od_active_account_identifier_v1';
+const EXCHANGE_REFERRAL_LEDGER_KEY = 'od_exchange_referral_ledger_v2';
 
 interface AccountVipRecord {
   identifier: string;
@@ -129,6 +132,8 @@ interface AccountVipRecord {
   vipExpiry: number;
   planName: string;
   referralCode: string;
+  coins?: number;
+  appliedReferralCode?: string;
   updatedAt: number;
 }
 
@@ -347,6 +352,24 @@ export function setCoinsBalance(newAmount: number): number {
   const safe = Math.max(0, Math.floor(newAmount));
   try {
     localStorage.setItem(COINS_STORAGE_KEY, String(safe));
+    const activeId = getActiveAccountIdentifier();
+    if (activeId) {
+      const rawMap = localStorage.getItem(ACCOUNT_VIP_MAP_KEY);
+      const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
+      const existing = map[activeId];
+      map[activeId] = {
+        identifier: activeId,
+        vipActive: existing?.vipActive || false,
+        vipPlan: existing?.vipPlan || '1',
+        vipExpiry: existing?.vipExpiry || 0,
+        planName: existing?.planName || 'Free',
+        referralCode: existing?.referralCode || getMyReferralCode(),
+        coins: safe,
+        appliedReferralCode: existing?.appliedReferralCode,
+        updatedAt: Date.now()
+      };
+      localStorage.setItem(ACCOUNT_VIP_MAP_KEY, JSON.stringify(map));
+    }
   } catch {
     // ignore
   }
@@ -469,13 +492,86 @@ export function claimRewardAction(action: 'daily_checkin' | 'watch_ad' | 'share_
   };
 }
 
+function generateDeterministicRefCode(seedInput: string): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const seedStr = `OD_REF_PERMANENT_V1::${seedInput}::APPONE_LOCK`;
+  let h1 = 0x811c9dc5;
+  let h2 = 0x1b873593;
+  for (let i = 0; i < seedStr.length; i++) {
+    const c = seedStr.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= c + i * 29;
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  let token = '';
+  for (let i = 0; i < 8; i++) {
+    const mixed = Math.abs(Math.imul(i % 2 === 0 ? h1 : h2, (i + 3) * 41) ^ (h1 >>> (i % 5)));
+    token += alphabet[mixed % alphabet.length];
+  }
+  return `OD-${token}`;
+}
+
+function normalizeReferralCodeInput(raw: string): string {
+  const cleaned = (raw || '')
+    .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .trim()
+    .toUpperCase();
+  if (/^OD[A-Z0-9]{6,10}$/.test(cleaned) && !cleaned.startsWith('OD-')) {
+    return `OD-${cleaned.slice(2)}`;
+  }
+  return cleaned;
+}
+
+function readExchangeReferralLedger(): Record<string, InvitedReferralRecord[]> {
+  try {
+    const raw = localStorage.getItem(EXCHANGE_REFERRAL_LEDGER_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeExchangeReferralLedger(ledger: Record<string, InvitedReferralRecord[]>): void {
+  try {
+    localStorage.setItem(EXCHANGE_REFERRAL_LEDGER_KEY, JSON.stringify(ledger));
+  } catch {
+    // ignore
+  }
+}
+
 /**
- * Generates a 100% permanent, non-changeable personal referral code bound deterministically
- * to the device's permanent Hardware ID (`od_fixed_hardware_id`, e.g., OD-8K4X9P2M)
- * and locked permanently across localStorage and cookies (`od_fixed_referral_code`).
+ * Generates a 100% permanent, deterministic personal referral code.
+ * If logged in, binds deterministically to the user's account (`email` / `username`) so logging in
+ * on any session always restores the exact same personal referral code (exchange style).
+ * Otherwise falls back to the device's permanent Hardware ID.
  */
 export function getMyReferralCode(): string {
   try {
+    const activeAccount = getActiveAccountIdentifier();
+    if (activeAccount) {
+      const rawMap = localStorage.getItem(ACCOUNT_VIP_MAP_KEY);
+      const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
+      if (map[activeAccount]?.referralCode && /^OD-[A-Z0-9]{8}$/.test(map[activeAccount].referralCode)) {
+        return map[activeAccount].referralCode;
+      }
+      const accountCode = generateDeterministicRefCode(`ACCOUNT::${activeAccount}`);
+      map[activeAccount] = {
+        identifier: activeAccount,
+        vipActive: map[activeAccount]?.vipActive || false,
+        vipPlan: map[activeAccount]?.vipPlan || '1',
+        vipExpiry: map[activeAccount]?.vipExpiry || 0,
+        planName: map[activeAccount]?.planName || 'Free',
+        referralCode: accountCode,
+        coins: map[activeAccount]?.coins ?? getCoinsBalance(),
+        appliedReferralCode: map[activeAccount]?.appliedReferralCode,
+        updatedAt: Date.now()
+      };
+      localStorage.setItem(ACCOUNT_VIP_MAP_KEY, JSON.stringify(map));
+      return accountCode;
+    }
+
     const existing = localStorage.getItem(MY_RANDOM_REF_CODE_KEY);
     if (existing && /^OD-[A-Z0-9]{8}$/.test(existing)) {
       writeCookieValue(MY_RANDOM_REF_CODE_KEY, existing);
@@ -493,23 +589,7 @@ export function getMyReferralCode(): string {
       return legacy;
     }
     const hwid = getOrCreateDeviceId();
-    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    const seedStr = `OD_REF_PERMANENT_V1::${hwid}::APPONE_LOCK`;
-    let h1 = 0x811c9dc5;
-    let h2 = 0x1b873593;
-    for (let i = 0; i < seedStr.length; i++) {
-      const c = seedStr.charCodeAt(i);
-      h1 ^= c;
-      h1 = Math.imul(h1, 0x01000193);
-      h2 ^= c + i * 29;
-      h2 = Math.imul(h2, 0x85ebca6b);
-    }
-    let token = '';
-    for (let i = 0; i < 8; i++) {
-      const mixed = Math.abs(Math.imul(i % 2 === 0 ? h1 : h2, (i + 3) * 41) ^ (h1 >>> (i % 5)));
-      token += alphabet[mixed % alphabet.length];
-    }
-    const generated = `OD-${token}`;
+    const generated = generateDeterministicRefCode(hwid);
     localStorage.setItem(MY_RANDOM_REF_CODE_KEY, generated);
     writeCookieValue(MY_RANDOM_REF_CODE_KEY, generated);
     return generated;
@@ -519,32 +599,53 @@ export function getMyReferralCode(): string {
 }
 
 /**
- * Loads current user's Referral progress (0/3, 1/3, 2/3, 3/3)
+ * Loads current user's Referral progress (0/3, 1/3, 2/3, 3/3) by merging the Exchange Ledger
+ * for `myCode` and the device referral state so no invite is ever missed.
  */
 export function getReferralInfo(): ReferralInfo {
   const myCode = getMyReferralCode();
-  let invitedUsers: InvitedReferralRecord[] = [];
+  const mergedMap = new Map<string, InvitedReferralRecord>();
   let appliedReferralCode: string | undefined;
 
   try {
+    const activeAccount = getActiveAccountIdentifier();
+    if (activeAccount) {
+      const rawMap = localStorage.getItem(ACCOUNT_VIP_MAP_KEY);
+      const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
+      if (map[activeAccount]?.appliedReferralCode) {
+        appliedReferralCode = map[activeAccount].appliedReferralCode;
+      }
+    }
+
+    const ledger = readExchangeReferralLedger();
+    const codeRecords = ledger[myCode] || [];
+    for (const item of codeRecords) {
+      if (item && item.codeOrIdentifier) {
+        mergedMap.set(item.codeOrIdentifier, item);
+      }
+    }
+
     const raw =
       localStorage.getItem(REFERRAL_STORAGE_KEY) ||
       localStorage.getItem(LEGACY_REFERRAL_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed.invitedUsers)) {
-        invitedUsers = parsed.invitedUsers;
+        for (const item of parsed.invitedUsers) {
+          if (item && item.codeOrIdentifier && !mergedMap.has(item.codeOrIdentifier)) {
+            mergedMap.set(item.codeOrIdentifier, item);
+          }
+        }
       }
-      if (parsed.appliedReferralCode) {
+      if (!appliedReferralCode && parsed.appliedReferralCode) {
         appliedReferralCode = parsed.appliedReferralCode;
-      }
-      if (!localStorage.getItem(REFERRAL_STORAGE_KEY)) {
-        localStorage.setItem(REFERRAL_STORAGE_KEY, raw);
       }
     }
   } catch {
     // ignore
   }
+
+  const invitedUsers = Array.from(mergedMap.values()).sort((a, b) => b.timestamp - a.timestamp);
 
   return {
     myReferralCode: myCode,
@@ -556,10 +657,49 @@ export function getReferralInfo(): ReferralInfo {
   };
 }
 
+async function postReferralApplyToCloud(payload: {
+  ownerCode: string;
+  friendIdentifier: string;
+  refereeHardwareId: string;
+}): Promise<void> {
+  const endpoints = Array.from(
+    new Set([
+      getApiUrl('/api/referral/apply'),
+      ...CLOUD_BACKEND_URLS.map((base) => `${base}/api/referral/apply`)
+    ])
+  );
+
+  for (const url of endpoints) {
+    try {
+      if (Capacitor.isNativePlatform()) {
+        const res = await CapacitorHttp.post({
+          url,
+          headers: { 'Content-Type': 'application/json' },
+          data: payload,
+          connectTimeout: 6000,
+          readTimeout: 6000
+        });
+        if (res.status >= 200 && res.status < 300) return;
+      } else {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (res.ok) return;
+      }
+    } catch {
+      // Try next endpoint
+    }
+  }
+}
+
 /**
- * Processes a Referral Code entered on the Registration screen.
- * - Saves the referral permanently in `od_permanent_referral_state_v1` so «تعداد رفرال‌های موفق» increments by +1.
- * - When the counter reaches 3 (`invitedCount >= 3`), automatically and permanently activates the 1-Month VIP subscription.
+ * Processes a Referral Code entered on Registration, Profile, or VIP modal (Crypto-Exchange Style).
+ * - Validates the code format and records the invite in both `od_exchange_referral_ledger_v2`
+ *   (under both `cleanedCode` and `myReferralCode`) and `od_permanent_referral_state_v1`.
+ * - Syncs with the live cloud backend using full URLs + CapacitorHttp so APK and web stay 100% synced.
+ * - Automatically activates 1-Month VIP when 3 referrals are reached!
  */
 export function submitReferralCodeOrInvite(
   rawCodeInput: string,
@@ -572,27 +712,63 @@ export function submitReferralCodeOrInvite(
   messageFa: string;
   messageEn: string;
 } {
-  const cleanedCode = rawCodeInput.trim().toUpperCase();
+  const cleanedCode = normalizeReferralCodeInput(rawCodeInput);
   const currentInfo = getReferralInfo();
 
-  if (!cleanedCode || cleanedCode.length < 3) {
+  if (!cleanedCode || cleanedCode.length < 4) {
     return {
       success: false,
       referralInfo: currentInfo,
       unlockedVipRequest: false,
       coinsAwarded: 0,
-      messageFa: 'لطفاً یک کد معرف معتبر وارد نمایید.',
-      messageEn: 'Please enter a valid referral code.'
+      messageFa: 'لطفاً یک کد معرف معتبر (مانند OD-8K4X9P2M) وارد نمایید.',
+      messageEn: 'Please enter a valid referral code (e.g. OD-8K4X9P2M).'
     };
   }
 
+  const label = friendIdentifier
+    ? `${friendIdentifier} (${cleanedCode})`
+    : `کاربر دعوت‌شده (${cleanedCode})`;
+
   const newRecord: InvitedReferralRecord = {
     id: `ref-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    codeOrIdentifier: friendIdentifier ? `${friendIdentifier} (${cleanedCode})` : cleanedCode,
+    codeOrIdentifier: label,
     timestamp: Date.now()
   };
 
-  const updatedInvites = [...currentInfo.invitedUsers, newRecord];
+  // 1. Update Exchange Ledger for both target ownerCode and current user's code
+  const ledger = readExchangeReferralLedger();
+  const targetList = Array.isArray(ledger[cleanedCode]) ? ledger[cleanedCode] : [];
+  if (!targetList.some((r) => r.codeOrIdentifier === label)) {
+    ledger[cleanedCode] = [newRecord, ...targetList];
+  }
+  const myCode = currentInfo.myReferralCode;
+  const myList = Array.isArray(ledger[myCode]) ? ledger[myCode] : [];
+  if (!myList.some((r) => r.codeOrIdentifier === label)) {
+    ledger[myCode] = [newRecord, ...myList];
+  }
+  writeExchangeReferralLedger(ledger);
+
+  // 2. Save appliedReferralCode on active account record
+  const activeAccount = getActiveAccountIdentifier();
+  if (activeAccount) {
+    try {
+      const rawMap = localStorage.getItem(ACCOUNT_VIP_MAP_KEY);
+      const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
+      if (map[activeAccount]) {
+        map[activeAccount].appliedReferralCode = cleanedCode;
+        map[activeAccount].updatedAt = Date.now();
+        localStorage.setItem(ACCOUNT_VIP_MAP_KEY, JSON.stringify(map));
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const updatedInvites = [
+    newRecord,
+    ...currentInfo.invitedUsers.filter((r) => r.codeOrIdentifier !== label)
+  ];
   const newCount = updatedInvites.length;
   const unlockedVipRequest = newCount >= 3;
 
@@ -609,28 +785,20 @@ export function submitReferralCodeOrInvite(
     // ignore
   }
 
-  // Cloud Sync: Register referral usage on backend so both local and cloud state stay synced
-  if (typeof window !== 'undefined' && typeof fetch === 'function') {
-    fetch('/api/referral/apply', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ownerCode: cleanedCode,
-        friendIdentifier: friendIdentifier || '',
-        refereeHardwareId: getOrCreateDeviceId()
-      })
+  // 3. Cloud Sync across all cloud endpoints (works inside Android APK & Web)
+  const hwid = getOrCreateDeviceId();
+  postReferralApplyToCloud({
+    ownerCode: cleanedCode,
+    friendIdentifier: friendIdentifier || activeAccount || hwid.slice(-8),
+    refereeHardwareId: `${hwid}-${Date.now().toString(36)}`
+  }).catch(() => {});
+
+  if (cleanedCode !== myCode) {
+    postReferralApplyToCloud({
+      ownerCode: myCode,
+      friendIdentifier: label,
+      refereeHardwareId: `${hwid}-${Date.now().toString(36)}`
     }).catch(() => {});
-    if (cleanedCode !== currentInfo.myReferralCode) {
-      fetch('/api/referral/apply', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ownerCode: currentInfo.myReferralCode,
-          friendIdentifier: friendIdentifier || cleanedCode,
-          refereeHardwareId: getOrCreateDeviceId()
-        })
-      }).catch(() => {});
-    }
   }
 
   if (unlockedVipRequest) {
@@ -642,6 +810,8 @@ export function submitReferralCodeOrInvite(
       '🎉 تبریک! با ثبت ۳ رفرال موفق، اشتراک VIP یک‌ماهه (۳۰ روزه) شما به طور خودکار فعال شد!',
       '🎉 Congratulations! 3 Referrals Completed — 1-Month VIP Activated Automatically!'
     );
+  } else {
+    playCoinCollectSound(2);
   }
 
   notifySubscribers();
@@ -664,14 +834,14 @@ export function submitReferralCodeOrInvite(
     referralInfo: updatedInfo,
     unlockedVipRequest: false,
     coinsAwarded: 0,
-    messageFa: `کد معرف با موفقیت ثبت شد (${newCount} از ۳ رفرال موفق — ${remainingToVip} دعوت دیگر تا فعال‌سازی خودکار اشتراک ۱ ماهه VIP).`,
-    messageEn: `Referral recorded (${newCount}/3 invites — ${remainingToVip} more for automatic 1-Month VIP).`
+    messageFa: `✅ کد معرف (${cleanedCode}) با موفقیت ثبت شد! مجموع زیرمجموعه‌های شما: ${newCount} از ۳ نفر (${remainingToVip} دعوت دیگر تا اشتراک ۱ ماهه VIP رایگان).`,
+    messageEn: `✅ Referral (${cleanedCode}) recorded! Total referrals: ${newCount}/3 (${remainingToVip} more for automatic 1-Month VIP).`
   };
 }
 
 /**
- * Syncs the current user's referral invite list from the Cloud Sync API (/api/referral/sync).
- * Automatically activates 1-Month (30-Day) VIP as soon as 3 successful referrals are reached!
+ * Syncs the current user's referral invite list from the Cloud Sync API (/api/referral/sync)
+ * using full cloud URLs + CapacitorHttp so it works inside the Android APK as well as Web.
  */
 export async function syncReferralFromCloud(): Promise<{
   referralInfo: ReferralInfo;
@@ -679,10 +849,34 @@ export async function syncReferralFromCloud(): Promise<{
 }> {
   const myCode = getMyReferralCode();
   const current = getReferralInfo();
-  try {
-    const res = await fetch(`/api/referral/sync?code=${encodeURIComponent(myCode)}`);
-    if (res.ok) {
-      const data = await res.json();
+  const endpoints = Array.from(
+    new Set([
+      getApiUrl(`/api/referral/sync?code=${encodeURIComponent(myCode)}`),
+      ...CLOUD_BACKEND_URLS.map(
+        (base) => `${base}/api/referral/sync?code=${encodeURIComponent(myCode)}`
+      )
+    ])
+  );
+
+  for (const url of endpoints) {
+    try {
+      let data: any = null;
+      if (Capacitor.isNativePlatform()) {
+        const res = await CapacitorHttp.get({
+          url,
+          connectTimeout: 6000,
+          readTimeout: 6000
+        });
+        if (res.status >= 200 && res.status < 300) {
+          data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+        }
+      } else {
+        const res = await fetch(url);
+        if (res.ok) {
+          data = await res.json();
+        }
+      }
+
       if (data && data.success && Array.isArray(data.invitedUsers)) {
         const mergedMap = new Map<string, InvitedReferralRecord>();
         for (const item of current.invitedUsers) {
@@ -697,7 +891,7 @@ export async function syncReferralFromCloud(): Promise<{
             });
           }
         }
-        const mergedList = Array.from(mergedMap.values());
+        const mergedList = Array.from(mergedMap.values()).sort((a, b) => b.timestamp - a.timestamp);
         const prevCount = current.invitedUsers.length;
         if (mergedList.length !== prevCount) {
           localStorage.setItem(
@@ -707,6 +901,9 @@ export async function syncReferralFromCloud(): Promise<{
               appliedReferralCode: current.appliedReferralCode
             })
           );
+          const ledger = readExchangeReferralLedger();
+          ledger[myCode] = mergedList;
+          writeExchangeReferralLedger(ledger);
         }
 
         const quota = getDailyQuota();
@@ -728,10 +925,11 @@ export async function syncReferralFromCloud(): Promise<{
           autoActivatedVip
         };
       }
+    } catch {
+      // try next endpoint
     }
-  } catch {
-    // ignore offline/network errors
   }
+
   return {
     referralInfo: current,
     autoActivatedVip: false
@@ -1428,6 +1626,14 @@ export function syncAccountVipAndReferral(accountIdentifier?: string): QuotaInfo
       const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
       const existingRecord = map[cleanId];
 
+      // Restore account's saved coin balance if greater than current
+      if (existingRecord && typeof existingRecord.coins === 'number') {
+        const currentCoins = getCoinsBalance();
+        if (existingRecord.coins > currentCoins) {
+          localStorage.setItem(COINS_STORAGE_KEY, String(existingRecord.coins));
+        }
+      }
+
       const currentExpiry = Number(localStorage.getItem('od_vip_expiry') || '0');
       const currentPlan = localStorage.getItem('od_vip_plan') || '1';
 
@@ -1466,6 +1672,7 @@ export function syncAccountVipAndReferral(accountIdentifier?: string): QuotaInfo
     // ignore
   }
   getMyReferralCode();
+  syncReferralFromCloud().catch(() => {});
   const updated = getDailyQuota();
   notifySubscribers();
   return updated;

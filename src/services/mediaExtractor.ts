@@ -80,7 +80,7 @@ export function unwrapRawMediaUrl(url: string): string {
       const qsIndex = url.indexOf('?');
       if (qsIndex !== -1) {
         const params = new URLSearchParams(url.slice(qsIndex + 1));
-        token = params.get('t') || '';
+        token = params.get('t') || params.get('token') || '';
       }
     } catch {
       // ignore
@@ -96,7 +96,7 @@ export function unwrapRawMediaUrl(url: string): string {
       const qsIndex = url.indexOf('?');
       if (qsIndex !== -1) {
         const params = new URLSearchParams(url.slice(qsIndex + 1));
-        token = params.get('t') || '';
+        token = params.get('t') || params.get('token') || '';
       }
     } catch {
       // ignore
@@ -156,7 +156,11 @@ function parseRequestedHeight(qualityLabel?: string): number {
   return 720;
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => {
+    const isHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+    setTimeout(resolve, isHidden ? Math.min(ms, 350) : ms);
+  });
 
 export function wrapStreamUrl(
   rawUrl: string,
@@ -636,20 +640,20 @@ export async function resolveDirectMediaStream(
 
         const taskId = startData.task_id;
         if (taskId) {
-          for (let attempt = 0; attempt < 95; attempt++) {
-            const simulatedPrep = Math.min(16, 4 + Math.floor(attempt / 4));
+          for (let attempt = 0; attempt < 110; attempt++) {
+            const simulatedPrep = Math.min(92, 6 + attempt * 3);
             onProgress?.(simulatedPrep);
-            await sleep(2000);
+            await sleep(1100);
             try {
               const statusRes = await fetchBackendApi(`/api/media/status/${taskId}`);
               if (!statusRes.ok) continue;
 
               const statusData = await statusRes.json();
               if (typeof statusData.progress === 'number' && statusData.progress > 0) {
-                onProgress?.(Math.min(18, Math.max(simulatedPrep, 3 + Math.round(statusData.progress * 0.15))));
+                onProgress?.(Math.min(98, Math.max(simulatedPrep, Math.round(statusData.progress))));
               }
               if (statusData.status === 'done') {
-                onProgress?.(18);
+                onProgress?.(99);
                 const resolvedTaskId = statusData.task_id || taskId;
                 const token = statusData.file_token || '';
                 const ext = isAudio ? 'mp3' : statusData.ext || 'mp4';
@@ -823,11 +827,11 @@ export async function resolveDirectMediaStream(
       });
 
       if (data && data.task_id) {
-        // Poll up to 120 times (3 minutes) so even 60-minute Long YouTube videos finish muxing cleanly!
-        for (let attempt = 0; attempt < 120; attempt++) {
-          const fallbackSimPrep = Math.min(16, 4 + Math.floor(attempt / 4));
+        // Poll up to 130 times so even 60-minute Long YouTube videos finish muxing cleanly!
+        for (let attempt = 0; attempt < 130; attempt++) {
+          const fallbackSimPrep = Math.min(92, 6 + attempt * 3);
           onProgress?.(fallbackSimPrep);
-          await sleep(1500);
+          await sleep(1100);
           const stData = await smartFetchJson(`https://savevideo.uz/api/status/${data.task_id}`, {
             method: 'GET',
             headers: { Referer: 'https://savevideo.uz/' },
@@ -836,7 +840,7 @@ export async function resolveDirectMediaStream(
           if (!stData) continue;
 
           if (typeof stData.progress === 'number' && stData.progress > 0) {
-            const mappedPrep = Math.min(18, Math.max(fallbackSimPrep, 3 + Math.round(stData.progress * 0.15)));
+            const mappedPrep = Math.min(98, Math.max(fallbackSimPrep, Math.round(stData.progress)));
             onProgress?.(mappedPrep);
           }
 
@@ -846,7 +850,7 @@ export async function resolveDirectMediaStream(
             if (fileSize > 0 && fileSize < minRequired) {
               break; // Reject corrupt/tiny file and try next resolution
             }
-            onProgress?.(18);
+            onProgress?.(99);
             const resolvedTaskId = stData.task_id || data.task_id;
             const token = stData.file_token || '';
             const rawSaveVideoUrl = isAudio
@@ -1108,7 +1112,7 @@ export async function fetchMediaStreamWithCorsFallback(
       targetUrl.startsWith('/api/media/') || targetUrl.includes('/api/media/');
     if (isBackendTarget) {
       addCandidate(getApiUrl(targetUrl));
-      if (unwrapped && unwrapped.startsWith('http')) {
+      if (unwrapped && unwrapped.startsWith('http') && !unwrapped.includes('savevideo.uz')) {
         addCandidate(unwrapped);
       }
     } else {

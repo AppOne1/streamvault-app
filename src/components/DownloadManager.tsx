@@ -368,19 +368,10 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
         </div>
       )}
 
-      {/* Batch Queue Live Summary Dashboard (Overall %, Speed & Total Volume) */}
+      {/* Batch Queue Live Summary Dashboard (Speed & Total Volume) */}
       {tasks.length > 0 && (
-        <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 card-3d space-y-3">
-          <div className="grid grid-cols-3 gap-2.5 text-center">
-            <div className="p-2.5 rounded-2xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200/70 dark:border-slate-800">
-              <span className="block text-[10px] font-bold text-slate-400">
-                {isFa ? 'پیشرفت کل' : isAr ? 'التقدم الإجمالي' : 'Total Progress'}
-              </span>
-              <span className="text-sm sm:text-base font-black text-indigo-600 dark:text-indigo-400 font-mono">
-                {overallQueuePercent}%
-              </span>
-            </div>
-
+        <div className="p-3.5 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 card-3d">
+          <div className="grid grid-cols-2 gap-2.5 text-center">
             <div className="p-2.5 rounded-2xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200/70 dark:border-slate-800">
               <span className="block text-[10px] font-bold text-slate-400">
                 {isFa ? 'مجموع سرعت همزمان' : isAr ? 'سرعة التحميل المتزامن' : 'Combined Speed'}
@@ -398,13 +389,6 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
                 {totalVolumeFormatted}
               </span>
             </div>
-          </div>
-
-          <div className="w-full h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden input-3d">
-            <div
-              className="h-full rounded-full bg-gradient-to-r from-indigo-600 via-violet-500 to-emerald-500 transition-all duration-300"
-              style={{ width: `${overallQueuePercent}%` }}
-            />
           </div>
         </div>
       )}

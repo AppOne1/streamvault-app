@@ -1,1 +1,43 @@
-if(!self.define){let e,s={};const n=(n,i)=>(n=new URL(n+".js",i).href,s[n]||new Promise(s=>{if("document"in self){const e=document.createElement("script");e.src=n,e.onload=s,document.head.appendChild(e)}else e=n,importScripts(n),s()}).then(()=>{let e=s[n];if(!e)throw new Error(`Module ${n} didn’t register its module`);return e}));self.define=(i,c)=>{const a=e||("document"in self?document.currentScript.src:"")||location.href;if(s[a])return;let o={};const r=e=>n(e,a),t={module:{uri:a},exports:o,require:r};s[a]=Promise.all(i.map(e=>t[e]||r(e))).then(e=>(c(...e),o))}}define(["./workbox-835c8c05"],function(e){"use strict";self.skipWaiting(),e.clientsClaim(),e.precacheAndRoute([{url:"pwa-maskable-512x512.png",revision:"3a80381685fc81b3f88e1c874b0fc5cc"},{url:"pwa-512x512.png",revision:"ad709bf76e4d60594b78a720ab9a7fc7"},{url:"pwa-192x192.png",revision:"fa39a196328c5aa0ac6303720d7b33f6"},{url:"index.html",revision:"cbe28810f227696e3a711290b8769b4c"},{url:"icon.svg",revision:"3c3b4f423cf8797ef1157da9261bfcb6"},{url:"favicon.ico",revision:"edd7f8c3eadc15298a4d331b412bb86c"},{url:"apple-touch-icon.png",revision:"78881c5f78e5e1c74f55d6c8634ebba7"},{url:"assets/workbox-window.prod.es5-Bd17z0YL.js",revision:null},{url:"assets/web-D1l3rh1Q.js",revision:null},{url:"assets/index-DMpCDcTC.js",revision:null},{url:"assets/index-CV5S7mHr.css",revision:null},{url:"apple-touch-icon.png",revision:"78881c5f78e5e1c74f55d6c8634ebba7"},{url:"favicon.ico",revision:"edd7f8c3eadc15298a4d331b412bb86c"},{url:"icon.svg",revision:"3c3b4f423cf8797ef1157da9261bfcb6"},{url:"manifest.json",revision:"04448e259fe39255746e2f4527afac78"},{url:"pwa-192x192.png",revision:"fa39a196328c5aa0ac6303720d7b33f6"},{url:"pwa-512x512.png",revision:"ad709bf76e4d60594b78a720ab9a7fc7"},{url:"pwa-maskable-512x512.png",revision:"3a80381685fc81b3f88e1c874b0fc5cc"},{url:"manifest.webmanifest",revision:"7ca6a3b6f2fb8ba219d1ed1eaf0aba7d"}],{}),e.cleanupOutdatedCaches(),e.registerRoute(new e.NavigationRoute(e.createHandlerBoundToURL("index.html"),{denylist:[/^\/api\//,/^\/offline-media\//]})),e.registerRoute(/^https:\/\/fonts\.googleapis\.com\/.*/i,new e.CacheFirst({cacheName:"google-fonts-cache",plugins:[new e.ExpirationPlugin({maxEntries:10,maxAgeSeconds:31536e3}),new e.CacheableResponsePlugin({statuses:[0,200]})]}),"GET"),e.registerRoute(/^https:\/\/fonts\.gstatic\.com\/.*/i,new e.CacheFirst({cacheName:"gstatic-fonts-cache",plugins:[new e.ExpirationPlugin({maxEntries:10,maxAgeSeconds:31536e3}),new e.CacheableResponsePlugin({statuses:[0,200]})]}),"GET"),e.registerRoute(/^https:\/\/cdn\.jsdelivr\.net\/.*/i,new e.CacheFirst({cacheName:"jsdelivr-fonts-cache",plugins:[new e.ExpirationPlugin({maxEntries:10,maxAgeSeconds:31536e3}),new e.CacheableResponsePlugin({statuses:[0,200]})]}),"GET")});
+// OneDownload Active Background Keep-Alive & Offline Media Service Worker
+self.addEventListener('install', () => {
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    (async () => {
+      try {
+        const keys = await caches.keys();
+        for (const key of keys) {
+          if (!key.includes('onedownload-offline-media')) {
+            await caches.delete(key);
+          }
+        }
+        await self.clients.claim();
+      } catch {
+        // ignore
+      }
+    })()
+  );
+});
+
+// Background Keep-Alive Session Handler: Prevents Android/iOS from suspending active downloads
+self.addEventListener('message', (event) => {
+  const data = event.data;
+  if (!data) return;
+
+  if (data.type === 'KEEP_ALIVE_DOWNLOAD') {
+    event.waitUntil(
+      (async () => {
+        if (event.source && typeof event.source.postMessage === 'function') {
+          event.source.postMessage({
+            type: 'SW_KEEP_ALIVE_ACK',
+            timestamp: Date.now(),
+            activeCount: data.activeCount || 0
+          });
+        }
+      })()
+    );
+  }
+});
+

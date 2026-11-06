@@ -9,6 +9,7 @@
 
 import { DownloadTask, Language } from '../types';
 import { getOfflineMedia } from './storageService';
+import { saveBlobToDevice, ensureMediaFileName } from './nativeStorage';
 
 export const DEVICE_ID_STORAGE_KEY = 'od_fixed_hardware_id';
 const LEGACY_DEVICE_ID_KEY = 'onedownload_unique_device_id_v1';
@@ -339,19 +340,48 @@ export async function shareDownloadedMediaFile(task: DownloadTask): Promise<{
       ? 'audio/mpeg'
       : 'video/mp4';
 
-  const cleanFileName =
+  const rawFileName =
     task.fileName ||
     `${task.title.replace(/[^\w\u0600-\u06FF\s.-]/g, '_').slice(0, 40)}.${
       task.format.format || (task.format.type === 'audio' ? 'mp3' : 'mp4')
     }`;
+  const cleanFileName = ensureMediaFileName(rawFileName, mimeType);
+  const shareCaption = `🎬 ${task.title}\n${task.originalUrl ? `🔗 ${task.originalUrl}\n` : ''}🚀 وان دانلود (OneDownload)`;
 
-  if (blob && typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+  // 1. Native Android APK Bridge (Shares actual MP4/MP3 file via FileProvider + Intent.ACTION_SEND)
+  const nativeBridge = typeof window !== 'undefined' ? (window as any).OneDownloadNative : null;
+  if (nativeBridge && typeof nativeBridge.shareMediaOrText === 'function') {
+    try {
+      if (blob) {
+        await saveBlobToDevice(blob, cleanFileName);
+      }
+      const sharedOk = nativeBridge.shareMediaOrText(
+        cleanFileName,
+        mimeType,
+        task.title,
+        shareCaption
+      );
+      if (sharedOk) {
+        return { success: true, method: 'file_share' };
+      }
+    } catch (nativeShareErr) {
+      console.warn('Native Android share fallback notice:', nativeShareErr);
+    }
+  }
+
+  // 2. Web / Mobile Browser File Share (only for files <= 60 MB to avoid browser File allocation OOM)
+  if (
+    blob &&
+    blob.size <= 60 * 1024 * 1024 &&
+    typeof navigator !== 'undefined' &&
+    typeof navigator.share === 'function'
+  ) {
     try {
       const mediaFile = new File([blob], cleanFileName, { type: mimeType });
       if (!navigator.canShare || navigator.canShare({ files: [mediaFile] })) {
         await navigator.share({
           title: task.title,
-          text: `🎬 ${task.title}\n🚀 OneDownload`,
+          text: shareCaption,
           files: [mediaFile]
         });
         return { success: true, method: 'file_share' };
@@ -363,17 +393,36 @@ export async function shareDownloadedMediaFile(task: DownloadTask): Promise<{
     }
   }
 
+  // 3. Web / Mobile Browser Text + Link Share
   if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
     try {
       await navigator.share({
         title: task.title,
-        text: `🎬 ${task.title}\n🚀 OneDownload`
+        text: shareCaption,
+        url: task.originalUrl && task.originalUrl.startsWith('http') ? task.originalUrl : undefined
       });
       return { success: true, method: 'text_share' };
-    } catch {
-      // ignore
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        return { success: false, method: 'text_share' };
+      }
     }
   }
 
-  return { success: false, method: 'disk_export' };
+  // 4. Universal Clipboard Fallback (Never fails or appears disabled)
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(shareCaption);
+    } else if (typeof document !== 'undefined') {
+      const ta = document.createElement('textarea');
+      ta.value = shareCaption;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    return { success: true, method: 'text_share' };
+  } catch {
+    return { success: false, method: 'disk_export' };
+  }
 }

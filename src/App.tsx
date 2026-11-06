@@ -25,6 +25,8 @@ import {
   loadSessionFromStorage,
   loadTasksFromStorage,
   resetUserSessionAndClearAllData,
+  restoreAccountVaultSnapshot,
+  saveAccountVaultSnapshot,
   saveSettingsToStorage,
   saveSessionToStorage,
   saveTasksToStorage
@@ -231,16 +233,41 @@ export default function App() {
 
   useEffect(() => {
     saveSessionToStorage(userSession);
-    if (userSession.isLoggedIn && (userSession.user.email || userSession.user.phone)) {
-      const syncedQuota = syncAccountVipAndReferral(
-        userSession.user.email || userSession.user.phone
-      );
+    if (userSession.isLoggedIn && (userSession.user.email || userSession.user.phone || userSession.user.name)) {
+      const accountKey = userSession.user.email || userSession.user.phone || userSession.user.name;
+      const syncedQuota = syncAccountVipAndReferral(accountKey);
       setQuotaInfo(syncedQuota);
+      setCoinsBalance(getCoinsBalance());
+
+      // Restore account's saved tasks & hydrate from IndexedDB so no video/audio is ever lost on re-login
+      restoreAccountVaultSnapshot(accountKey).then((vault) => {
+        const currentStored = loadTasksFromStorage();
+        const combinedMap = new Map<string, DownloadTask>();
+        if (vault?.tasks) {
+          vault.tasks.forEach((t) => {
+            if (t && t.id) combinedMap.set(t.id, t);
+          });
+        }
+        currentStored.forEach((t) => {
+          if (t && t.id) combinedMap.set(t.id, t);
+        });
+        tasks.forEach((t) => {
+          if (t && t.id) combinedMap.set(t.id, t);
+        });
+        const mergedList = Array.from(combinedMap.values());
+        hydrateTasksFromIndexedDB(mergedList).then((hydrated) => {
+          setTasks(hydrated);
+          saveAccountVaultSnapshot(userSession, hydrated);
+        });
+      });
     }
   }, [userSession]);
 
   useEffect(() => {
     saveTasksToStorage(tasks);
+    if (userSession.isLoggedIn) {
+      saveAccountVaultSnapshot(userSession, tasks);
+    }
   }, [tasks]);
 
   // Subscribe to quota, Jet Coins balance & CafeBazaar Poolakey purchase updates across the app
@@ -260,7 +287,7 @@ export default function App() {
           ...prev,
           user: {
             ...prev.user,
-            plan: 'Pro'
+            plan: 'VIP Pro'
           }
         }));
         setToastNotice({
@@ -798,19 +825,20 @@ export default function App() {
   };
 
   /**
-   * Complete Logout & State Reset:
-   * Cancels active downloads, clears session, tasks, IndexedDB blobs, and resets coins to 0.
+   * Logout while 100% preserving all downloaded videos, audios, and account vault data!
+   * When the user logs back in with the same username/email and password, all their videos,
+   * audios, coins, referrals, and VIP status are immediately restored.
    */
   const handleCompleteLogout = async (keepModalOpen = true) => {
-    tasks.forEach((t) => downloadEngine.cancelTask(t));
-    setTasks([]);
+    if (userSession.isLoggedIn) {
+      saveAccountVaultSnapshot(userSession, tasks);
+    }
     setParsedMedia(null);
     setActivePlayerTask(null);
     setInputUrl('');
     setCustomFileName('');
     setScheduledTime('');
     resetUserAccountAndQuotaToGuest();
-    setCoinsBalance(0);
     setQuotaInfo(getDailyQuota());
     setActiveTab('downloader');
     setIsAuthModalOpen(keepModalOpen);
@@ -1268,8 +1296,6 @@ export default function App() {
       <InAppUpdateModal
         language={settings.language}
         isOpen={isUpdateModalOpen}
-        currentVersion={CURRENT_APP_VERSION}
-        latestVersion={latestServerVersion}
         onClose={() => {
           try {
             sessionStorage.setItem(UPDATE_DISMISSED_SESSION_KEY, 'true');

@@ -34,6 +34,7 @@ import {
 import {
   getLocalizedGuestName,
   isDefaultGuestName,
+  restoreAccountVaultSnapshot,
   setLockedAccountCurrency
 } from '../services/storageService';
 import { getOrCreateDeviceId } from '../services/deviceService';
@@ -304,10 +305,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     raw.replace(/[<>"'`;\\]/g, '').replace(/[\u0000-\u001F\u007F]/g, '').trim();
 
   const isValidEmailOrPhone = (raw: string): boolean => {
-    const cleaned = sanitizeAuthInput(normalizeDigits(raw)).replace(/[\s-]/g, '');
-    if (!cleaned || cleaned.length > 120) return false;
-    if (cleaned.includes('@') && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleaned)) return true;
-    return /^(\+?\d{8,15}|09\d{9})$/.test(cleaned);
+    const cleaned = sanitizeAuthInput(normalizeDigits(raw)).trim();
+    if (!cleaned || cleaned.length < 3 || cleaned.length > 120) return false;
+    return true;
   };
 
   // Deterministic Security Hash for Password Storage (CafeBazaar / Myket Security Standard)
@@ -386,8 +386,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     onClose();
   };
 
-  // 1. Single-Page Modern Login / Registration Handler (Supports Email OR Mobile Phone Number + Referral)
-  const handleGuestAuthSubmit = (e: React.FormEvent) => {
+  // 1. Single-Page Modern Login / Registration Handler (Supports Username, Email OR Mobile Phone Number + Referral)
+  const handleGuestAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setStatusMessage(null);
 
@@ -412,10 +412,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setStatusMessage({
         type: 'error',
         text: isFa
-          ? 'لطفاً یک آدرس ایمیل یا شماره موبایل معتبر وارد نمایید.'
+          ? 'لطفاً نام کاربری، آدرس ایمیل یا شماره موبایل معتبر وارد نمایید.'
           : isAr
-          ? 'يرجى إدخال بريد إلكتروني أو رقم هاتف صحيح.'
-          : 'Please enter a valid email address or mobile phone number.'
+          ? 'يرجى إدخال اسم مستخدم أو بريد إلكتروني أو رقم هاتف صحيح.'
+          : 'Please enter a valid username, email address, or mobile phone number.'
       });
       return;
     }
@@ -433,14 +433,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
 
     const hashedPass = computeSecurePasswordDigest(cleanPass);
+    const savedVault = await restoreAccountVaultSnapshot(cleanIdentifier);
 
     if (guestMode === 'login') {
+      const expectedHash = savedVault?.user?.passwordHash || (
+        session.user.email && session.user.email.toLowerCase() === cleanIdentifier.toLowerCase()
+          ? session.user.passwordHash
+          : undefined
+      );
       if (
-        session.user.email &&
-        session.user.passwordHash &&
-        session.user.email.toLowerCase() === cleanIdentifier.toLowerCase() &&
-        session.user.passwordHash !== cleanPass &&
-        session.user.passwordHash !== hashedPass
+        expectedHash &&
+        expectedHash !== cleanPass &&
+        expectedHash !== hashedPass
       ) {
         const nextFails = failedAttempts + 1;
         setFailedAttempts(nextFails);
@@ -465,41 +469,45 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     const effectiveCountry: UserCountryCode =
       guestMode === 'register'
         ? country
-        : session.user.country || (language === 'fa' ? 'IR' : country);
+        : savedVault?.user?.country || session.user.country || (language === 'fa' ? 'IR' : country);
     setLockedAccountCurrency(effectiveCountry === 'IR' || language === 'fa' ? 'toman' : 'usdt');
+
+    // Bind and restore any account-bound VIP subscription & permanent referral code for this account
+    const latestQuota = syncAccountVipAndReferral(cleanIdentifier);
 
     // Process optional referral code on the single-page login/signup screen
     if (registerReferralCode.trim().length >= 3) {
       submitReferralCodeOrInvite(sanitizeAuthInput(registerReferralCode.trim()), cleanIdentifier);
     }
 
-    // Bind and restore any account-bound VIP subscription & permanent referral code for this email/phone
-    const latestQuota = syncAccountVipAndReferral(cleanIdentifier);
     const latestReferral = getReferralInfo();
-    setQuota(latestQuota);
+    setQuota(getDailyQuota());
     setReferralInfo(latestReferral);
 
     const fallbackName = cleanIdentifier.includes('@')
       ? cleanIdentifier.split('@')[0]
       : cleanIdentifier;
-    const displayName =
-      (!isDefaultGuestName(name) && sanitizeAuthInput(name)) ||
-      fallbackName ||
-      getLocalizedGuestName(language);
+    const restoredName =
+      savedVault?.user?.name && !isDefaultGuestName(savedVault.user.name)
+        ? savedVault.user.name
+        : !isDefaultGuestName(name) && sanitizeAuthInput(name)
+        ? sanitizeAuthInput(name)
+        : fallbackName || getLocalizedGuestName(language);
 
     onUpdateSession({
       isLoggedIn: true,
       user: {
         ...session.user,
-        id: `user-${Date.now()}`,
-        name: displayName,
+        ...savedVault?.user,
+        id: savedVault?.user?.id || `user-${Date.now()}`,
+        name: restoredName,
         email: cleanIdentifier,
         country: effectiveCountry,
         passwordHash: hashedPass,
-        avatarUrl,
-        plan: latestQuota.isPro ? 'VIP Pro' : 'Free',
-        vipExpiry: latestQuota.proExpiryDate,
-        vipPlan: latestQuota.proPlanName,
+        avatarUrl: avatarUrl || savedVault?.user?.avatarUrl,
+        plan: getDailyQuota().isPro ? 'VIP Pro' : 'Free',
+        vipExpiry: getDailyQuota().proExpiryDate,
+        vipPlan: getDailyQuota().proPlanName,
         referralCode: latestReferral.myReferralCode
       }
     });
@@ -1303,8 +1311,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </div>
               )}
 
-              {/* Permanent Hardware ID & Personal Referral Code Card in Profile */}
-              <div className="p-3 rounded-2xl bg-indigo-50/70 dark:bg-slate-950/90 border border-indigo-500/30 space-y-2">
+              {/* Permanent Hardware ID & Crypto-Exchange Style Referral Dashboard in Profile */}
+              <div className="p-3 rounded-2xl bg-indigo-50/70 dark:bg-slate-950/90 border border-indigo-500/30 space-y-2.5">
                 <div className="flex items-center justify-between gap-2 text-[11px]">
                   <span className="font-black text-slate-600 dark:text-slate-300">
                     {isFa
@@ -1324,10 +1332,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-indigo-500/20 text-[11px]">
                   <span className="font-black text-slate-600 dark:text-slate-300">
                     {isFa
-                      ? 'کد معرف اختصاصی شما (۳ دعوت = ۱ ماه VIP):'
+                      ? 'کد رفرال اختصاصی حساب شما:'
                       : isAr
-                      ? 'كود الدعوة الخاص بك (٣ دعوات = شهر VIP):'
-                      : 'Your Referral Code (3 Invites = 1M VIP):'}
+                      ? 'كود الإحالة الخاص بحسابك:'
+                      : 'Your Account Referral Code:'}
                   </span>
                   <button
                     type="button"
@@ -1345,6 +1353,97 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                         : 'Copied ✓'
                       : referralInfo.myReferralCode}
                   </button>
+                </div>
+
+                {/* Live Exchange-Style Referral Counter & Progress Bar */}
+                <div className="pt-1.5 border-t border-indigo-500/20 space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-black text-slate-700 dark:text-slate-200 flex items-center gap-1">
+                      <Users className="w-3.5 h-3.5 text-emerald-500" />
+                      <span>
+                        {isFa
+                          ? 'زیرمجموعه‌های ثبت‌شده (۳ نفر = ۱ ماه VIP):'
+                          : isAr
+                          ? 'الإحالات المسجلة (٣ = شهر VIP):'
+                          : 'Verified Referrals (3 = 1M VIP):'}
+                      </span>
+                    </span>
+                    <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-black text-xs">
+                      {isFa
+                        ? `${toFaDigits(referralInfo.invitedCount)} از ${toFaDigits(3)} نفر`
+                        : isAr
+                        ? `${toArDigits(referralInfo.invitedCount)} من ${toArDigits(3)}`
+                        : `${referralInfo.invitedCount} / 3`}
+                    </span>
+                  </div>
+
+                  <div className="w-full h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-indigo-500 via-emerald-500 to-teal-400 transition-all duration-500"
+                      style={{
+                        width: `${Math.min(100, Math.round((referralInfo.invitedCount / 3) * 100))}%`
+                      }}
+                    />
+                  </div>
+
+                  {/* Direct Referral Code Input inside Profile (in case user didn't enter it at signup) */}
+                  <div className="flex items-center gap-1.5 pt-1">
+                    <input
+                      type="text"
+                      dir="ltr"
+                      value={registerReferralCode}
+                      onChange={(e) => setRegisterReferralCode(e.target.value.toUpperCase())}
+                      placeholder={
+                        isFa
+                          ? 'ثبت کد معرف دوستان (مثال: OD-8K4X9P2M)'
+                          : isAr
+                          ? 'إدخال كود إحالة الصديق (OD-XXXX)'
+                          : 'Enter friend referral code (OD-XXXX)'
+                      }
+                      className="flex-1 px-2.5 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-indigo-500/30 text-[11px] font-mono font-bold text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:border-indigo-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!registerReferralCode.trim()) return;
+                        const res = submitReferralCodeOrInvite(
+                          sanitizeAuthInput(registerReferralCode.trim()),
+                          session.user.email || session.user.name
+                        );
+                        setReferralInfo(res.referralInfo);
+                        setQuota(getDailyQuota());
+                        if (res.success) {
+                          setRegisterReferralCode('');
+                        }
+                        setStatusMessage({
+                          type: res.success ? 'success' : 'error',
+                          text: isFa ? res.messageFa : res.messageEn
+                        });
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-black shrink-0 cursor-pointer transition-colors"
+                    >
+                      {isFa ? 'ثبت کد معرف' : isAr ? 'تأكيد الكود' : 'Apply Code'}
+                    </button>
+                  </div>
+
+                  {/* List of Referred Users (Crypto-Exchange Style) */}
+                  {referralInfo.invitedUsers.length > 0 && (
+                    <div className="pt-1 space-y-1 max-h-24 overflow-y-auto">
+                      {referralInfo.invitedUsers.map((inv, idx) => (
+                        <div
+                          key={inv.id || idx}
+                          className="flex items-center justify-between px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-900/90 border border-slate-200/70 dark:border-slate-800 text-[10px]"
+                        >
+                          <span className="font-bold text-slate-700 dark:text-slate-200 truncate">
+                            {isFa ? `ردیف ${toFaDigits(idx + 1)}:` : `#${idx + 1}:`} {inv.codeOrIdentifier}
+                          </span>
+                          <span className="text-emerald-600 dark:text-emerald-400 font-black shrink-0">
+                            {isFa ? 'تأیید شده ✓' : isAr ? 'مؤكد ✓' : 'Verified ✓'}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 

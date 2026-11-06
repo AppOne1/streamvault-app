@@ -84,6 +84,7 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [isCssFullscreen, setIsCssFullscreen] = useState<boolean>(false);
   const [isLandscapeRotated, setIsLandscapeRotated] = useState<boolean>(false);
+  const [showControls, setShowControls] = useState<boolean>(true);
   const [hasOfflineBlob, setHasOfflineBlob] = useState<boolean>(false);
   const [videoAspect, setVideoAspect] = useState<'landscape' | 'portrait'>(() =>
     isLikelyVerticalVideo(task) ? 'portrait' : 'landscape'
@@ -726,10 +727,23 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
 
   const toggleOrientation = async () => {
     try {
+      const nextRotated = !isLandscapeRotated;
       if (!isFullscreen && !isCssFullscreen) {
         setIsCssFullscreen(true);
         setIsFullscreen(true);
       }
+
+      // 1. Native Android APK Bridge orientation switch
+      const nativeBridge = typeof window !== 'undefined' ? (window as any).OneDownloadNative : null;
+      if (nativeBridge && typeof nativeBridge.setScreenOrientation === 'function') {
+        const isCurrentlyLandscape =
+          typeof window !== 'undefined' && window.innerWidth > window.innerHeight;
+        nativeBridge.setScreenOrientation(isCurrentlyLandscape ? 'portrait' : 'landscape');
+        setIsLandscapeRotated(false);
+        return;
+      }
+
+      // 2. Web Screen Orientation API
       if (typeof screen !== 'undefined' && 'orientation' in screen) {
         const orient = screen.orientation as any;
         const currentType = orient?.type || '';
@@ -756,8 +770,9 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
           }
         }
       }
-      // If browser/WebView does not support screen.orientation.lock (or phone rotation lock is on), rotate via CSS Cinema Landscape!
-      setIsLandscapeRotated((prev) => !prev);
+
+      // 3. CSS Fixed Cinema Landscape Rotation Fallback
+      setIsLandscapeRotated(nextRotated);
     } catch {
       setIsLandscapeRotated((prev) => !prev);
     }
@@ -783,68 +798,75 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
         style={
           isLandscapeRotated
             ? {
+                position: 'fixed',
+                top: '50%',
+                left: '50%',
                 width: '100dvh',
                 height: '100vw',
-                transform: 'rotate(90deg)',
-                transformOrigin: 'center center'
+                transform: 'translate(-50%, -50%) rotate(90deg)',
+                transformOrigin: 'center center',
+                zIndex: 60
               }
             : undefined
         }
-        className={`relative bg-slate-950 text-white shadow-2xl overflow-hidden flex flex-col ${
+        className={`bg-slate-950 text-white shadow-2xl overflow-hidden flex flex-col ${
           isLandscapeRotated
-            ? 'max-w-none rounded-none border-0 justify-between'
+            ? 'max-w-none rounded-none border-0'
             : activeFullscreen
-            ? 'w-screen h-dvh max-w-none rounded-none border-0 justify-between'
+            ? 'fixed inset-0 w-screen h-dvh max-w-none rounded-none border-0 z-50'
             : videoAspect === 'portrait' && isViewportPortrait
-            ? 'w-full max-w-md rounded-2xl border border-slate-800 my-auto max-h-[96dvh]'
-            : 'w-full max-w-4xl rounded-2xl border border-slate-800 my-auto max-h-[96dvh]'
+            ? 'relative w-full max-w-md rounded-2xl border border-slate-800 my-auto max-h-[96dvh]'
+            : 'relative w-full max-w-4xl rounded-2xl border border-slate-800 my-auto max-h-[96dvh]'
         }`}
       >
-        {/* Top Header Bar */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between px-4 py-2.5 bg-slate-900/90 border-b border-slate-800 gap-2 shrink-0">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <PlatformIcon platform={task.platform} size={22} />
+        {/* Top Header Bar - Auto-hides in Fullscreen/Rotated mode when showControls is false */}
+        <div
+          className={`flex items-center justify-between px-3.5 py-2 bg-slate-900/90 backdrop-blur-md border-b border-slate-800/80 gap-2 shrink-0 transition-opacity duration-200 ${
+            activeFullscreen
+              ? `absolute top-0 left-0 right-0 z-30 ${
+                  showControls ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+                }`
+              : ''
+          }`}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <PlatformIcon platform={task.platform} size={20} />
             <div className="truncate">
-              <h3 className="font-bold text-sm sm:text-base text-white truncate">
+              <h3 className="font-bold text-xs sm:text-sm text-white truncate">
                 {task.title}
               </h3>
-              <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
+              <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
                 <span className="text-indigo-400 font-bold">{task.format.qualityLabel}</span>
-                <span>•</span>
-                <span>{videoAspect === 'portrait' ? '9:16 Vertical' : '16:9 Cinema'}</span>
                 <span>•</span>
                 <span>{task.format.format.toUpperCase()}</span>
               </div>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
-            {/* Stream Mode vs Local File Mode Switcher (for YouTube / Video) */}
+          <div className="flex items-center gap-1.5 shrink-0">
             {ytVideoId && isVideo && (
-              <div className="flex items-center p-0.5 rounded-lg bg-slate-800 text-xs font-semibold">
+              <div className="flex items-center p-0.5 rounded-lg bg-slate-800 text-[11px] font-semibold">
                 <button
                   onClick={() => setPlayerMode('stream')}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all ${
+                  className={`flex items-center gap-1 px-2 py-1 rounded-md transition-all ${
                     playerMode === 'stream'
                       ? 'bg-indigo-600 text-white shadow-xs'
                       : 'text-slate-400 hover:text-white'
                   }`}
-                  title="پخش ویدیوی اصلی و کامل"
                 >
-                  <Tv className="w-3.5 h-3.5" />
-                  <span className="text-[11px]">{language === 'fa' ? 'ویدیوی اصلی' : 'Real Stream'}</span>
+                  <Tv className="w-3 h-3" />
+                  <span>{language === 'fa' ? 'اصلی' : 'Stream'}</span>
                 </button>
                 <button
                   onClick={() => setPlayerMode('file')}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all ${
+                  className={`flex items-center gap-1 px-2 py-1 rounded-md transition-all ${
                     playerMode === 'file'
                       ? 'bg-indigo-600 text-white shadow-xs'
                       : 'text-slate-400 hover:text-white'
                   }`}
-                  title="پخش فایل محلی"
                 >
-                  <HardDrive className="w-3.5 h-3.5" />
-                  <span className="text-[11px]">{language === 'fa' ? 'فایل آفلاین' : 'Offline'}</span>
+                  <HardDrive className="w-3 h-3" />
+                  <span>{language === 'fa' ? 'آفلاین' : 'Offline'}</span>
                 </button>
               </div>
             )}
@@ -852,12 +874,15 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
             <button
               type="button"
               onClick={() => {
+                try {
+                  (window as any).OneDownloadNative?.setScreenOrientation?.('portrait');
+                } catch {}
                 setIsLandscapeRotated(false);
                 setIsCssFullscreen(false);
                 setIsFullscreen(false);
                 onClose();
               }}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-black btn-3d-secondary"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-black btn-3d-secondary cursor-pointer"
               title={t.closePlayer}
             >
               {language === 'fa' ? <ArrowRight className="w-3.5 h-3.5" /> : <ArrowLeft className="w-3.5 h-3.5" />}
@@ -866,19 +891,28 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
           </div>
         </div>
 
-        {/* Media Screen Area - Adapts responsively to both Portrait (9:16) & Landscape (16:9) orientations */}
+        {/* Media Screen Area - Guaranteed full height in Fullscreen & Rotated modes */}
         <div
+          onClick={() => {
+            if (activeFullscreen) {
+              setShowControls((prev) => !prev);
+            }
+          }}
           className={`relative w-full bg-black flex items-center justify-center overflow-hidden ${
             activeFullscreen
-              ? 'flex-1 min-h-0 h-full'
+              ? 'w-full h-full flex-1 min-h-0'
               : videoAspect === 'portrait' && isViewportPortrait
-              ? 'aspect-[9/16] max-h-[66dvh]'
-              : 'aspect-video max-h-[66dvh]'
+              ? 'aspect-[9/16] max-h-[68dvh] min-h-[260px]'
+              : 'aspect-video max-h-[68dvh] min-h-[220px]'
           }`}
         >
           {/* Floating Quick Fullscreen & Orientation Controls Overlay */}
-          {isVideo && (
-            <div className="absolute top-3 right-3 z-20 flex items-center gap-1.5 pointer-events-auto">
+          {isVideo && (!activeFullscreen || showControls) && (
+            <div
+              className={`absolute ${
+                activeFullscreen ? 'top-14' : 'top-3'
+              } right-3 z-20 flex items-center gap-1.5 pointer-events-auto`}
+            >
               <button
                 type="button"
                 onClick={(e) => {
@@ -911,7 +945,7 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
                   e.stopPropagation();
                   toggleFullscreen();
                 }}
-                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-black/65 hover:bg-indigo-600/90 text-white text-[11px] font-bold backdrop-blur-md border border-white/15 shadow-lg transition-all"
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-black/65 hover:bg-indigo-600/90 text-white text-[11px] font-bold backdrop-blur-md border border-white/15 shadow-lg transition-all cursor-pointer"
                 title={t.fullscreen}
               >
                 {activeFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize className="w-3.5 h-3.5" />}
@@ -1139,22 +1173,17 @@ export const BuiltInMediaPlayer: React.FC<BuiltInMediaPlayerProps> = ({
           )}
         </div>
 
-        {/* Player Status Bar */}
-        <div className="px-4 py-2 bg-slate-900/90 border-t border-slate-800 flex items-center justify-between text-xs">
-          <div className="flex items-center gap-2 text-slate-300">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-extrabold">
-              <Check className="w-3.5 h-3.5" />
-              <span>{language === 'fa' ? 'پخش مستقیم آفلاین' : 'Direct Playback (Zero-VPN)'}</span>
-            </span>
-          </div>
-
-          <span className="text-[11px] text-slate-400 font-mono">
-            {task.fileName}
-          </span>
-        </div>
-
-        {/* Custom Media Controls Chrome */}
-        <div className="p-4 bg-slate-900/95 border-t border-slate-800 space-y-2">
+        {/* Custom Media Controls Chrome (Floating Overlay in Fullscreen/Rotated mode, Clean Compact Bar in Window mode) */}
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className={`p-3 bg-slate-900/95 backdrop-blur-md border-t border-slate-800/80 space-y-2 transition-opacity duration-200 ${
+            activeFullscreen
+              ? `absolute bottom-0 left-0 right-0 z-30 ${
+                  showControls ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+                }`
+              : ''
+          }`}
+        >
             {/* Progress / Scrubber Bar */}
             <div className="flex items-center gap-3">
               <span className="text-xs font-mono text-slate-400 min-w-[40px] text-right">
