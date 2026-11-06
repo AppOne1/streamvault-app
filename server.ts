@@ -1714,13 +1714,13 @@ async function extractOpenGraphMedia(url: string): Promise<ExtractedPlatformMedi
 
 async function startServer() {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: '10mb' }));
 
   // CORS headers for all API requests (including Range & Content-Range for parallel multi-segment downloads)
   app.use('/api', (req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range, Authorization');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range, Authorization, X-Requested-With');
     res.setHeader(
       'Access-Control-Expose-Headers',
       'Content-Range, Content-Length, Accept-Ranges, Content-Type, Content-Disposition'
@@ -3417,17 +3417,35 @@ async function startServer() {
   });
 
   /**
-   * 8. Cloud Referral Sync Store (/api/referral/apply & /api/referral/sync)
-   * Stores successful referral invites by referral code and syncs invite counts to the code owner.
+   * 8. Cloud Referral & Account Vault Sync Store (/api/referral/apply, /api/referral/sync, /api/account/sync, /api/account/restore)
+   * Stores successful referral invites and full user account snapshots (videos, audios, saved items, coins, daily quota, daily reward, VIP, and referrals).
    */
   const referralDataDir = path.resolve(__dirname, 'data');
   const referralDataFile = path.resolve(referralDataDir, 'cloud_referrals.json');
+  const accountVaultFile = path.resolve(referralDataDir, 'cloud_accounts.json');
 
   interface CloudReferralEntry {
     id: string;
     codeOrIdentifier: string;
     refereeHardwareId?: string;
     timestamp: number;
+  }
+
+  function normalizeServerAccountKey(raw?: string | null): string {
+    if (!raw || typeof raw !== 'string') return '';
+    let s = raw
+      .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
+      .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+      .trim()
+      .toLowerCase();
+    if (/^\+989\d{9}$/.test(s)) {
+      s = '0' + s.slice(3);
+    } else if (/^989\d{9}$/.test(s)) {
+      s = '0' + s.slice(2);
+    } else if (/^9\d{9}$/.test(s)) {
+      s = '0' + s;
+    }
+    return s;
   }
 
   function loadCloudReferrals(): Record<string, CloudReferralEntry[]> {
@@ -3454,10 +3472,38 @@ async function startServer() {
     }
   }
 
+  function loadCloudAccounts(): Record<string, any> {
+    try {
+      if (fs.existsSync(accountVaultFile)) {
+        const raw = fs.readFileSync(accountVaultFile, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    } catch {
+      // ignore
+    }
+    return {};
+  }
+
+  function saveCloudAccounts(store: Record<string, any>): void {
+    try {
+      if (!fs.existsSync(referralDataDir)) {
+        fs.mkdirSync(referralDataDir, { recursive: true });
+      }
+      fs.writeFileSync(accountVaultFile, JSON.stringify(store, null, 2), 'utf-8');
+    } catch {
+      // ignore
+    }
+  }
+
   app.post('/api/referral/apply', (req, res) => {
     try {
       const { ownerCode, friendIdentifier, refereeHardwareId } = req.body || {};
-      const cleanOwner = String(ownerCode || '').trim().toUpperCase();
+      const cleanOwner = String(ownerCode || '')
+        .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
+        .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+        .trim()
+        .toUpperCase();
       if (!cleanOwner || cleanOwner.length < 4) {
         return res.status(400).json({ success: false, error: 'Invalid referral code' });
       }
@@ -3477,14 +3523,48 @@ async function startServer() {
       );
 
       if (!alreadyExists) {
-        list.push({
+        const newRefEntry: CloudReferralEntry = {
           id: `cloud-ref-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
           codeOrIdentifier: identifierLabel,
           refereeHardwareId: refereeHardwareId ? String(refereeHardwareId) : undefined,
           timestamp: Date.now()
-        });
+        };
+        list.unshift(newRefEntry);
         store[cleanOwner] = list;
         saveCloudReferrals(store);
+
+        // Also update any matching account in cloud_accounts.json that owns this referral code
+        try {
+          const accounts = loadCloudAccounts();
+          let accountsChanged = false;
+          for (const accKey of Object.keys(accounts)) {
+            const acc = accounts[accKey];
+            if (
+              acc &&
+              (String(acc.user?.referralCode || '').toUpperCase() === cleanOwner ||
+                String(acc.referralState?.myReferralCode || '').toUpperCase() === cleanOwner)
+            ) {
+              const existingInvites = Array.isArray(acc.referralState?.invitedUsers)
+                ? acc.referralState.invitedUsers
+                : [];
+              if (!existingInvites.some((u: any) => u.codeOrIdentifier === identifierLabel)) {
+                acc.referralState = {
+                  ...(acc.referralState || {}),
+                  myReferralCode: cleanOwner,
+                  invitedUsers: [newRefEntry, ...existingInvites],
+                  vipUnlockedByReferral: existingInvites.length + 1 >= 3
+                };
+                acc.updatedAt = Date.now();
+                accountsChanged = true;
+              }
+            }
+          }
+          if (accountsChanged) {
+            saveCloudAccounts(accounts);
+          }
+        } catch {
+          // ignore
+        }
       }
 
       return res.json({
@@ -3501,21 +3581,217 @@ async function startServer() {
 
   app.get('/api/referral/sync', (req, res) => {
     try {
-      const code = String(req.query.code || '').trim().toUpperCase();
-      if (!code) {
+      const rawCodes = String(req.query.code || '').trim().toUpperCase();
+      if (!rawCodes) {
         return res.status(400).json({ success: false, invitedCount: 0, invitedUsers: [] });
       }
+      const codes = rawCodes
+        .split(',')
+        .map((c) => c.trim())
+        .filter(Boolean);
       const store = loadCloudReferrals();
-      const list = Array.isArray(store[code]) ? store[code] : [];
+      const mergedMap = new Map<string, CloudReferralEntry>();
+      for (const c of codes) {
+        const list = Array.isArray(store[c]) ? store[c] : [];
+        for (const item of list) {
+          if (item && item.codeOrIdentifier && !mergedMap.has(item.codeOrIdentifier)) {
+            mergedMap.set(item.codeOrIdentifier, item);
+          }
+        }
+      }
+      const mergedList = Array.from(mergedMap.values()).sort((a, b) => b.timestamp - a.timestamp);
       return res.json({
         success: true,
-        code,
-        invitedCount: list.length,
-        invitedUsers: list,
-        unlockedVip: list.length >= 3
+        code: codes[0] || rawCodes,
+        invitedCount: mergedList.length,
+        invitedUsers: mergedList,
+        unlockedVip: mergedList.length >= 3
       });
     } catch {
       return res.json({ success: false, invitedCount: 0, invitedUsers: [] });
+    }
+  });
+
+  /**
+   * 8b. Cloud Account Vault Sync & Restore (/api/account/sync & /api/account/restore)
+   * Ensures that logging out and logging back in with the same username/email/phone & password
+   * on Web OR Android APK restores 100% of downloaded videos, audios, saved items, coins,
+   * daily quota, daily check-in status, referrals, and VIP subscription.
+   */
+  app.post('/api/account/sync', (req, res) => {
+    try {
+      const payload = req.body;
+      if (!payload || typeof payload !== 'object') {
+        return res.status(400).json({ success: false, error: 'Invalid account payload' });
+      }
+
+      const rawId =
+        payload.identifier ||
+        payload.user?.email ||
+        payload.user?.phone ||
+        payload.user?.name ||
+        '';
+      const primaryKey = normalizeServerAccountKey(rawId);
+      if (!primaryKey) {
+        return res.status(400).json({ success: false, error: 'Account identifier required' });
+      }
+
+      const accounts = loadCloudAccounts();
+      const existing = accounts[primaryKey] || {};
+
+      // Merge tasks so no previously downloaded video/audio or starred/vaulted item is ever lost
+      const taskMap = new Map<string, any>();
+      if (Array.isArray(existing.tasks)) {
+        for (const t of existing.tasks) {
+          if (t && t.id) taskMap.set(t.id, t);
+        }
+      }
+      if (Array.isArray(payload.tasks)) {
+        for (const t of payload.tasks) {
+          if (t && t.id) {
+            const prev = taskMap.get(t.id);
+            taskMap.set(t.id, {
+              ...(prev || {}),
+              ...t,
+              isStarred: t.isStarred !== undefined ? t.isStarred : prev?.isStarred,
+              isVaulted: t.isVaulted !== undefined ? t.isVaulted : prev?.isVaulted
+            });
+          }
+        }
+      }
+
+      // Merge referral invites from existing account + payload + cloud_referrals.json
+      const refMap = new Map<string, CloudReferralEntry>();
+      const refStore = loadCloudReferrals();
+      const candidateCodes = Array.from(
+        new Set(
+          [
+            payload.referralState?.myReferralCode,
+            payload.user?.referralCode,
+            existing.referralState?.myReferralCode,
+            existing.user?.referralCode
+          ]
+            .filter(Boolean)
+            .map((c) => String(c).trim().toUpperCase())
+        )
+      );
+
+      for (const c of candidateCodes) {
+        const cList = Array.isArray(refStore[c]) ? refStore[c] : [];
+        for (const item of cList) {
+          if (item && item.codeOrIdentifier) refMap.set(item.codeOrIdentifier, item);
+        }
+      }
+      if (Array.isArray(existing.referralState?.invitedUsers)) {
+        for (const item of existing.referralState.invitedUsers) {
+          if (item && item.codeOrIdentifier) refMap.set(item.codeOrIdentifier, item);
+        }
+      }
+      if (Array.isArray(payload.referralState?.invitedUsers)) {
+        for (const item of payload.referralState.invitedUsers) {
+          if (item && item.codeOrIdentifier) refMap.set(item.codeOrIdentifier, item);
+        }
+      }
+      const mergedInvites = Array.from(refMap.values()).sort((a, b) => b.timestamp - a.timestamp);
+      for (const c of candidateCodes) {
+        if (mergedInvites.length > 0) {
+          refStore[c] = mergedInvites;
+        }
+      }
+      if (mergedInvites.length > 0) {
+        saveCloudReferrals(refStore);
+      }
+
+      const mergedCoins =
+        typeof payload.coins === 'number'
+          ? Math.max(payload.coins, typeof existing.coins === 'number' ? existing.coins : 0)
+          : typeof existing.coins === 'number'
+          ? existing.coins
+          : 0;
+
+      const mergedEntry = {
+        identifier: primaryKey,
+        user: {
+          ...(existing.user || {}),
+          ...(payload.user || {}),
+          passwordHash: payload.user?.passwordHash || existing.user?.passwordHash,
+          avatarUrl: payload.user?.avatarUrl || existing.user?.avatarUrl
+        },
+        tasks: Array.from(taskMap.values()).sort(
+          (a, b) => (b.createdAt || 0) - (a.createdAt || 0)
+        ),
+        coins: mergedCoins,
+        dailyQuota: payload.dailyQuota || existing.dailyQuota,
+        rewardLog: payload.rewardLog || existing.rewardLog,
+        referralState: {
+          myReferralCode:
+            payload.referralState?.myReferralCode ||
+            existing.referralState?.myReferralCode ||
+            payload.user?.referralCode ||
+            existing.user?.referralCode,
+          invitedUsers: mergedInvites,
+          appliedReferralCode:
+            payload.referralState?.appliedReferralCode ||
+            existing.referralState?.appliedReferralCode,
+          vipUnlockedByReferral:
+            mergedInvites.length >= 3 ||
+            Boolean(payload.referralState?.vipUnlockedByReferral) ||
+            Boolean(existing.referralState?.vipUnlockedByReferral)
+        },
+        vipState:
+          (payload.vipState?.vipExpiry || 0) >= (existing.vipState?.vipExpiry || 0)
+            ? payload.vipState || existing.vipState
+            : existing.vipState,
+        hardwareId: payload.hardwareId || existing.hardwareId,
+        updatedAt: Date.now()
+      };
+
+      accounts[primaryKey] = mergedEntry;
+      // Also index by normalized email and username if present so login by either works seamlessly
+      const emailKey = normalizeServerAccountKey(mergedEntry.user?.email);
+      const nameKey = normalizeServerAccountKey(mergedEntry.user?.name);
+      if (emailKey) accounts[emailKey] = mergedEntry;
+      if (nameKey && !nameKey.includes('مهمان') && !nameKey.includes('guest')) {
+        accounts[nameKey] = mergedEntry;
+      }
+      saveCloudAccounts(accounts);
+
+      return res.json({
+        success: true,
+        vault: mergedEntry
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || 'Account sync failed' });
+    }
+  });
+
+  app.get('/api/account/restore', (req, res) => {
+    try {
+      const rawId = String(req.query.identifier || '').trim();
+      const key = normalizeServerAccountKey(rawId);
+      if (!key) {
+        return res.status(400).json({ success: false, error: 'Identifier required' });
+      }
+      const accounts = loadCloudAccounts();
+      let found = accounts[key];
+      if (!found) {
+        found = Object.values(accounts).find(
+          (acc: any) =>
+            acc &&
+            (normalizeServerAccountKey(acc.user?.email) === key ||
+              normalizeServerAccountKey(acc.user?.name) === key ||
+              normalizeServerAccountKey(acc.identifier) === key)
+        );
+      }
+      if (!found) {
+        return res.json({ success: false, vault: null });
+      }
+      return res.json({
+        success: true,
+        vault: found
+      });
+    } catch {
+      return res.json({ success: false, vault: null });
     }
   });
 

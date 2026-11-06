@@ -326,7 +326,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   };
 
   // Google Sign-In Handler (Compatible with Android APK WebView Bridge + Browser)
-  const handleGoogleSignIn = (overrideGmail?: string) => {
+  const handleGoogleSignIn = async (overrideGmail?: string) => {
     setStatusMessage(null);
 
     // 1. Check Native Android Bridge if running inside APK with Google Sign-In Bridge
@@ -349,8 +349,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
+    const savedVault = await restoreAccountVaultSnapshot(candidateGmail);
+
     const effectiveCountry: UserCountryCode =
-      session.user.country || (language === 'fa' ? 'IR' : country);
+      savedVault?.user?.country || session.user.country || (language === 'fa' ? 'IR' : country);
     setLockedAccountCurrency(effectiveCountry === 'IR' || language === 'fa' ? 'toman' : 'usdt');
 
     if (registerReferralCode.trim().length >= 3) {
@@ -361,18 +363,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     const latestReferral = getReferralInfo();
     setQuota(latestQuota);
     setReferralInfo(latestReferral);
+    setCoinsBalance(getCoinsBalance());
 
-    const displayName = candidateGmail.split('@')[0] || getLocalizedGuestName(language);
+    const displayName =
+      (savedVault?.user?.name && !isDefaultGuestName(savedVault.user.name)
+        ? savedVault.user.name
+        : candidateGmail.split('@')[0]) || getLocalizedGuestName(language);
 
     onUpdateSession({
       isLoggedIn: true,
       user: {
         ...session.user,
-        id: `google-${Date.now()}`,
+        ...savedVault?.user,
+        id: savedVault?.user?.id || `google-${Date.now()}`,
         name: displayName,
         email: candidateGmail,
         country: effectiveCountry,
-        avatarUrl,
+        avatarUrl: avatarUrl || savedVault?.user?.avatarUrl,
         plan: latestQuota.isPro ? 'VIP Pro' : 'Free',
         vipExpiry: latestQuota.proExpiryDate,
         vipPlan: latestQuota.proPlanName,
@@ -472,17 +479,19 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         : savedVault?.user?.country || session.user.country || (language === 'fa' ? 'IR' : country);
     setLockedAccountCurrency(effectiveCountry === 'IR' || language === 'fa' ? 'toman' : 'usdt');
 
-    // Bind and restore any account-bound VIP subscription & permanent referral code for this account
-    const latestQuota = syncAccountVipAndReferral(cleanIdentifier);
+    // Bind and restore any account-bound VIP subscription, coins, daily quota, daily check-in & permanent referral code for this account
+    syncAccountVipAndReferral(cleanIdentifier);
 
     // Process optional referral code on the single-page login/signup screen
     if (registerReferralCode.trim().length >= 3) {
       submitReferralCodeOrInvite(sanitizeAuthInput(registerReferralCode.trim()), cleanIdentifier);
     }
 
+    const latestQuota = getDailyQuota();
     const latestReferral = getReferralInfo();
-    setQuota(getDailyQuota());
+    setQuota(latestQuota);
     setReferralInfo(latestReferral);
+    setCoinsBalance(getCoinsBalance());
 
     const fallbackName = cleanIdentifier.includes('@')
       ? cleanIdentifier.split('@')[0]
@@ -505,9 +514,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         country: effectiveCountry,
         passwordHash: hashedPass,
         avatarUrl: avatarUrl || savedVault?.user?.avatarUrl,
-        plan: getDailyQuota().isPro ? 'VIP Pro' : 'Free',
-        vipExpiry: getDailyQuota().proExpiryDate,
-        vipPlan: getDailyQuota().proPlanName,
+        plan: latestQuota.isPro ? 'VIP Pro' : 'Free',
+        vipExpiry: latestQuota.proExpiryDate,
+        vipPlan: latestQuota.proPlanName,
         referralCode: latestReferral.myReferralCode
       }
     });
@@ -524,7 +533,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   };
 
   // 2. Simple Forgot Password Handler
-  const handleForgotPasswordSubmit = (e: React.FormEvent) => {
+  const handleForgotPasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setStatusMessage(null);
 
@@ -555,20 +564,27 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
+    const savedVault = await restoreAccountVaultSnapshot(cleanIdentifier);
     const latestQuota = syncAccountVipAndReferral(cleanIdentifier);
     const latestReferral = getReferralInfo();
     setQuota(latestQuota);
+    setReferralInfo(latestReferral);
+    setCoinsBalance(getCoinsBalance());
 
     onUpdateSession({
       ...session,
       isLoggedIn: true,
       user: {
         ...session.user,
+        ...savedVault?.user,
         email: cleanIdentifier,
         name:
-          (!isDefaultGuestName(name) && name.trim()) ||
+          (savedVault?.user?.name && !isDefaultGuestName(savedVault.user.name)
+            ? savedVault.user.name
+            : !isDefaultGuestName(name) && name.trim()) ||
           (cleanIdentifier.includes('@') ? cleanIdentifier.split('@')[0] : cleanIdentifier),
-        passwordHash: cleanNewPass,
+        passwordHash: computeSecurePasswordDigest(cleanNewPass),
+        avatarUrl: avatarUrl || savedVault?.user?.avatarUrl,
         plan: latestQuota.isPro ? 'VIP Pro' : 'Free',
         vipExpiry: latestQuota.proExpiryDate,
         vipPlan: latestQuota.proPlanName,
@@ -701,32 +717,40 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setCaptcha(createMathChallenge());
     setCaptchaInput('');
     setCountry(defaultCountry);
-    setCoinsBalance(0);
 
-    onLogout?.(true);
+    // IMPORTANT: Call onLogout(true) which saves the complete account vault snapshot (videos, audios,
+    // starred/saved items, coins, daily quota, daily check-in, and referrals) BEFORE switching to guest.
+    // Do NOT zero out coinsBalance or overwrite session before onLogout saves the current logged-in state!
+    if (onLogout) {
+      onLogout(true);
+    } else {
+      onUpdateSession({
+        isLoggedIn: false,
+        user: {
+          id: `guest-${Date.now().toString(36)}`,
+          name: guestName,
+          email: '',
+          passwordHash: undefined,
+          avatarUrl: '',
+          country: defaultCountry,
+          plan: 'Free',
+          quotaUsedMb: 0,
+          quotaMaxMb: 1024
+        }
+      });
+    }
 
-    onUpdateSession({
-      isLoggedIn: false,
-      user: {
-        id: `guest-${Date.now().toString(36)}`,
-        name: guestName,
-        email: '',
-        passwordHash: undefined,
-        avatarUrl: '',
-        country: defaultCountry,
-        plan: 'Free',
-        quotaUsedMb: 0,
-        quotaMaxMb: 1024
-      }
-    });
+    setCoinsBalance(getCoinsBalance());
+    setQuota(getDailyQuota());
+    setReferralInfo(getReferralInfo());
     setGuestMode('login');
     setStatusMessage({
       type: 'success',
       text: isFa
-        ? 'از حساب کاربری خارج شدید. تمام اطلاعات نشست قبلی پاکسازی شد.'
+        ? 'از حساب کاربری خارج شدید. تمامی ویدیوها، صداها، ذخیره‌ها، سکه‌ها و زیرمجموعه‌های شما محفوظ است و با ورود مجدد کامل بازیابی می‌شوند.'
         : isAr
-        ? 'تم تسجيل الخروج بنجاح ومسح بيانات الجلسة السابقة.'
-        : 'Signed out successfully. Previous session data cleared.'
+        ? 'تم تسجيل الخروج. جميع الفيديوهات والصوتيات والعملات والإحالات محفوظة بالكامل.'
+        : 'Signed out. All your videos, audios, saved items, coins, and referrals are safely preserved.'
     });
   };
 

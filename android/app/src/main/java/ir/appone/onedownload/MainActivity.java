@@ -821,6 +821,51 @@ public class MainActivity extends BridgeActivity {
             return new File(odFallback, safeName);
         }
 
+        @JavascriptInterface
+        public boolean savePersistentJson(final String key, final String jsonValue) {
+            if (key == null || key.trim().isEmpty() || jsonValue == null) return false;
+            try {
+                String safeKey = key.replaceAll("[^A-Za-z0-9_.-]", "_");
+                File storeDir = new File(getFilesDir(), "od_permanent_vault");
+                if (!storeDir.exists()) {
+                    storeDir.mkdirs();
+                }
+                File target = new File(storeDir, safeKey + ".json");
+                try (FileOutputStream fos = new FileOutputStream(target, false)) {
+                    fos.write(jsonValue.getBytes(StandardCharsets.UTF_8));
+                    fos.flush();
+                }
+                return true;
+            } catch (Exception e) {
+                e.printStackTrace();
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public String loadPersistentJson(final String key) {
+            if (key == null || key.trim().isEmpty()) return "";
+            try {
+                String safeKey = key.replaceAll("[^A-Za-z0-9_.-]", "_");
+                File storeDir = new File(getFilesDir(), "od_permanent_vault");
+                File target = new File(storeDir, safeKey + ".json");
+                if (!target.exists() || target.length() == 0) return "";
+                byte[] bytes = new byte[(int) target.length()];
+                try (FileInputStream fis = new FileInputStream(target)) {
+                    int offset = 0;
+                    while (offset < bytes.length) {
+                        int read = fis.read(bytes, offset, bytes.length - offset);
+                        if (read == -1) break;
+                        offset += read;
+                    }
+                }
+                return new String(bytes, StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                e.printStackTrace();
+                return "";
+            }
+        }
+
         private boolean isPackageInstalled(String packageName) {
             try {
                 PackageManager pm = getPackageManager();

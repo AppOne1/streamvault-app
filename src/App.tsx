@@ -239,8 +239,12 @@ export default function App() {
       setQuotaInfo(syncedQuota);
       setCoinsBalance(getCoinsBalance());
 
-      // Restore account's saved tasks & hydrate from IndexedDB so no video/audio is ever lost on re-login
+      // Restore account's saved tasks & hydrate from IndexedDB so no video/audio/saved item is ever lost on re-login
       restoreAccountVaultSnapshot(accountKey).then((vault) => {
+        if (vault?.quotaSnapshot) {
+          setQuotaInfo(getDailyQuota());
+          setCoinsBalance(getCoinsBalance());
+        }
         const currentStored = loadTasksFromStorage();
         const combinedMap = new Map<string, DownloadTask>();
         if (vault?.tasks) {
@@ -249,14 +253,31 @@ export default function App() {
           });
         }
         currentStored.forEach((t) => {
-          if (t && t.id) combinedMap.set(t.id, t);
+          if (t && t.id) {
+            const prev = combinedMap.get(t.id);
+            combinedMap.set(t.id, {
+              ...(prev || {}),
+              ...t,
+              isStarred: Boolean(t.isStarred || prev?.isStarred),
+              isVaulted: Boolean(t.isVaulted || prev?.isVaulted)
+            });
+          }
         });
         tasks.forEach((t) => {
-          if (t && t.id) combinedMap.set(t.id, t);
+          if (t && t.id) {
+            const prev = combinedMap.get(t.id);
+            combinedMap.set(t.id, {
+              ...(prev || {}),
+              ...t,
+              isStarred: Boolean(t.isStarred || prev?.isStarred),
+              isVaulted: Boolean(t.isVaulted || prev?.isVaulted)
+            });
+          }
         });
         const mergedList = Array.from(combinedMap.values());
         hydrateTasksFromIndexedDB(mergedList).then((hydrated) => {
           setTasks(hydrated);
+          saveTasksToStorage(hydrated);
           saveAccountVaultSnapshot(userSession, hydrated);
         });
       });
@@ -833,6 +854,7 @@ export default function App() {
     if (userSession.isLoggedIn) {
       saveAccountVaultSnapshot(userSession, tasks);
     }
+    saveTasksToStorage(tasks);
     setParsedMedia(null);
     setActivePlayerTask(null);
     setInputUrl('');
@@ -840,9 +862,10 @@ export default function App() {
     setScheduledTime('');
     resetUserAccountAndQuotaToGuest();
     setQuotaInfo(getDailyQuota());
+    setCoinsBalance(getCoinsBalance());
     setActiveTab('downloader');
     setIsAuthModalOpen(keepModalOpen);
-    const freshGuest = await resetUserSessionAndClearAllData(settings.language);
+    const freshGuest = await resetUserSessionAndClearAllData(settings.language, tasks);
     setUserSession(freshGuest);
   };
 

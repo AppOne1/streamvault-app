@@ -124,6 +124,39 @@ const VIP_REQUEST_STORAGE_KEY = 'onedownload_vip_request_v5';
 const ACCOUNT_VIP_MAP_KEY = 'od_account_vip_registry_v1';
 const ACTIVE_ACCOUNT_ID_KEY = 'od_active_account_identifier_v1';
 const EXCHANGE_REFERRAL_LEDGER_KEY = 'od_exchange_referral_ledger_v2';
+const DEVICE_DAILY_LEDGER_KEY = 'od_device_daily_ledger_v1';
+
+export interface DailyQuotaRecord {
+  dateKey: string;
+  usedCount: number;
+  bonusDownloads: number;
+  updatedAt: number;
+}
+
+export interface DailyRewardLogRecord {
+  dateKey: string;
+  checkedInToday: boolean;
+  watchedAdsToday: number;
+  sharedToday: boolean;
+}
+
+export interface AccountQuotaSnapshot {
+  coins: number;
+  dailyQuota?: DailyQuotaRecord;
+  rewardLog?: DailyRewardLogRecord;
+  referralState?: {
+    myReferralCode: string;
+    invitedUsers: InvitedReferralRecord[];
+    appliedReferralCode?: string;
+    vipUnlockedByReferral?: boolean;
+  };
+  vipState?: {
+    vipActive: boolean;
+    vipPlan: string;
+    vipExpiry: number;
+    planName: string;
+  };
+}
 
 interface AccountVipRecord {
   identifier: string;
@@ -133,17 +166,72 @@ interface AccountVipRecord {
   planName: string;
   referralCode: string;
   coins?: number;
+  dailyQuota?: DailyQuotaRecord;
+  rewardLog?: DailyRewardLogRecord;
+  invitedUsers?: InvitedReferralRecord[];
   appliedReferralCode?: string;
   updatedAt: number;
 }
 
-function normalizeAccountIdentifier(raw?: string | null): string {
+function readPersistentItem(key: string): string | null {
+  try {
+    const localVal = localStorage.getItem(key);
+    if (localVal !== null && localVal !== '') {
+      return localVal;
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    const nativeBridge = (window as any)?.OneDownloadNative;
+    if (nativeBridge && typeof nativeBridge.loadPersistentJson === 'function') {
+      const nativeVal = nativeBridge.loadPersistentJson(key);
+      if (nativeVal && typeof nativeVal === 'string' && nativeVal.trim().length > 0) {
+        try {
+          localStorage.setItem(key, nativeVal);
+        } catch {
+          // ignore
+        }
+        return nativeVal;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function writePersistentItem(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // ignore
+  }
+  try {
+    const nativeBridge = (window as any)?.OneDownloadNative;
+    if (nativeBridge && typeof nativeBridge.savePersistentJson === 'function') {
+      nativeBridge.savePersistentJson(key, value);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export function normalizeAccountIdentifier(raw?: string | null): string {
   if (!raw) return '';
-  return raw
+  let s = raw
     .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
     .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
     .trim()
     .toLowerCase();
+  if (/^\+989\d{9}$/.test(s)) {
+    s = '0' + s.slice(3);
+  } else if (/^989\d{9}$/.test(s)) {
+    s = '0' + s.slice(2);
+  } else if (/^9\d{9}$/.test(s)) {
+    s = '0' + s;
+  }
+  return s;
 }
 
 function readCookieValue(name: string): string | null {
@@ -167,22 +255,48 @@ function writeCookieValue(name: string, value: string): void {
 
 function getActiveAccountIdentifier(): string {
   try {
-    const explicit = localStorage.getItem(ACTIVE_ACCOUNT_ID_KEY);
+    const explicit = readPersistentItem(ACTIVE_ACCOUNT_ID_KEY);
     if (explicit) return normalizeAccountIdentifier(explicit);
     const sessionRaw =
-      localStorage.getItem('od_user_session') ||
-      localStorage.getItem('onedownload_user_session_v2');
+      readPersistentItem('od_user_session') ||
+      readPersistentItem('onedownload_session_v2') ||
+      readPersistentItem('onedownload_user_session_v2');
     if (sessionRaw) {
       const parsed = JSON.parse(sessionRaw);
-      const emailOrPhone = parsed?.user?.email || parsed?.user?.phone || '';
-      if (emailOrPhone && emailOrPhone !== 'guest@appone.ir') {
-        return normalizeAccountIdentifier(emailOrPhone);
+      if (parsed?.isLoggedIn && parsed?.user) {
+        const emailOrPhoneOrName =
+          parsed.user.email || parsed.user.phone || parsed.user.name || '';
+        if (
+          emailOrPhoneOrName &&
+          emailOrPhoneOrName !== 'guest@appone.ir' &&
+          !emailOrPhoneOrName.includes('مهمان') &&
+          !emailOrPhoneOrName.toLowerCase().includes('guest')
+        ) {
+          return normalizeAccountIdentifier(emailOrPhoneOrName);
+        }
       }
     }
   } catch {
     // ignore
   }
   return '';
+}
+
+function loadAccountVipMap(): Record<string, AccountVipRecord> {
+  try {
+    const raw = readPersistentItem(ACCOUNT_VIP_MAP_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveAccountVipMap(map: Record<string, AccountVipRecord>): void {
+  try {
+    writePersistentItem(ACCOUNT_VIP_MAP_KEY, JSON.stringify(map));
+  } catch {
+    // ignore
+  }
 }
 
 function saveVipRecordForCurrentAccount(
@@ -196,18 +310,20 @@ function saveVipRecordForCurrentAccount(
     writeCookieValue('od_vip_expiry_cookie', String(vipExpiry));
     writeCookieValue('od_vip_plan_cookie', String(vipPlan));
     if (!id) return;
-    const rawMap = localStorage.getItem(ACCOUNT_VIP_MAP_KEY);
-    const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
+    const map = loadAccountVipMap();
+    const existing = map[id];
     map[id] = {
+      ...(existing || {}),
       identifier: id,
       vipActive: vipExpiry > Date.now(),
       vipPlan,
       vipExpiry,
       planName,
-      referralCode: getMyReferralCode(),
+      referralCode: existing?.referralCode || getMyReferralCode(),
+      coins: typeof existing?.coins === 'number' ? Math.max(existing.coins, getCoinsBalance()) : getCoinsBalance(),
       updatedAt: Date.now()
     };
-    localStorage.setItem(ACCOUNT_VIP_MAP_KEY, JSON.stringify(map));
+    saveAccountVipMap(map);
   } catch {
     // ignore
   }
@@ -336,9 +452,17 @@ function getTodayKey(): string {
  */
 export function getCoinsBalance(): number {
   try {
-    const raw = localStorage.getItem(COINS_STORAGE_KEY);
+    const raw = readPersistentItem(COINS_STORAGE_KEY);
     if (raw === null) {
-      localStorage.setItem(COINS_STORAGE_KEY, '0');
+      const activeId = getActiveAccountIdentifier();
+      if (activeId) {
+        const map = loadAccountVipMap();
+        if (typeof map[activeId]?.coins === 'number' && map[activeId].coins! > 0) {
+          writePersistentItem(COINS_STORAGE_KEY, String(map[activeId].coins));
+          return map[activeId].coins!;
+        }
+      }
+      writePersistentItem(COINS_STORAGE_KEY, '0');
       return 0;
     }
     const parsed = parseInt(raw, 10);
@@ -351,13 +475,13 @@ export function getCoinsBalance(): number {
 export function setCoinsBalance(newAmount: number): number {
   const safe = Math.max(0, Math.floor(newAmount));
   try {
-    localStorage.setItem(COINS_STORAGE_KEY, String(safe));
+    writePersistentItem(COINS_STORAGE_KEY, String(safe));
     const activeId = getActiveAccountIdentifier();
     if (activeId) {
-      const rawMap = localStorage.getItem(ACCOUNT_VIP_MAP_KEY);
-      const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
+      const map = loadAccountVipMap();
       const existing = map[activeId];
       map[activeId] = {
+        ...(existing || {}),
         identifier: activeId,
         vipActive: existing?.vipActive || false,
         vipPlan: existing?.vipPlan || '1',
@@ -368,7 +492,7 @@ export function setCoinsBalance(newAmount: number): number {
         appliedReferralCode: existing?.appliedReferralCode,
         updatedAt: Date.now()
       };
-      localStorage.setItem(ACCOUNT_VIP_MAP_KEY, JSON.stringify(map));
+      saveAccountVipMap(map);
     }
   } catch {
     // ignore
@@ -385,13 +509,29 @@ export function getRewardStatus(): RewardStatus {
   let sharedToday = false;
 
   try {
-    const raw = localStorage.getItem(REWARD_LOG_STORAGE_KEY);
+    const raw = readPersistentItem(REWARD_LOG_STORAGE_KEY);
     if (raw) {
       const data = JSON.parse(raw);
       if (data && data.dateKey === todayKey) {
         checkedInToday = Boolean(data.checkedInToday);
         watchedAdsToday = Number(data.watchedAdsToday) || 0;
         sharedToday = Boolean(data.sharedToday);
+      }
+    }
+    // Also check active account record & device daily ledger so logout/re-login never resets daily check-in
+    const activeId = getActiveAccountIdentifier();
+    if (activeId) {
+      const map = loadAccountVipMap();
+      const accReward = map[activeId]?.rewardLog;
+      if (accReward && accReward.dateKey === todayKey && accReward.checkedInToday) {
+        checkedInToday = true;
+      }
+    }
+    const devRaw = readPersistentItem(DEVICE_DAILY_LEDGER_KEY);
+    if (devRaw) {
+      const devData = JSON.parse(devRaw);
+      if (devData && devData.dateKey === todayKey && devData.checkedInToday) {
+        checkedInToday = true;
       }
     }
   } catch {
@@ -457,16 +597,34 @@ export function claimRewardAction(action: 'daily_checkin' | 'watch_ad' | 'share_
     };
   }
 
+  const rewardObj: DailyRewardLogRecord = {
+    dateKey: todayKey,
+    checkedInToday,
+    watchedAdsToday,
+    sharedToday
+  };
+
   try {
-    localStorage.setItem(
-      REWARD_LOG_STORAGE_KEY,
+    writePersistentItem(REWARD_LOG_STORAGE_KEY, JSON.stringify(rewardObj));
+    const devRaw = readPersistentItem(DEVICE_DAILY_LEDGER_KEY);
+    const devData = devRaw ? JSON.parse(devRaw) : {};
+    writePersistentItem(
+      DEVICE_DAILY_LEDGER_KEY,
       JSON.stringify({
+        ...(devData.dateKey === todayKey ? devData : {}),
         dateKey: todayKey,
-        checkedInToday,
-        watchedAdsToday,
-        sharedToday
+        checkedInToday
       })
     );
+    const activeId = getActiveAccountIdentifier();
+    if (activeId) {
+      const map = loadAccountVipMap();
+      if (map[activeId]) {
+        map[activeId].rewardLog = rewardObj;
+        map[activeId].updatedAt = Date.now();
+        saveAccountVipMap(map);
+      }
+    }
   } catch {
     // ignore
   }
@@ -526,7 +684,7 @@ function normalizeReferralCodeInput(raw: string): string {
 
 function readExchangeReferralLedger(): Record<string, InvitedReferralRecord[]> {
   try {
-    const raw = localStorage.getItem(EXCHANGE_REFERRAL_LEDGER_KEY);
+    const raw = readPersistentItem(EXCHANGE_REFERRAL_LEDGER_KEY);
     return raw ? JSON.parse(raw) : {};
   } catch {
     return {};
@@ -535,62 +693,87 @@ function readExchangeReferralLedger(): Record<string, InvitedReferralRecord[]> {
 
 function writeExchangeReferralLedger(ledger: Record<string, InvitedReferralRecord[]>): void {
   try {
-    localStorage.setItem(EXCHANGE_REFERRAL_LEDGER_KEY, JSON.stringify(ledger));
+    writePersistentItem(EXCHANGE_REFERRAL_LEDGER_KEY, JSON.stringify(ledger));
   } catch {
     // ignore
   }
 }
 
+function getAllCandidateReferralCodes(): string[] {
+  const codes = new Set<string>();
+  try {
+    const activeAccount = getActiveAccountIdentifier();
+    if (activeAccount) {
+      const map = loadAccountVipMap();
+      if (map[activeAccount]?.referralCode && /^OD-[A-Z0-9]{6,10}$/.test(map[activeAccount].referralCode)) {
+        codes.add(map[activeAccount].referralCode);
+      }
+      codes.add(generateDeterministicRefCode(`ACCOUNT::${activeAccount}`));
+    }
+    const existing = readPersistentItem(MY_RANDOM_REF_CODE_KEY) || readCookieValue(MY_RANDOM_REF_CODE_KEY);
+    if (existing && /^OD-[A-Z0-9]{6,10}$/.test(existing)) {
+      codes.add(existing);
+    }
+    const hwid = getOrCreateDeviceId();
+    if (hwid) {
+      codes.add(generateDeterministicRefCode(hwid));
+    }
+  } catch {
+    // ignore
+  }
+  return Array.from(codes);
+}
+
 /**
  * Generates a 100% permanent, deterministic personal referral code.
- * If logged in, binds deterministically to the user's account (`email` / `username`) so logging in
- * on any session always restores the exact same personal referral code (exchange style).
- * Otherwise falls back to the device's permanent Hardware ID.
+ * Preserves the user's existing referral code across guest/logged-in states so it never changes unexpectedly.
  */
 export function getMyReferralCode(): string {
   try {
     const activeAccount = getActiveAccountIdentifier();
+    const existingFixed =
+      readPersistentItem(MY_RANDOM_REF_CODE_KEY) ||
+      readCookieValue(MY_RANDOM_REF_CODE_KEY) ||
+      readPersistentItem(LEGACY_REF_CODE_KEY);
+
     if (activeAccount) {
-      const rawMap = localStorage.getItem(ACCOUNT_VIP_MAP_KEY);
-      const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
+      const map = loadAccountVipMap();
       if (map[activeAccount]?.referralCode && /^OD-[A-Z0-9]{8}$/.test(map[activeAccount].referralCode)) {
+        writePersistentItem(MY_RANDOM_REF_CODE_KEY, map[activeAccount].referralCode);
+        writeCookieValue(MY_RANDOM_REF_CODE_KEY, map[activeAccount].referralCode);
         return map[activeAccount].referralCode;
       }
-      const accountCode = generateDeterministicRefCode(`ACCOUNT::${activeAccount}`);
+      const chosenCode =
+        existingFixed && /^OD-[A-Z0-9]{8}$/.test(existingFixed)
+          ? existingFixed
+          : generateDeterministicRefCode(`ACCOUNT::${activeAccount}`);
       map[activeAccount] = {
+        ...(map[activeAccount] || {}),
         identifier: activeAccount,
         vipActive: map[activeAccount]?.vipActive || false,
         vipPlan: map[activeAccount]?.vipPlan || '1',
         vipExpiry: map[activeAccount]?.vipExpiry || 0,
         planName: map[activeAccount]?.planName || 'Free',
-        referralCode: accountCode,
+        referralCode: chosenCode,
         coins: map[activeAccount]?.coins ?? getCoinsBalance(),
         appliedReferralCode: map[activeAccount]?.appliedReferralCode,
         updatedAt: Date.now()
       };
-      localStorage.setItem(ACCOUNT_VIP_MAP_KEY, JSON.stringify(map));
-      return accountCode;
+      saveAccountVipMap(map);
+      writePersistentItem(MY_RANDOM_REF_CODE_KEY, chosenCode);
+      writeCookieValue(MY_RANDOM_REF_CODE_KEY, chosenCode);
+      return chosenCode;
     }
 
-    const existing = localStorage.getItem(MY_RANDOM_REF_CODE_KEY);
-    if (existing && /^OD-[A-Z0-9]{8}$/.test(existing)) {
-      writeCookieValue(MY_RANDOM_REF_CODE_KEY, existing);
-      return existing;
+    if (existingFixed && /^OD-[A-Z0-9]{8}$/.test(existingFixed)) {
+      writePersistentItem(MY_RANDOM_REF_CODE_KEY, existingFixed);
+      writeCookieValue(MY_RANDOM_REF_CODE_KEY, existingFixed);
+      return existingFixed;
     }
-    const fromCookie = readCookieValue(MY_RANDOM_REF_CODE_KEY);
-    if (fromCookie && /^OD-[A-Z0-9]{8}$/.test(fromCookie)) {
-      localStorage.setItem(MY_RANDOM_REF_CODE_KEY, fromCookie);
-      return fromCookie;
-    }
-    const legacy = localStorage.getItem(LEGACY_REF_CODE_KEY);
-    if (legacy && /^OD-[A-Z0-9]{8}$/.test(legacy)) {
-      localStorage.setItem(MY_RANDOM_REF_CODE_KEY, legacy);
-      writeCookieValue(MY_RANDOM_REF_CODE_KEY, legacy);
-      return legacy;
-    }
+
     const hwid = getOrCreateDeviceId();
     const generated = generateDeterministicRefCode(hwid);
-    localStorage.setItem(MY_RANDOM_REF_CODE_KEY, generated);
+    writePersistentItem(MY_RANDOM_REF_CODE_KEY, generated);
     writeCookieValue(MY_RANDOM_REF_CODE_KEY, generated);
     return generated;
   } catch {
@@ -599,35 +782,45 @@ export function getMyReferralCode(): string {
 }
 
 /**
- * Loads current user's Referral progress (0/3, 1/3, 2/3, 3/3) by merging the Exchange Ledger
- * for `myCode` and the device referral state so no invite is ever missed.
+ * Loads current user's Referral progress (0/3, 1/3, 2/3, 3/3) by merging the Exchange Ledger,
+ * Account Record, and Device Referral State across all candidate codes so no invite is ever missed.
  */
 export function getReferralInfo(): ReferralInfo {
   const myCode = getMyReferralCode();
+  const candidateCodes = getAllCandidateReferralCodes();
   const mergedMap = new Map<string, InvitedReferralRecord>();
   let appliedReferralCode: string | undefined;
 
   try {
     const activeAccount = getActiveAccountIdentifier();
     if (activeAccount) {
-      const rawMap = localStorage.getItem(ACCOUNT_VIP_MAP_KEY);
-      const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
-      if (map[activeAccount]?.appliedReferralCode) {
-        appliedReferralCode = map[activeAccount].appliedReferralCode;
+      const map = loadAccountVipMap();
+      const accRec = map[activeAccount];
+      if (accRec?.appliedReferralCode) {
+        appliedReferralCode = accRec.appliedReferralCode;
+      }
+      if (Array.isArray(accRec?.invitedUsers)) {
+        for (const item of accRec.invitedUsers) {
+          if (item && item.codeOrIdentifier) {
+            mergedMap.set(item.codeOrIdentifier, item);
+          }
+        }
       }
     }
 
     const ledger = readExchangeReferralLedger();
-    const codeRecords = ledger[myCode] || [];
-    for (const item of codeRecords) {
-      if (item && item.codeOrIdentifier) {
-        mergedMap.set(item.codeOrIdentifier, item);
+    for (const c of [myCode, ...candidateCodes]) {
+      const codeRecords = ledger[c] || [];
+      for (const item of codeRecords) {
+        if (item && item.codeOrIdentifier && !mergedMap.has(item.codeOrIdentifier)) {
+          mergedMap.set(item.codeOrIdentifier, item);
+        }
       }
     }
 
     const raw =
-      localStorage.getItem(REFERRAL_STORAGE_KEY) ||
-      localStorage.getItem(LEGACY_REFERRAL_STORAGE_KEY);
+      readPersistentItem(REFERRAL_STORAGE_KEY) ||
+      readPersistentItem(LEGACY_REFERRAL_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed.invitedUsers)) {
@@ -671,34 +864,37 @@ async function postReferralApplyToCloud(payload: {
 
   for (const url of endpoints) {
     try {
-      if (Capacitor.isNativePlatform()) {
-        const res = await CapacitorHttp.post({
-          url,
-          headers: { 'Content-Type': 'application/json' },
-          data: payload,
-          connectTimeout: 6000,
-          readTimeout: 6000
-        });
-        if (res.status >= 200 && res.status < 300) return;
-      } else {
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        if (res.ok) return;
-      }
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) return;
     } catch {
-      // Try next endpoint
+      // Fallback to CapacitorHttp if native fetch failed
+      try {
+        if (Capacitor.isNativePlatform()) {
+          const capRes = await CapacitorHttp.post({
+            url,
+            headers: { 'Content-Type': 'application/json' },
+            data: payload,
+            connectTimeout: 6000,
+            readTimeout: 6000
+          });
+          if (capRes.status >= 200 && capRes.status < 300) return;
+        }
+      } catch {
+        // try next endpoint
+      }
     }
   }
 }
 
 /**
  * Processes a Referral Code entered on Registration, Profile, or VIP modal (Crypto-Exchange Style).
- * - Validates the code format and records the invite in both `od_exchange_referral_ledger_v2`
- *   (under both `cleanedCode` and `myReferralCode`) and `od_permanent_referral_state_v1`.
- * - Syncs with the live cloud backend using full URLs + CapacitorHttp so APK and web stay 100% synced.
+ * - Validates the code format and records the invite in `od_exchange_referral_ledger_v2`,
+ *   `od_account_vip_registry_v1`, `od_permanent_referral_state_v1`, and Native Android storage.
+ * - Syncs with the live cloud backend using full URLs so APK and Web stay 100% synced.
  * - Automatically activates 1-Month VIP when 3 referrals are reached!
  */
 export function submitReferralCodeOrInvite(
@@ -736,35 +932,6 @@ export function submitReferralCodeOrInvite(
     timestamp: Date.now()
   };
 
-  // 1. Update Exchange Ledger for both target ownerCode and current user's code
-  const ledger = readExchangeReferralLedger();
-  const targetList = Array.isArray(ledger[cleanedCode]) ? ledger[cleanedCode] : [];
-  if (!targetList.some((r) => r.codeOrIdentifier === label)) {
-    ledger[cleanedCode] = [newRecord, ...targetList];
-  }
-  const myCode = currentInfo.myReferralCode;
-  const myList = Array.isArray(ledger[myCode]) ? ledger[myCode] : [];
-  if (!myList.some((r) => r.codeOrIdentifier === label)) {
-    ledger[myCode] = [newRecord, ...myList];
-  }
-  writeExchangeReferralLedger(ledger);
-
-  // 2. Save appliedReferralCode on active account record
-  const activeAccount = getActiveAccountIdentifier();
-  if (activeAccount) {
-    try {
-      const rawMap = localStorage.getItem(ACCOUNT_VIP_MAP_KEY);
-      const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
-      if (map[activeAccount]) {
-        map[activeAccount].appliedReferralCode = cleanedCode;
-        map[activeAccount].updatedAt = Date.now();
-        localStorage.setItem(ACCOUNT_VIP_MAP_KEY, JSON.stringify(map));
-      }
-    } catch {
-      // ignore
-    }
-  }
-
   const updatedInvites = [
     newRecord,
     ...currentInfo.invitedUsers.filter((r) => r.codeOrIdentifier !== label)
@@ -772,8 +939,48 @@ export function submitReferralCodeOrInvite(
   const newCount = updatedInvites.length;
   const unlockedVipRequest = newCount >= 3;
 
+  // 1. Update Exchange Ledger for target ownerCode and all current user's candidate codes
+  const ledger = readExchangeReferralLedger();
+  const targetList = Array.isArray(ledger[cleanedCode]) ? ledger[cleanedCode] : [];
+  if (!targetList.some((r) => r.codeOrIdentifier === label)) {
+    ledger[cleanedCode] = [newRecord, ...targetList];
+  }
+  const myCode = currentInfo.myReferralCode;
+  for (const c of [myCode, ...getAllCandidateReferralCodes()]) {
+    const myList = Array.isArray(ledger[c]) ? ledger[c] : [];
+    if (!myList.some((r) => r.codeOrIdentifier === label)) {
+      ledger[c] = [newRecord, ...myList];
+    }
+  }
+  writeExchangeReferralLedger(ledger);
+
+  // 2. Save appliedReferralCode and invitedUsers on active account record
+  const activeAccount = getActiveAccountIdentifier() || normalizeAccountIdentifier(friendIdentifier);
+  if (activeAccount) {
+    try {
+      const map = loadAccountVipMap();
+      const existing = map[activeAccount];
+      map[activeAccount] = {
+        ...(existing || {}),
+        identifier: activeAccount,
+        vipActive: existing?.vipActive || false,
+        vipPlan: existing?.vipPlan || '1',
+        vipExpiry: existing?.vipExpiry || 0,
+        planName: existing?.planName || 'Free',
+        referralCode: existing?.referralCode || myCode,
+        coins: existing?.coins ?? getCoinsBalance(),
+        invitedUsers: updatedInvites,
+        appliedReferralCode: cleanedCode,
+        updatedAt: Date.now()
+      };
+      saveAccountVipMap(map);
+    } catch {
+      // ignore
+    }
+  }
+
   try {
-    localStorage.setItem(
+    writePersistentItem(
       REFERRAL_STORAGE_KEY,
       JSON.stringify({
         invitedUsers: updatedInvites,
@@ -841,19 +1048,20 @@ export function submitReferralCodeOrInvite(
 
 /**
  * Syncs the current user's referral invite list from the Cloud Sync API (/api/referral/sync)
- * using full cloud URLs + CapacitorHttp so it works inside the Android APK as well as Web.
+ * across all candidate codes for this user/device.
  */
 export async function syncReferralFromCloud(): Promise<{
   referralInfo: ReferralInfo;
   autoActivatedVip: boolean;
 }> {
   const myCode = getMyReferralCode();
+  const allCodes = Array.from(new Set([myCode, ...getAllCandidateReferralCodes()])).join(',');
   const current = getReferralInfo();
   const endpoints = Array.from(
     new Set([
-      getApiUrl(`/api/referral/sync?code=${encodeURIComponent(myCode)}`),
+      getApiUrl(`/api/referral/sync?code=${encodeURIComponent(allCodes)}`),
       ...CLOUD_BACKEND_URLS.map(
-        (base) => `${base}/api/referral/sync?code=${encodeURIComponent(myCode)}`
+        (base) => `${base}/api/referral/sync?code=${encodeURIComponent(allCodes)}`
       )
     ])
   );
@@ -861,19 +1069,21 @@ export async function syncReferralFromCloud(): Promise<{
   for (const url of endpoints) {
     try {
       let data: any = null;
-      if (Capacitor.isNativePlatform()) {
-        const res = await CapacitorHttp.get({
-          url,
-          connectTimeout: 6000,
-          readTimeout: 6000
-        });
-        if (res.status >= 200 && res.status < 300) {
-          data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
-        }
-      } else {
+      try {
         const res = await fetch(url);
         if (res.ok) {
           data = await res.json();
+        }
+      } catch {
+        if (Capacitor.isNativePlatform()) {
+          const capRes = await CapacitorHttp.get({
+            url,
+            connectTimeout: 6000,
+            readTimeout: 6000
+          });
+          if (capRes.status >= 200 && capRes.status < 300) {
+            data = typeof capRes.data === 'string' ? JSON.parse(capRes.data) : capRes.data;
+          }
         }
       }
 
@@ -892,9 +1102,8 @@ export async function syncReferralFromCloud(): Promise<{
           }
         }
         const mergedList = Array.from(mergedMap.values()).sort((a, b) => b.timestamp - a.timestamp);
-        const prevCount = current.invitedUsers.length;
-        if (mergedList.length !== prevCount) {
-          localStorage.setItem(
+        if (mergedList.length > 0) {
+          writePersistentItem(
             REFERRAL_STORAGE_KEY,
             JSON.stringify({
               invitedUsers: mergedList,
@@ -904,6 +1113,16 @@ export async function syncReferralFromCloud(): Promise<{
           const ledger = readExchangeReferralLedger();
           ledger[myCode] = mergedList;
           writeExchangeReferralLedger(ledger);
+
+          const activeId = getActiveAccountIdentifier();
+          if (activeId) {
+            const map = loadAccountVipMap();
+            if (map[activeId]) {
+              map[activeId].invitedUsers = mergedList;
+              map[activeId].updatedAt = Date.now();
+              saveAccountVipMap(map);
+            }
+          }
         }
 
         const quota = getDailyQuota();
@@ -1266,9 +1485,9 @@ export function getDailyQuota(): QuotaInfo {
 
   try {
     // 1. Check central license keys (od_vip_active, od_vip_plan, od_vip_expiry) + cookie / account backup
-    let odVipActive = localStorage.getItem('od_vip_active') === 'true';
-    let odVipExpiryRaw = localStorage.getItem('od_vip_expiry');
-    let odVipPlanRaw = localStorage.getItem('od_vip_plan');
+    let odVipActive = readPersistentItem('od_vip_active') === 'true';
+    let odVipExpiryRaw = readPersistentItem('od_vip_expiry');
+    let odVipPlanRaw = readPersistentItem('od_vip_plan');
 
     if (!odVipExpiryRaw) {
       const cookieExp = readCookieValue('od_vip_expiry_cookie');
@@ -1277,16 +1496,16 @@ export function getDailyQuota(): QuotaInfo {
         odVipActive = true;
         odVipExpiryRaw = cookieExp;
         odVipPlanRaw = cookiePlan || '1';
-        localStorage.setItem('od_vip_active', 'true');
-        localStorage.setItem('od_vip_expiry', cookieExp);
-        localStorage.setItem('od_vip_plan', odVipPlanRaw);
+        writePersistentItem('od_vip_active', 'true');
+        writePersistentItem('od_vip_expiry', cookieExp);
+        writePersistentItem('od_vip_plan', odVipPlanRaw);
       }
     }
 
     if (!odVipActive || !odVipExpiryRaw) {
       const activeId = getActiveAccountIdentifier();
       if (activeId) {
-        const rawMap = localStorage.getItem(ACCOUNT_VIP_MAP_KEY);
+        const rawMap = readPersistentItem(ACCOUNT_VIP_MAP_KEY);
         if (rawMap) {
           const map: Record<string, AccountVipRecord> = JSON.parse(rawMap);
           const accRec = map[activeId];
@@ -1294,9 +1513,9 @@ export function getDailyQuota(): QuotaInfo {
             odVipActive = true;
             odVipExpiryRaw = String(accRec.vipExpiry);
             odVipPlanRaw = accRec.vipPlan || '1';
-            localStorage.setItem('od_vip_active', 'true');
-            localStorage.setItem('od_vip_expiry', odVipExpiryRaw);
-            localStorage.setItem('od_vip_plan', odVipPlanRaw);
+            writePersistentItem('od_vip_active', 'true');
+            writePersistentItem('od_vip_expiry', odVipExpiryRaw);
+            writePersistentItem('od_vip_plan', odVipPlanRaw);
           }
         }
       }
@@ -1322,7 +1541,7 @@ export function getDailyQuota(): QuotaInfo {
     }
 
     // 2. Also check PRO_STORAGE_KEY
-    const proRaw = localStorage.getItem(PRO_STORAGE_KEY);
+    const proRaw = readPersistentItem(PRO_STORAGE_KEY);
     if (proRaw) {
       const proData = JSON.parse(proRaw);
       if (proData && proData.isActive === true && (!proData.expiry || proData.expiry > Date.now())) {
@@ -1338,30 +1557,27 @@ export function getDailyQuota(): QuotaInfo {
 
     // 3. Also check if user has reached >= 3 referrals (automatic 1-Month VIP activation)
     if (!isPro) {
-      const refStateRaw = localStorage.getItem(REFERRAL_STORAGE_KEY);
-      if (refStateRaw) {
-        const refParsed = JSON.parse(refStateRaw);
-        if (Array.isArray(refParsed?.invitedUsers) && refParsed.invitedUsers.length >= 3) {
-          const autoExpiry = Date.now() + 30 * 24 * 60 * 60 * 1000;
-          isPro = true;
-          proPlanName = 'اشتراک VIP یک‌ماهه (هدیه ۳ رفرال موفق)';
-          proExpiryDate = autoExpiry;
-          remainingProDays = 30;
-          localStorage.setItem(
-            PRO_STORAGE_KEY,
-            JSON.stringify({
-              isActive: true,
-              planId: 'monthly_referral',
-              planName: proPlanName,
-              expiry: autoExpiry,
-              activatedAt: Date.now()
-            })
-          );
-          localStorage.setItem('od_vip_active', 'true');
-          localStorage.setItem('od_vip_plan', '1');
-          localStorage.setItem('od_vip_expiry', String(autoExpiry));
-          saveVipRecordForCurrentAccount(autoExpiry, '1', proPlanName);
-        }
+      const refInfo = getReferralInfo();
+      if (refInfo.invitedUsers.length >= 3) {
+        const autoExpiry = Date.now() + 30 * 24 * 60 * 60 * 1000;
+        isPro = true;
+        proPlanName = 'اشتراک VIP یک‌ماهه (هدیه ۳ رفرال موفق)';
+        proExpiryDate = autoExpiry;
+        remainingProDays = 30;
+        writePersistentItem(
+          PRO_STORAGE_KEY,
+          JSON.stringify({
+            isActive: true,
+            planId: 'monthly_referral',
+            planName: proPlanName,
+            expiry: autoExpiry,
+            activatedAt: Date.now()
+          })
+        );
+        writePersistentItem('od_vip_active', 'true');
+        writePersistentItem('od_vip_plan', '1');
+        writePersistentItem('od_vip_expiry', String(autoExpiry));
+        saveVipRecordForCurrentAccount(autoExpiry, '1', proPlanName);
       }
     }
   } catch {
@@ -1371,12 +1587,38 @@ export function getDailyQuota(): QuotaInfo {
   let usedToday = 0;
   let bonusDownloadsToday = 0;
   try {
-    const raw = localStorage.getItem(QUOTA_STORAGE_KEY);
+    const raw = readPersistentItem(QUOTA_STORAGE_KEY);
     if (raw) {
       const data = JSON.parse(raw);
       if (data && data.dateKey === todayKey) {
         usedToday = Number(data.usedCount) || 0;
         bonusDownloadsToday = Number(data.bonusDownloads) || 0;
+      }
+    }
+
+    // Also reconcile with permanent device daily ledger & active account record so logout never resets used count
+    const ledgerRaw = readPersistentItem(DEVICE_DAILY_LEDGER_KEY);
+    if (ledgerRaw) {
+      const ledger = JSON.parse(ledgerRaw);
+      if (ledger && ledger.dateKey === todayKey) {
+        usedToday = Math.max(usedToday, Number(ledger.usedCount) || 0);
+        bonusDownloadsToday = Math.max(bonusDownloadsToday, Number(ledger.bonusDownloads) || 0);
+      }
+    }
+
+    const activeId = getActiveAccountIdentifier();
+    if (activeId) {
+      const rawMap = readPersistentItem(ACCOUNT_VIP_MAP_KEY);
+      if (rawMap) {
+        const map: Record<string, AccountVipRecord> = JSON.parse(rawMap);
+        const rec = map[activeId];
+        if (rec?.dailyQuota && rec.dailyQuota.dateKey === todayKey) {
+          usedToday = Math.max(usedToday, Number(rec.dailyQuota.usedCount) || 0);
+          bonusDownloadsToday = Math.max(
+            bonusDownloadsToday,
+            Number(rec.dailyQuota.bonusDownloads) || 0
+          );
+        }
       }
     }
   } catch {
@@ -1439,17 +1681,53 @@ export function consumeDownloadQuota(): {
 
   const todayKey = getTodayKey();
   const newUsed = quota.usedToday + 1;
+  const quotaRecord: DailyQuotaRecord = {
+    dateKey: todayKey,
+    usedCount: newUsed,
+    bonusDownloads: bonusToSave,
+    updatedAt: Date.now()
+  };
 
   try {
-    localStorage.setItem(
-      QUOTA_STORAGE_KEY,
+    writePersistentItem(QUOTA_STORAGE_KEY, JSON.stringify(quotaRecord));
+
+    // Also update permanent device daily ledger
+    const ledgerRaw = readPersistentItem(DEVICE_DAILY_LEDGER_KEY);
+    const ledger = ledgerRaw ? JSON.parse(ledgerRaw) : {};
+    writePersistentItem(
+      DEVICE_DAILY_LEDGER_KEY,
       JSON.stringify({
+        ...ledger,
         dateKey: todayKey,
-        usedCount: newUsed,
-        bonusDownloads: bonusToSave,
+        usedCount: Math.max(newUsed, ledger.dateKey === todayKey ? Number(ledger.usedCount) || 0 : 0),
+        bonusDownloads: Math.max(
+          bonusToSave,
+          ledger.dateKey === todayKey ? Number(ledger.bonusDownloads) || 0 : 0
+        ),
         updatedAt: Date.now()
       })
     );
+
+    // Also save to active account record
+    const activeId = getActiveAccountIdentifier();
+    if (activeId) {
+      const rawMap = readPersistentItem(ACCOUNT_VIP_MAP_KEY);
+      const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
+      const existing = map[activeId] || {
+        identifier: activeId,
+        vipExpiry: 0,
+        vipPlan: '1',
+        planName: '',
+        referralCode: getMyReferralCode(),
+        updatedAt: Date.now()
+      };
+      map[activeId] = {
+        ...existing,
+        dailyQuota: quotaRecord,
+        updatedAt: Date.now()
+      };
+      writePersistentItem(ACCOUNT_VIP_MAP_KEY, JSON.stringify(map));
+    }
   } catch {
     // ignore
   }
@@ -1498,7 +1776,7 @@ export function activateProPlan(
   const expiry = Date.now() + days * 24 * 60 * 60 * 1000;
   const planCode = days >= 365 ? '12' : days >= 90 ? '3' : '1';
   try {
-    localStorage.setItem(
+    writePersistentItem(
       PRO_STORAGE_KEY,
       JSON.stringify({
         isActive: true,
@@ -1508,9 +1786,9 @@ export function activateProPlan(
         activatedAt: Date.now()
       })
     );
-    localStorage.setItem('od_vip_active', 'true');
-    localStorage.setItem('od_vip_plan', planCode);
-    localStorage.setItem('od_vip_expiry', String(expiry));
+    writePersistentItem('od_vip_active', 'true');
+    writePersistentItem('od_vip_plan', planCode);
+    writePersistentItem('od_vip_expiry', String(expiry));
     saveVipRecordForCurrentAccount(expiry, planCode, planName);
   } catch {
     // ignore
@@ -1582,16 +1860,41 @@ export function redeemCoinsForQuotaOrPro(
 
   const addedCount = option === 'extra_1_download' ? 1 : 3;
   const newBonus = quota.bonusDownloadsToday + addedCount;
+  const quotaRecord: DailyQuotaRecord = {
+    dateKey: todayKey,
+    usedCount: quota.usedToday,
+    bonusDownloads: newBonus,
+    updatedAt: Date.now()
+  };
   try {
-    localStorage.setItem(
-      QUOTA_STORAGE_KEY,
+    writePersistentItem(QUOTA_STORAGE_KEY, JSON.stringify(quotaRecord));
+
+    const ledgerRaw = readPersistentItem(DEVICE_DAILY_LEDGER_KEY);
+    const ledger = ledgerRaw ? JSON.parse(ledgerRaw) : {};
+    writePersistentItem(
+      DEVICE_DAILY_LEDGER_KEY,
       JSON.stringify({
+        ...ledger,
         dateKey: todayKey,
         usedCount: quota.usedToday,
         bonusDownloads: newBonus,
         updatedAt: Date.now()
       })
     );
+
+    const activeId = getActiveAccountIdentifier();
+    if (activeId) {
+      const rawMap = readPersistentItem(ACCOUNT_VIP_MAP_KEY);
+      const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
+      if (map[activeId]) {
+        map[activeId] = {
+          ...map[activeId],
+          dailyQuota: quotaRecord,
+          updatedAt: Date.now()
+        };
+        writePersistentItem(ACCOUNT_VIP_MAP_KEY, JSON.stringify(map));
+      }
+    }
   } catch {
     // ignore
   }
@@ -1613,60 +1916,260 @@ export function redeemCoinsForQuotaOrPro(
 }
 
 /**
- * Synchronizes VIP subscription status and fixed referral code with the logged-in user's account
- * (email or mobile number) so logging out, refreshing, or re-logging in with the same email/phone
- * immediately restores the exact VIP plan and remaining days.
+ * Captures the complete quota/coins/reward/referral/VIP state so it can be embedded in the user's
+ * AccountVaultEntry across localStorage, IndexedDB, Android Native File Storage, and Cloud Sync.
+ */
+export function getAccountQuotaSnapshot(accountIdentifier?: string): AccountQuotaSnapshot {
+  const cleanId = normalizeAccountIdentifier(accountIdentifier) || getActiveAccountIdentifier();
+  const refInfo = getReferralInfo();
+  const currentExpiry = Number(readPersistentItem('od_vip_expiry') || '0');
+  const currentPlan = readPersistentItem('od_vip_plan') || '1';
+  const currentQuota = getDailyQuota();
+  const rewardStatus = getRewardStatus();
+
+  let savedRec: AccountVipRecord | undefined;
+  try {
+    const rawMap = readPersistentItem(ACCOUNT_VIP_MAP_KEY);
+    if (rawMap && cleanId) {
+      const map: Record<string, AccountVipRecord> = JSON.parse(rawMap);
+      savedRec = map[cleanId];
+    }
+  } catch {
+    // ignore
+  }
+
+  const mergedVipExpiry = Math.max(currentExpiry, savedRec?.vipExpiry || 0);
+  const mergedVipPlan =
+    currentExpiry >= (savedRec?.vipExpiry || 0) ? currentPlan : savedRec?.vipPlan || '1';
+  const mergedPlanName = currentQuota.proPlanName || savedRec?.planName || '';
+
+  return {
+    coins: Math.max(getCoinsBalance(), savedRec?.coins || 0),
+    dailyQuota: {
+      dateKey: currentQuota.dateKey,
+      usedCount: currentQuota.usedToday,
+      bonusDownloads: currentQuota.bonusDownloadsToday,
+      updatedAt: Date.now()
+    },
+    rewardLog: {
+      dateKey: currentQuota.dateKey,
+      checkedInToday: rewardStatus.checkedInToday,
+      watchedAdsToday: rewardStatus.watchedAdsToday,
+      sharedToday: rewardStatus.sharedToday
+    },
+    referralState: {
+      myReferralCode: refInfo.myReferralCode,
+      invitedUsers: refInfo.invitedUsers,
+      appliedReferralCode: refInfo.appliedReferralCode || savedRec?.appliedReferralCode,
+      vipUnlockedByReferral: refInfo.vipEligibleByReferral
+    },
+    vipState: {
+      vipActive: mergedVipExpiry > Date.now(),
+      vipPlan: mergedVipPlan,
+      vipExpiry: mergedVipExpiry,
+      planName: mergedPlanName
+    }
+  };
+}
+
+/**
+ * Restores an AccountQuotaSnapshot when a user logs back in, merging coins, daily quota,
+ * daily check-in reward log, referrals, and VIP subscription without losing any progress.
+ */
+export function restoreAccountQuotaSnapshot(
+  snapshot?: AccountQuotaSnapshot | null,
+  accountIdentifier?: string
+): void {
+  const cleanId = normalizeAccountIdentifier(accountIdentifier) || getActiveAccountIdentifier();
+  if (cleanId && cleanId !== 'guest@appone.ir') {
+    writePersistentItem(ACTIVE_ACCOUNT_ID_KEY, cleanId);
+  }
+  if (!snapshot) return;
+
+  try {
+    const todayKey = getTodayKey();
+
+    // 1. Restore Coins (keep highest)
+    const currentCoins = getCoinsBalance();
+    const mergedCoins = Math.max(currentCoins, Number(snapshot.coins) || 0);
+    writePersistentItem(COINS_STORAGE_KEY, String(mergedCoins));
+
+    // 2. Restore Daily Quota
+    if (snapshot.dailyQuota && snapshot.dailyQuota.dateKey === todayKey) {
+      const currentQuota = getDailyQuota();
+      const mergedQuota: DailyQuotaRecord = {
+        dateKey: todayKey,
+        usedCount: Math.max(currentQuota.usedToday, Number(snapshot.dailyQuota.usedCount) || 0),
+        bonusDownloads: Math.max(
+          currentQuota.bonusDownloadsToday,
+          Number(snapshot.dailyQuota.bonusDownloads) || 0
+        ),
+        updatedAt: Date.now()
+      };
+      writePersistentItem(QUOTA_STORAGE_KEY, JSON.stringify(mergedQuota));
+      const devRaw = readPersistentItem(DEVICE_DAILY_LEDGER_KEY);
+      const devLedger = devRaw ? JSON.parse(devRaw) : {};
+      writePersistentItem(
+        DEVICE_DAILY_LEDGER_KEY,
+        JSON.stringify({
+          ...(devLedger.dateKey === todayKey ? devLedger : {}),
+          ...mergedQuota
+        })
+      );
+    }
+
+    // 3. Restore Daily Check-in Reward Log
+    if (snapshot.rewardLog && snapshot.rewardLog.dateKey === todayKey) {
+      const currentStatus = getRewardStatus();
+      const mergedLog: DailyRewardLogRecord = {
+        dateKey: todayKey,
+        checkedInToday: Boolean(currentStatus.checkedInToday || snapshot.rewardLog.checkedInToday),
+        watchedAdsToday: Math.max(
+          currentStatus.watchedAdsToday,
+          Number(snapshot.rewardLog.watchedAdsToday) || 0
+        ),
+        sharedToday: Boolean(currentStatus.sharedToday || snapshot.rewardLog.sharedToday)
+      };
+      writePersistentItem(REWARD_LOG_STORAGE_KEY, JSON.stringify(mergedLog));
+      const devRaw = readPersistentItem(DEVICE_DAILY_LEDGER_KEY);
+      const devLedger = devRaw ? JSON.parse(devRaw) : {};
+      writePersistentItem(
+        DEVICE_DAILY_LEDGER_KEY,
+        JSON.stringify({
+          ...(devLedger.dateKey === todayKey ? devLedger : {}),
+          dateKey: todayKey,
+          checkedInToday: mergedLog.checkedInToday
+        })
+      );
+    }
+
+    // 4. Restore Referrals & Invites
+    const currentRef = getReferralInfo();
+    const inviteMap = new Map<string, InvitedReferralRecord>();
+    for (const inv of currentRef.invitedUsers || []) {
+      if (inv && inv.id) inviteMap.set(inv.id, inv);
+    }
+    for (const inv of snapshot.referralState?.invitedUsers || []) {
+      if (inv && inv.id) inviteMap.set(inv.id, inv);
+    }
+    const mergedInvites = Array.from(inviteMap.values());
+    const mergedApplied =
+      currentRef.appliedReferralCode || snapshot.referralState?.appliedReferralCode;
+    const mergedRefCode = snapshot.referralState?.myReferralCode || currentRef.myReferralCode;
+    if (mergedRefCode) {
+      writePersistentItem(MY_RANDOM_REF_CODE_KEY, mergedRefCode);
+      writeCookieValue('od_fixed_referral_cookie', mergedRefCode);
+    }
+    writePersistentItem(
+      REFERRAL_STORAGE_KEY,
+      JSON.stringify({
+        myReferralCode: mergedRefCode,
+        appliedReferralCode: mergedApplied,
+        invitedUsers: mergedInvites,
+        vipUnlockedByReferral: mergedInvites.length >= 3
+      })
+    );
+
+    // 5. Restore VIP if active
+    const currentExpiry = Number(readPersistentItem('od_vip_expiry') || '0');
+    const snapVipExpiry = Number(snapshot.vipState?.vipExpiry) || 0;
+    const snapVipPlan = snapshot.vipState?.vipPlan || '1';
+    const snapPlanName = snapshot.vipState?.planName || 'اشتراک VIP Pro';
+    if (snapVipExpiry > Date.now() && snapVipExpiry >= currentExpiry) {
+      writePersistentItem('od_vip_active', 'true');
+      writePersistentItem('od_vip_plan', snapVipPlan);
+      writePersistentItem('od_vip_expiry', String(snapVipExpiry));
+      writePersistentItem(
+        PRO_STORAGE_KEY,
+        JSON.stringify({
+          isActive: true,
+          planId: snapVipPlan === '12' ? 'yearly' : snapVipPlan === '3' ? 'quarterly' : 'monthly',
+          planName: snapPlanName,
+          expiry: snapVipExpiry,
+          activatedAt: Date.now()
+        })
+      );
+      writeCookieValue('od_vip_expiry_cookie', String(snapVipExpiry));
+      writeCookieValue('od_vip_plan_cookie', snapVipPlan);
+    }
+
+    // 6. Persist into ACCOUNT_VIP_MAP_KEY
+    if (cleanId && cleanId !== 'guest@appone.ir') {
+      const rawMap = readPersistentItem(ACCOUNT_VIP_MAP_KEY);
+      const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
+      const finalExpiry = Math.max(snapVipExpiry, currentExpiry);
+      map[cleanId] = {
+        ...(map[cleanId] || {}),
+        identifier: cleanId,
+        vipActive: finalExpiry > Date.now(),
+        vipExpiry: finalExpiry,
+        vipPlan: snapVipPlan,
+        planName: snapPlanName,
+        referralCode: mergedRefCode,
+        appliedReferralCode: mergedApplied,
+        invitedUsers: mergedInvites,
+        coins: mergedCoins,
+        dailyQuota: snapshot.dailyQuota,
+        rewardLog: snapshot.rewardLog,
+        updatedAt: Date.now()
+      };
+      writePersistentItem(ACCOUNT_VIP_MAP_KEY, JSON.stringify(map));
+    }
+  } catch {
+    // ignore
+  }
+  notifySubscribers();
+}
+
+/**
+ * Synchronizes VIP subscription status, coins, daily quota, daily check-in, and fixed referral code
+ * with the logged-in user's account (email or mobile number) so logging out, refreshing, or re-logging in
+ * with the same email/phone immediately restores the exact state.
  */
 export function syncAccountVipAndReferral(accountIdentifier?: string): QuotaInfo {
   try {
     const cleanId = normalizeAccountIdentifier(accountIdentifier);
     if (cleanId && cleanId !== 'guest@appone.ir') {
-      localStorage.setItem(ACTIVE_ACCOUNT_ID_KEY, cleanId);
-      const rawMap = localStorage.getItem(ACCOUNT_VIP_MAP_KEY);
+      writePersistentItem(ACTIVE_ACCOUNT_ID_KEY, cleanId);
+      const rawMap = readPersistentItem(ACCOUNT_VIP_MAP_KEY);
       const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
       const existingRecord = map[cleanId];
 
-      // Restore account's saved coin balance if greater than current
-      if (existingRecord && typeof existingRecord.coins === 'number') {
-        const currentCoins = getCoinsBalance();
-        if (existingRecord.coins > currentCoins) {
-          localStorage.setItem(COINS_STORAGE_KEY, String(existingRecord.coins));
-        }
-      }
-
-      const currentExpiry = Number(localStorage.getItem('od_vip_expiry') || '0');
-      const currentPlan = localStorage.getItem('od_vip_plan') || '1';
-
-      if (existingRecord && existingRecord.vipExpiry > Date.now() && existingRecord.vipExpiry >= currentExpiry) {
-        // Restore VIP from user's account record
-        localStorage.setItem('od_vip_active', 'true');
-        localStorage.setItem('od_vip_plan', existingRecord.vipPlan || '1');
-        localStorage.setItem('od_vip_expiry', String(existingRecord.vipExpiry));
-        localStorage.setItem(
-          PRO_STORAGE_KEY,
-          JSON.stringify({
-            isActive: true,
-            planId: existingRecord.vipPlan === '12' ? 'yearly' : existingRecord.vipPlan === '3' ? 'quarterly' : 'monthly',
-            planName: existingRecord.planName || 'اشتراک VIP Pro',
-            expiry: existingRecord.vipExpiry,
-            activatedAt: existingRecord.updatedAt || Date.now()
-          })
-        );
-        writeCookieValue('od_vip_expiry_cookie', String(existingRecord.vipExpiry));
-        writeCookieValue('od_vip_plan_cookie', existingRecord.vipPlan || '1');
-      } else if (currentExpiry > Date.now()) {
-        // Bind active device VIP to this user's account
-        saveVipRecordForCurrentAccount(
-          currentExpiry,
-          currentPlan,
-          currentPlan === '12'
-            ? 'اشتراک VIP یک‌ساله (۱۲ ماهه)'
-            : currentPlan === '3'
-            ? 'اشتراک VIP سه‌ماهه (۹۰ روزه)'
-            : 'اشتراک VIP یک‌ماهه (۳۰ روزه)',
+      if (existingRecord) {
+        restoreAccountQuotaSnapshot(
+          {
+            coins: existingRecord.coins || 0,
+            dailyQuota: existingRecord.dailyQuota,
+            rewardLog: existingRecord.rewardLog,
+            referralState: {
+              myReferralCode: existingRecord.referralCode || getMyReferralCode(),
+              invitedUsers: existingRecord.invitedUsers || [],
+              appliedReferralCode: existingRecord.appliedReferralCode,
+              vipUnlockedByReferral: (existingRecord.invitedUsers || []).length >= 3
+            },
+            vipState: {
+              vipActive: (existingRecord.vipExpiry || 0) > Date.now(),
+              vipPlan: existingRecord.vipPlan || '1',
+              vipExpiry: existingRecord.vipExpiry || 0,
+              planName: existingRecord.planName || ''
+            }
+          },
           cleanId
         );
       }
+
+      const currentExpiry = Number(readPersistentItem('od_vip_expiry') || '0');
+      const currentPlan = readPersistentItem('od_vip_plan') || '1';
+      saveVipRecordForCurrentAccount(
+        currentExpiry,
+        currentPlan,
+        currentPlan === '12'
+          ? 'اشتراک VIP یک‌ساله (۱۲ ماهه)'
+          : currentPlan === '3'
+          ? 'اشتراک VIP سه‌ماهه (۹۰ روزه)'
+          : 'اشتراک VIP یک‌ماهه (۳۰ روزه)',
+        cleanId
+      );
     }
   } catch {
     // ignore
@@ -1679,28 +2182,39 @@ export function syncAccountVipAndReferral(accountIdentifier?: string): QuotaInfo
 }
 
 /**
- * Resets user-specific session quota when logging out,
- * while strictly preserving the user's account-bound VIP subscription (`od_vip_expiry`),
- * permanent Hardware ID (`od_fixed_hardware_id`),
- * permanent Referral Code (`od_fixed_referral_code`), and permanent Referral invites (`od_permanent_referral_state_v1`).
+ * Preserves the user's account state on logout without wiping daily quota, daily check-in reward,
+ * coins, referrals, or VIP subscription!
  */
 export function resetUserAccountAndQuotaToGuest(): void {
   try {
-    const currentExpiry = Number(localStorage.getItem('od_vip_expiry') || '0');
-    const currentPlan = localStorage.getItem('od_vip_plan') || '1';
-    if (currentExpiry > Date.now()) {
-      saveVipRecordForCurrentAccount(
-        currentExpiry,
-        currentPlan,
-        currentPlan === '12'
-          ? 'اشتراک VIP یک‌ساله (۱۲ ماهه)'
-          : currentPlan === '3'
-          ? 'اشتراک VIP سه‌ماهه (۹۰ روزه)'
-          : 'اشتراک VIP یک‌ماهه (۳۰ روزه)'
-      );
+    const activeId = getActiveAccountIdentifier();
+    const currentExpiry = Number(readPersistentItem('od_vip_expiry') || '0');
+    const currentPlan = readPersistentItem('od_vip_plan') || '1';
+    if (activeId) {
+      const snapshot = getAccountQuotaSnapshot(activeId);
+      const rawMap = readPersistentItem(ACCOUNT_VIP_MAP_KEY);
+      const map: Record<string, AccountVipRecord> = rawMap ? JSON.parse(rawMap) : {};
+      const finalExpiry = Math.max(snapshot.vipState?.vipExpiry || 0, currentExpiry);
+      map[activeId] = {
+        ...(map[activeId] || {}),
+        identifier: activeId,
+        vipActive: finalExpiry > Date.now(),
+        vipExpiry: finalExpiry,
+        vipPlan: snapshot.vipState?.vipPlan || currentPlan,
+        planName: snapshot.vipState?.planName || '',
+        referralCode: snapshot.referralState?.myReferralCode || getMyReferralCode(),
+        appliedReferralCode: snapshot.referralState?.appliedReferralCode,
+        invitedUsers: snapshot.referralState?.invitedUsers || [],
+        coins: snapshot.coins,
+        dailyQuota: snapshot.dailyQuota,
+        rewardLog: snapshot.rewardLog,
+        updatedAt: Date.now()
+      };
+      writePersistentItem(ACCOUNT_VIP_MAP_KEY, JSON.stringify(map));
     }
-    localStorage.removeItem(QUOTA_STORAGE_KEY);
-    localStorage.removeItem(REWARD_LOG_STORAGE_KEY);
+    // IMPORTANT: Do NOT remove QUOTA_STORAGE_KEY, REWARD_LOG_STORAGE_KEY, or COINS_STORAGE_KEY on logout!
+    // Keeping them intact ensures daily check-in (+2 coins), 3 daily free downloads, and referrals
+    // never reset ("رو هوا نباشد") when switching or logging out/in.
     localStorage.removeItem(VIP_REQUEST_STORAGE_KEY);
     localStorage.removeItem(ACTIVE_ACCOUNT_ID_KEY);
   } catch {

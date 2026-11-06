@@ -1,4 +1,10 @@
 import { AppSettings, DownloadTask, Language, UserSession } from '../types';
+import {
+  AccountQuotaSnapshot,
+  getAccountQuotaSnapshot,
+  restoreAccountQuotaSnapshot
+} from './quotaService';
+import { getApiUrl } from './platformDetector';
 
 const STORAGE_KEYS = {
   TASKS: 'onedownload_tasks_v2',
@@ -13,6 +19,37 @@ const DB_VERSION = 2;
 export const OFFLINE_MEDIA_STORE = 'offline_media';
 const LEGACY_BLOB_STORE = 'media_blobs';
 const IDB_SESSION_RECORD_KEY = '__od_user_session_record__';
+const IDB_TASKS_BACKUP_KEY = '__od_tasks_backup_record__';
+
+function readNativePersistentJson(key: string): string | null {
+  try {
+    const win = window as unknown as {
+      OneDownloadNative?: { loadPersistentJson?: (k: string) => string };
+    };
+    if (win?.OneDownloadNative && typeof win.OneDownloadNative.loadPersistentJson === 'function') {
+      const val = win.OneDownloadNative.loadPersistentJson(key);
+      if (val && typeof val === 'string' && val.trim().length > 0) {
+        return val;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function writeNativePersistentJson(key: string, value: string): void {
+  try {
+    const win = window as unknown as {
+      OneDownloadNative?: { savePersistentJson?: (k: string, v: string) => boolean };
+    };
+    if (win?.OneDownloadNative && typeof win.OneDownloadNative.savePersistentJson === 'function') {
+      win.OneDownloadNative.savePersistentJson(key, value);
+    }
+  } catch {
+    // ignore
+  }
+}
 
 export interface OfflineMediaRecord {
   id: string; // taskId or unique ID
@@ -39,7 +76,7 @@ function getDB(): Promise<IDBDatabase> {
       return;
     }
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = (e) => {
+    request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(OFFLINE_MEDIA_STORE)) {
         db.createObjectStore(OFFLINE_MEDIA_STORE, { keyPath: 'id' });
@@ -226,10 +263,21 @@ function normalizeStoredThumbnail(thumb?: string, videoId?: string): string {
   return thumb;
 }
 
-// LocalStorage helpers for tasks & metadata
+// LocalStorage + Native File Bridge helpers for tasks & metadata
 export function loadTasksFromStorage(): DownloadTask[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEYS.TASKS);
+    let raw = localStorage.getItem(STORAGE_KEYS.TASKS);
+    if (!raw || raw === '[]') {
+      const nativeRaw = readNativePersistentJson(STORAGE_KEYS.TASKS);
+      if (nativeRaw && nativeRaw !== '[]') {
+        raw = nativeRaw;
+        try {
+          localStorage.setItem(STORAGE_KEYS.TASKS, nativeRaw);
+        } catch {
+          // ignore
+        }
+      }
+    }
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -326,6 +374,34 @@ export async function hydrateTasksFromIndexedDB(
       return task;
     });
 
+    // Also restore any IndexedDB backup task list if localStorage was cleared
+    try {
+      const db = await getDB();
+      const tx = db.transaction(LEGACY_BLOB_STORE, 'readonly');
+      const store = tx.objectStore(LEGACY_BLOB_STORE);
+      const req = store.get(IDB_TASKS_BACKUP_KEY);
+      const backupList = await new Promise<DownloadTask[]>((resolve) => {
+        req.onsuccess = () => resolve(Array.isArray(req.result?.tasks) ? req.result.tasks : []);
+        req.onerror = () => resolve([]);
+      });
+      if (backupList.length > 0) {
+        const currentIds = new Set(updatedTasks.map((t) => t.id));
+        for (const bt of backupList) {
+          if (bt && bt.id && !currentIds.has(bt.id)) {
+            updatedTasks.push({
+              ...bt,
+              thumbnail: normalizeStoredThumbnail(bt.thumbnail, bt.videoId),
+              mediaBlob: undefined,
+              blobUrl: undefined
+            });
+            currentIds.add(bt.id);
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+
     // Also restore any IndexedDB records that were not in localStorage
     const restoredFromIdb: DownloadTask[] = [];
     recordMap.forEach((rec) => {
@@ -372,7 +448,11 @@ export async function hydrateTasksFromIndexedDB(
       });
     });
 
-    return [...updatedTasks, ...restoredFromIdb];
+    const combined = [...updatedTasks, ...restoredFromIdb];
+    if (combined.length > existingTasks.length) {
+      saveTasksToStorage(combined);
+    }
+    return combined;
   } catch (err) {
     console.warn('Hydrate tasks from IndexedDB notice:', err);
     return existingTasks;
@@ -380,17 +460,35 @@ export async function hydrateTasksFromIndexedDB(
 }
 
 export function saveTasksToStorage(tasks: DownloadTask[]): void {
+  // Strip in-memory blob URLs and blobs before saving JSON
+  const sanitized = tasks.map((t) => ({
+    ...t,
+    blobUrl: undefined,
+    mediaBlob: undefined
+  }));
+  const serialized = JSON.stringify(sanitized);
+
   try {
-    // Strip in-memory blob URLs and blobs before saving JSON
-    const sanitized = tasks.map(t => ({
-      ...t,
-      blobUrl: undefined,
-      mediaBlob: undefined
-    }));
-    localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(sanitized));
+    localStorage.setItem(STORAGE_KEYS.TASKS, serialized);
   } catch (err) {
     console.error('Failed to save tasks to localStorage:', err);
   }
+
+  // Always mirror tasks into Android Native Permanent File Storage
+  writeNativePersistentJson(STORAGE_KEYS.TASKS, serialized);
+
+  // Also mirror tasks into IndexedDB backup store
+  getDB()
+    .then((db) => {
+      const tx = db.transaction(LEGACY_BLOB_STORE, 'readwrite');
+      const store = tx.objectStore(LEGACY_BLOB_STORE);
+      store.put({
+        id: IDB_TASKS_BACKUP_KEY,
+        tasks: sanitized,
+        updatedAt: Date.now()
+      });
+    })
+    .catch(() => {});
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -457,9 +555,14 @@ export const DEFAULT_SESSION: UserSession = {
 
 export function loadSessionFromStorage(): UserSession {
   try {
-    const raw =
+    let raw =
       localStorage.getItem(STORAGE_KEYS.OD_USER_SESSION) ||
       localStorage.getItem(STORAGE_KEYS.SESSION);
+    if (!raw) {
+      raw =
+        readNativePersistentJson(STORAGE_KEYS.OD_USER_SESSION) ||
+        readNativePersistentJson(STORAGE_KEYS.SESSION);
+    }
     const currentSettings = loadSettingsFromStorage();
     const localizedDefaultName = getLocalizedGuestName(currentSettings.language);
     if (!raw) {
@@ -482,8 +585,11 @@ export function loadSessionFromStorage(): UserSession {
     }
     // Ensure od_user_session and session key stay synchronized
     if (parsed.isLoggedIn) {
-      localStorage.setItem(STORAGE_KEYS.OD_USER_SESSION, JSON.stringify(parsed));
-      localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(parsed));
+      const ser = JSON.stringify(parsed);
+      localStorage.setItem(STORAGE_KEYS.OD_USER_SESSION, ser);
+      localStorage.setItem(STORAGE_KEYS.SESSION, ser);
+      writeNativePersistentJson(STORAGE_KEYS.OD_USER_SESSION, ser);
+      writeNativePersistentJson(STORAGE_KEYS.SESSION, ser);
     }
     return parsed;
   } catch {
@@ -492,34 +598,41 @@ export function loadSessionFromStorage(): UserSession {
 }
 
 export function saveSessionToStorage(session: UserSession): void {
+  const serialized = JSON.stringify(session);
   try {
-    const serialized = JSON.stringify(session);
     localStorage.setItem(STORAGE_KEYS.SESSION, serialized);
     if (session.isLoggedIn) {
       localStorage.setItem(STORAGE_KEYS.OD_USER_SESSION, serialized);
     } else {
       localStorage.removeItem(STORAGE_KEYS.OD_USER_SESSION);
     }
-
-    // Mirror session state into IndexedDB for persistent storage across Android WebView / browser restarts
-    getDB()
-      .then((db) => {
-        const tx = db.transaction(LEGACY_BLOB_STORE, 'readwrite');
-        const store = tx.objectStore(LEGACY_BLOB_STORE);
-        if (session.isLoggedIn) {
-          store.put({
-            id: IDB_SESSION_RECORD_KEY,
-            sessionData: session,
-            updatedAt: Date.now()
-          });
-        } else {
-          store.delete(IDB_SESSION_RECORD_KEY);
-        }
-      })
-      .catch(() => {});
   } catch (err) {
     console.error('Failed to save session:', err);
   }
+
+  writeNativePersistentJson(STORAGE_KEYS.SESSION, serialized);
+  if (session.isLoggedIn) {
+    writeNativePersistentJson(STORAGE_KEYS.OD_USER_SESSION, serialized);
+  } else {
+    writeNativePersistentJson(STORAGE_KEYS.OD_USER_SESSION, '');
+  }
+
+  // Mirror session state into IndexedDB for persistent storage across Android WebView / browser restarts
+  getDB()
+    .then((db) => {
+      const tx = db.transaction(LEGACY_BLOB_STORE, 'readwrite');
+      const store = tx.objectStore(LEGACY_BLOB_STORE);
+      if (session.isLoggedIn) {
+        store.put({
+          id: IDB_SESSION_RECORD_KEY,
+          sessionData: session,
+          updatedAt: Date.now()
+        });
+      } else {
+        store.delete(IDB_SESSION_RECORD_KEY);
+      }
+    })
+    .catch(() => {});
 }
 
 export async function loadSessionFromIDB(): Promise<UserSession | null> {
@@ -550,68 +663,231 @@ export interface AccountVaultEntry {
   identifier: string;
   user: UserSession['user'];
   tasks: DownloadTask[];
+  quotaSnapshot?: AccountQuotaSnapshot;
   updatedAt: number;
 }
 
 export function normalizeAccountKey(identifier?: string): string {
-  return (identifier || '').trim().toLowerCase();
+  const persianDigits = ['۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹'];
+  const arabicDigits = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+  let str = (identifier || '').trim().toLowerCase();
+  for (let i = 0; i < 10; i++) {
+    str = str.replace(new RegExp(persianDigits[i], 'g'), String(i));
+    str = str.replace(new RegExp(arabicDigits[i], 'g'), String(i));
+  }
+  const digitsOnly = str.replace(/[\s\-()]/g, '');
+  if (/^(\+98|0098|98)?9\d{9}$/.test(digitsOnly)) {
+    return '0' + digitsOnly.replace(/^(\+98|0098|98)/, '');
+  }
+  return str;
+}
+
+function mergeVaultEntries(
+  existingEntry: AccountVaultEntry | null | undefined,
+  incomingEntry: AccountVaultEntry
+): AccountVaultEntry {
+  if (!existingEntry) return incomingEntry;
+
+  const mergedTaskMap = new Map<string, DownloadTask>();
+  for (const t of existingEntry.tasks || []) {
+    if (t && t.id) mergedTaskMap.set(t.id, t);
+  }
+  for (const t of incomingEntry.tasks || []) {
+    if (t && t.id) {
+      const prev = mergedTaskMap.get(t.id);
+      mergedTaskMap.set(t.id, {
+        ...(prev || {}),
+        ...t,
+        isStarred: Boolean(t.isStarred || prev?.isStarred),
+        isVaulted: Boolean(t.isVaulted || prev?.isVaulted),
+        blobUrl: undefined,
+        mediaBlob: undefined
+      });
+    }
+  }
+
+  const prevQ = existingEntry.quotaSnapshot;
+  const nextQ = incomingEntry.quotaSnapshot;
+  let mergedQuota: AccountQuotaSnapshot | undefined = nextQ || prevQ;
+  if (prevQ && nextQ) {
+    const inviteMap = new Map<string, any>();
+    for (const inv of prevQ.referralState?.invitedUsers || []) {
+      if (inv && inv.id) inviteMap.set(inv.id, inv);
+    }
+    for (const inv of nextQ.referralState?.invitedUsers || []) {
+      if (inv && inv.id) inviteMap.set(inv.id, inv);
+    }
+    const mergedInvites = Array.from(inviteMap.values());
+    const prevExpiry = Number(prevQ.vipState?.vipExpiry) || 0;
+    const nextExpiry = Number(nextQ.vipState?.vipExpiry) || 0;
+    const finalExpiry = Math.max(prevExpiry, nextExpiry);
+
+    mergedQuota = {
+      coins: Math.max(Number(prevQ.coins) || 0, Number(nextQ.coins) || 0),
+      dailyQuota:
+        nextQ.dailyQuota && prevQ.dailyQuota && nextQ.dailyQuota.dateKey === prevQ.dailyQuota.dateKey
+          ? {
+              dateKey: nextQ.dailyQuota.dateKey,
+              usedCount: Math.max(
+                Number(prevQ.dailyQuota.usedCount) || 0,
+                Number(nextQ.dailyQuota.usedCount) || 0
+              ),
+              bonusDownloads: Math.max(
+                Number(prevQ.dailyQuota.bonusDownloads) || 0,
+                Number(nextQ.dailyQuota.bonusDownloads) || 0
+              ),
+              updatedAt: Date.now()
+            }
+          : nextQ.dailyQuota || prevQ.dailyQuota,
+      rewardLog:
+        nextQ.rewardLog && prevQ.rewardLog && nextQ.rewardLog.dateKey === prevQ.rewardLog.dateKey
+          ? {
+              dateKey: nextQ.rewardLog.dateKey,
+              checkedInToday: Boolean(
+                prevQ.rewardLog.checkedInToday || nextQ.rewardLog.checkedInToday
+              ),
+              watchedAdsToday: Math.max(
+                Number(prevQ.rewardLog.watchedAdsToday) || 0,
+                Number(nextQ.rewardLog.watchedAdsToday) || 0
+              ),
+              sharedToday: Boolean(prevQ.rewardLog.sharedToday || nextQ.rewardLog.sharedToday)
+            }
+          : nextQ.rewardLog || prevQ.rewardLog,
+      referralState: {
+        myReferralCode:
+          nextQ.referralState?.myReferralCode || prevQ.referralState?.myReferralCode || '',
+        appliedReferralCode:
+          nextQ.referralState?.appliedReferralCode || prevQ.referralState?.appliedReferralCode,
+        invitedUsers: mergedInvites,
+        vipUnlockedByReferral: mergedInvites.length >= 3
+      },
+      vipState: {
+        vipActive: finalExpiry > Date.now(),
+        vipExpiry: finalExpiry,
+        vipPlan:
+          nextExpiry >= prevExpiry
+            ? nextQ.vipState?.vipPlan || '1'
+            : prevQ.vipState?.vipPlan || '1',
+        planName: nextQ.vipState?.planName || prevQ.vipState?.planName || ''
+      }
+    };
+  }
+
+  return {
+    identifier: incomingEntry.identifier || existingEntry.identifier,
+    user: {
+      ...existingEntry.user,
+      ...incomingEntry.user,
+      name:
+        incomingEntry.user?.name && !isDefaultGuestName(incomingEntry.user.name)
+          ? incomingEntry.user.name
+          : existingEntry.user?.name || incomingEntry.user?.name || '',
+      email: incomingEntry.user?.email || existingEntry.user?.email || '',
+      phone: incomingEntry.user?.phone || existingEntry.user?.phone,
+      avatarUrl: incomingEntry.user?.avatarUrl || existingEntry.user?.avatarUrl || '',
+      passwordHash: incomingEntry.user?.passwordHash || existingEntry.user?.passwordHash
+    },
+    tasks: Array.from(mergedTaskMap.values()),
+    quotaSnapshot: mergedQuota,
+    updatedAt: Math.max(existingEntry.updatedAt || 0, incomingEntry.updatedAt || Date.now())
+  };
 }
 
 export function saveAccountVaultSnapshot(session: UserSession, tasks?: DownloadTask[]): void {
+  if (!session?.isLoggedIn || !session.user) return;
+
+  const candidateKeys = Array.from(
+    new Set(
+      [
+        normalizeAccountKey(session.user.email),
+        normalizeAccountKey(session.user.phone),
+        normalizeAccountKey(session.user.name)
+      ].filter((k) => Boolean(k) && !isDefaultGuestName(k) && k !== 'guest@appone.ir')
+    )
+  );
+  if (candidateKeys.length === 0) return;
+  const primaryKey = candidateKeys[0];
+
+  const currentTasks = (tasks || loadTasksFromStorage()).map((t) => ({
+    ...t,
+    blobUrl: undefined,
+    mediaBlob: undefined
+  }));
+
+  const quotaSnapshot = getAccountQuotaSnapshot(primaryKey);
+
+  let vaultMap: Record<string, AccountVaultEntry> = {};
   try {
-    if (!session?.isLoggedIn || !session.user) return;
-    const key = normalizeAccountKey(session.user.email || session.user.name);
-    if (!key) return;
-
-    const currentTasks = (tasks || loadTasksFromStorage()).map((t) => ({
-      ...t,
-      blobUrl: undefined,
-      mediaBlob: undefined
-    }));
-
-    const rawVault = localStorage.getItem(ACCOUNT_VAULT_STORAGE_KEY);
-    const vaultMap: Record<string, AccountVaultEntry> = rawVault ? JSON.parse(rawVault) : {};
-
-    const existingEntry = vaultMap[key];
-    // Merge task lists so previously downloaded videos are never lost
-    const mergedTaskMap = new Map<string, DownloadTask>();
-    if (existingEntry?.tasks) {
-      for (const t of existingEntry.tasks) {
-        if (t && t.id) mergedTaskMap.set(t.id, t);
-      }
+    const rawVault =
+      localStorage.getItem(ACCOUNT_VAULT_STORAGE_KEY) ||
+      readNativePersistentJson(ACCOUNT_VAULT_STORAGE_KEY);
+    if (rawVault) {
+      vaultMap = JSON.parse(rawVault);
     }
-    for (const t of currentTasks) {
-      if (t && t.id) mergedTaskMap.set(t.id, t);
+  } catch {
+    vaultMap = {};
+  }
+
+  let existingEntry: AccountVaultEntry | undefined;
+  for (const k of candidateKeys) {
+    if (vaultMap[k]) {
+      existingEntry = mergeVaultEntries(existingEntry, vaultMap[k]);
     }
+  }
 
-    const entry: AccountVaultEntry = {
-      identifier: key,
-      user: {
-        ...existingEntry?.user,
-        ...session.user,
-        passwordHash: session.user.passwordHash || existingEntry?.user?.passwordHash
-      },
-      tasks: Array.from(mergedTaskMap.values()),
-      updatedAt: Date.now()
-    };
+  const entry = mergeVaultEntries(existingEntry, {
+    identifier: primaryKey,
+    user: {
+      ...session.user
+    },
+    tasks: currentTasks,
+    quotaSnapshot,
+    updatedAt: Date.now()
+  });
 
-    vaultMap[key] = entry;
-    localStorage.setItem(ACCOUNT_VAULT_STORAGE_KEY, JSON.stringify(vaultMap));
+  for (const k of candidateKeys) {
+    vaultMap[k] = { ...entry, identifier: k };
+  }
 
-    getDB()
-      .then((db) => {
-        const tx = db.transaction(LEGACY_BLOB_STORE, 'readwrite');
-        const store = tx.objectStore(LEGACY_BLOB_STORE);
+  // 1. Save to localStorage (isolated try/catch so QuotaExceeded never blocks IDB/Native/Cloud)
+  const serializedMap = JSON.stringify(vaultMap);
+  try {
+    localStorage.setItem(ACCOUNT_VAULT_STORAGE_KEY, serializedMap);
+  } catch (err) {
+    console.warn('localStorage vault save notice:', err);
+  }
+
+  // 2. Save to Android Native Internal File Storage
+  writeNativePersistentJson(ACCOUNT_VAULT_STORAGE_KEY, serializedMap);
+  for (const k of candidateKeys) {
+    writeNativePersistentJson(`account_vault_${k}`, JSON.stringify(entry));
+  }
+
+  // 3. Save to IndexedDB
+  getDB()
+    .then((db) => {
+      const tx = db.transaction(LEGACY_BLOB_STORE, 'readwrite');
+      const store = tx.objectStore(LEGACY_BLOB_STORE);
+      for (const k of candidateKeys) {
         store.put({
-          id: `account_vault::${key}`,
-          vaultEntry: entry,
+          id: `account_vault::${k}`,
+          vaultEntry: { ...entry, identifier: k },
           updatedAt: Date.now()
         });
-      })
-      .catch(() => {});
-  } catch (err) {
-    console.warn('saveAccountVaultSnapshot notice:', err);
-  }
+      }
+    })
+    .catch(() => {});
+
+  // 4. Save to Cloud Account Vault (/api/account/sync)
+  fetch(getApiUrl('/api/account/sync'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      identifier: primaryKey,
+      aliases: candidateKeys,
+      vaultEntry: entry
+    })
+  }).catch(() => {});
 }
 
 export async function restoreAccountVaultSnapshot(
@@ -620,27 +896,45 @@ export async function restoreAccountVaultSnapshot(
   const key = normalizeAccountKey(identifier);
   if (!key) return null;
 
-  let localEntry: AccountVaultEntry | null = null;
+  let mergedEntry: AccountVaultEntry | null = null;
+
+  // 1. Check localStorage & Android Native File Storage map
   try {
-    const rawVault = localStorage.getItem(ACCOUNT_VAULT_STORAGE_KEY);
+    const rawVault =
+      localStorage.getItem(ACCOUNT_VAULT_STORAGE_KEY) ||
+      readNativePersistentJson(ACCOUNT_VAULT_STORAGE_KEY);
     if (rawVault) {
       const vaultMap: Record<string, AccountVaultEntry> = JSON.parse(rawVault);
       if (vaultMap[key]) {
-        localEntry = vaultMap[key];
+        mergedEntry = mergeVaultEntries(mergedEntry, vaultMap[key]);
       } else {
-        // Also allow matching by username or email prefix if user typed username vs email
         const match = Object.values(vaultMap).find(
           (v) =>
             normalizeAccountKey(v.user?.email) === key ||
+            normalizeAccountKey(v.user?.phone) === key ||
             normalizeAccountKey(v.user?.name) === key
         );
-        if (match) localEntry = match;
+        if (match) mergedEntry = mergeVaultEntries(mergedEntry, match);
       }
     }
   } catch {
     // ignore
   }
 
+  // 2. Check dedicated Android Native per-account file
+  try {
+    const nativeDirect = readNativePersistentJson(`account_vault_${key}`);
+    if (nativeDirect) {
+      const parsed = JSON.parse(nativeDirect) as AccountVaultEntry;
+      if (parsed && parsed.user) {
+        mergedEntry = mergeVaultEntries(mergedEntry, parsed);
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // 3. Check IndexedDB
   try {
     const db = await getDB();
     const tx = db.transaction(LEGACY_BLOB_STORE, 'readonly');
@@ -653,14 +947,33 @@ export async function restoreAccountVaultSnapshot(
       };
       request.onerror = () => resolve(null);
     });
-    if (idbEntry && (!localEntry || idbEntry.updatedAt >= localEntry.updatedAt)) {
-      return idbEntry;
+    if (idbEntry) {
+      mergedEntry = mergeVaultEntries(mergedEntry, idbEntry);
     }
   } catch {
     // ignore
   }
 
-  return localEntry;
+  // 4. Check Cloud Account Vault (/api/account/restore)
+  try {
+    const res = await fetch(
+      getApiUrl(`/api/account/restore?identifier=${encodeURIComponent(key)}`)
+    );
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.ok && data.vaultEntry) {
+        mergedEntry = mergeVaultEntries(mergedEntry, data.vaultEntry as AccountVaultEntry);
+      }
+    }
+  } catch {
+    // ignore offline errors
+  }
+
+  if (mergedEntry?.quotaSnapshot) {
+    restoreAccountQuotaSnapshot(mergedEntry.quotaSnapshot, key);
+  }
+
+  return mergedEntry;
 }
 
 /**
@@ -668,11 +981,14 @@ export async function restoreAccountVaultSnapshot(
  * When the user logs back in with the same username/email and password, all their videos,
  * audios, coins, referrals, and VIP status are immediately restored.
  */
-export async function resetUserSessionAndClearAllData(language: Language): Promise<UserSession> {
+export async function resetUserSessionAndClearAllData(
+  language: Language,
+  currentTasks?: DownloadTask[]
+): Promise<UserSession> {
   try {
     const currentSession = loadSessionFromStorage();
     if (currentSession.isLoggedIn) {
-      saveAccountVaultSnapshot(currentSession);
+      saveAccountVaultSnapshot(currentSession, currentTasks);
     }
   } catch {
     // ignore
@@ -696,6 +1012,8 @@ export async function resetUserSessionAndClearAllData(language: Language): Promi
   try {
     localStorage.removeItem(STORAGE_KEYS.OD_USER_SESSION);
     localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(freshGuestSession));
+    writeNativePersistentJson(STORAGE_KEYS.OD_USER_SESSION, '');
+    writeNativePersistentJson(STORAGE_KEYS.SESSION, JSON.stringify(freshGuestSession));
     // Delete only the active session marker in IDB, NEVER delete offline_media videos/audios!
     getDB()
       .then((db) => {
