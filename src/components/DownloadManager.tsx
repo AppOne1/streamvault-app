@@ -252,17 +252,17 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
         </div>
       </div>
 
-      {/* Minimal Single-Line Dismissible Speed & VPN Notice Bar */}
+      {/* Minimal Single-Line Dismissible Speed Notice Bar */}
       {!hideSpeedTip && (
         <div className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/30 text-[11px] font-bold text-amber-800 dark:text-amber-300">
           <div className="flex items-center gap-1.5 min-w-0 truncate">
             <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
             <span className="truncate">
               {isFa
-                ? 'نکته: سرعت دانلود به پایداری اینترنت و فیلترشکن شما بستگی دارد.'
+                ? 'نکته: سرعت دانلود به پایداری اینترنت شما بستگی دارد.'
                 : isAr
-                ? 'ملاحظة: تعتمد سرعة التحميل على استقرار الإنترنت والـ VPN لديك.'
-                : 'Tip: Download speed depends on your internet & VPN stability.'}
+                ? 'ملاحظة: تعتمد سرعة التحميل على استقرار الإنترنت لديك.'
+                : 'Tip: Download speed depends on your internet stability.'}
             </span>
           </div>
           <button
@@ -326,7 +326,7 @@ export const DownloadManager: React.FC<DownloadManagerProps> = ({
             dir="ltr"
             value={batchText}
             onChange={(e) => setBatchText(e.target.value)}
-            placeholder="https://www.youtube.com/watch?v=...\nhttps://www.tiktok.com/@user/video/..."
+            placeholder="https://www.instagram.com/reel/...\nhttps://www.instagram.com/p/..."
             className="w-full p-3 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 input-3d"
           />
 

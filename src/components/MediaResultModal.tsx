@@ -408,7 +408,7 @@ export const MediaResultModal: React.FC<MediaResultModalProps> = ({
                     </span>
                   )}
                   <span className="px-2 py-0.5 rounded uppercase font-bold text-[10px] bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
-                    {media.platform}
+                    {isFa ? 'اینستاگرام (پست / ریلز / استوری)' : 'Instagram'}
                   </span>
                 </div>
               </div>
@@ -472,10 +472,10 @@ export const MediaResultModal: React.FC<MediaResultModalProps> = ({
                 </div>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400">
                   {isFa
-                    ? 'دریافت فایل زیرنویس هماهنگ برای ویدیوهای آموزشی و یوتیوب'
+                    ? 'دریافت فایل زیرنویس هماهنگ برای پست‌ها، ریلز و ویدیوهای آموزشی'
                     : isAr
-                    ? 'تحميل ملف الترجمة المتزامن لفيديوهات يوتيوب والتعليم'
-                    : 'Download synchronized subtitle file for educational & YouTube videos'}
+                    ? 'تحميل ملف الترجمة المتزامن للمنشورات وريلز والفيديوهات التعليمية'
+                    : 'Download synchronized subtitle file for Reels, Posts & educational videos'}
                 </p>
               </div>
             </div>

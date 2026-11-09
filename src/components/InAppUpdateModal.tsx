@@ -37,19 +37,19 @@ export const DEFAULT_VERSION_MANIFEST: AppVersionManifest = {
   myketWebUrl: 'https://myket.ir/app/ir.appone.onedownload',
   changelogFa: [
     'افزایش چشمگیر سرعت دانلود چندبخشی موازی (IDM Style) تا ۸ رشته همزمان',
-    'ارتقای موتور استخراج مستقیم آپارات، اینستاگرام، تیک‌تاک و یوتیوب 4K',
+    'ارتقای موتور استخراج مستقیم پست، ریلز، استوری و صوت اینستاگرام با کیفیت اصلی',
     'پشتیبانی از فعال‌سازی خودکار اشتراک VIP یک‌ماهه با دعوت ۳ نفر',
     'بهبود پخش‌کننده داخلی و مدیریت هوشمند حافظه آفلاین'
   ],
   changelogAr: [
     'زيادة سرعة التحميل المتعدد المتوازي (IDM Style) حتى ٨ مسارات متزامنة',
-    'تطوير محرك الاستخراج المباشر من يوتيوب، إنستغرام، تيك توك وأبارات بجودة 4K',
+    'تطوير محرك الاستخراج المباشر للمنشورات وريلز وستوري والصوتيات من إنستغرام',
     'تفعيل تلقائي لاشتراك VIP لمدة شهر عند دعوة ٣ أصدقاء',
     'تحسين المشغل الداخلي وإدارة الملفات بدون إنترنت'
   ],
   changelogEn: [
     'Boosted multi-threaded parallel chunk download speed (up to 8 concurrent streams)',
-    'Enhanced 4K direct stream extraction for YouTube, Instagram, TikTok & Aparat',
+    'Enhanced direct stream extraction for Instagram Posts, Reels, Stories & Audio',
     'Automatic 1-Month VIP activation upon 3 successful friend referrals',
     'Improved built-in media player and offline storage stability'
   ]

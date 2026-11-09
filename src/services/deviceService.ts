@@ -260,14 +260,14 @@ export function buildAppShareMessage(referralCode?: string, language: Language =
   const code = (referralCode || 'OD-9X4K7M2P').trim();
 
   if (language === 'ar') {
-    return `🚀 وان داونلود (OneDownload) | أقوى وأسرع برنامج لتحميل الفيديو والموسيقى بجودة 4K وتشغيل بدون نت من يوتيوب، إنستغرام وتيك توك!\n🎁 حمّل التطبيق الآن وادخل كود الإحالة الخاص بي عند التسجيل: ${code}`;
+    return `🚀 تحميل من إنستغرام (وان داونلود) | أسرع برنامج لتحميل المنشورات وريلز وستوري والصوتيات بجودة أصلية وتشغيل بدون نت!\n🎁 حمّل التطبيق الآن وادخل كود الإحالة الخاص بي عند التسجيل: ${code}`;
   }
 
   if (language === 'en') {
-    return `🚀 OneDownload | Ultra-fast 4K Video & Music Downloader with Offline Playback for YouTube, Instagram & TikTok!\n🎁 Install now and enter my referral code during sign-up: ${code}`;
+    return `🚀 Instagram Downloader (OneDownload) | Fast Post, Reels, Story & Audio Downloader with Offline Playback!\n🎁 Install now and enter my referral code during sign-up: ${code}`;
   }
 
-  return `🚀 وان دانلود (OneDownload) | دانلودر فوق‌سریع ویدیو و موزیک با کیفیت 4K و پخش آفلاین از یوتیوب، اینستاگرام و تیک‌تاک!\n🎁 همین حالا نصب کن و هنگام ثبت‌نام کد معرف من رو وارد کن: ${code}`;
+  return `🚀 دانلود از اینستاگرام (وان دانلود) | دانلود سریع پست، ریلز، استوری و صوت از اینستاگرام با کیفیت اصلی و پخش آفلاین!\n🎁 همین حالا نصب کن و هنگام ثبت‌نام کد معرف من رو وارد کن: ${code}`;
 }
 
 /**

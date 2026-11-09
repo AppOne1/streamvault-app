@@ -105,37 +105,7 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
     }
   };
 
-  // Auto-sniff clipboard on app startup, visibility change, and window focus when enabled
-  useEffect(() => {
-    if (!autoSniffClipboard) return;
-
-    const checkClipboard = async () => {
-      try {
-        if (navigator.clipboard && navigator.clipboard.readText) {
-          const text = await navigator.clipboard.readText();
-          const candidate = extractUrlFromText(text);
-          if (candidate && isValidHttpUrl(candidate) && isSupportedMediaUrl(candidate) && candidate !== url) {
-            setSniffedClipboardUrl(candidate);
-          }
-        }
-      } catch {
-        // Ignore clipboard permission silent check
-      }
-    };
-
-    checkClipboard();
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        checkClipboard();
-      }
-    };
-    window.addEventListener('focus', checkClipboard);
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => {
-      window.removeEventListener('focus', checkClipboard);
-      document.removeEventListener('visibilitychange', handleVisibility);
-    };
-  }, [autoSniffClipboard, url]);
+  // Note: Clipboard reading is strictly triggered only when the user manually taps the Paste button (Google Play Protect compliance).
 
   const applyValidUrl = (raw: string): string | null => {
     const extracted = extractUrlFromText(raw);
@@ -167,10 +137,10 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
     if (!isSupportedMediaUrl(candidate)) {
       setValidationError(
         isFa
-          ? 'این پلتفرم پشتیبانی نمی‌شود! لطفاً لینک ویدیو یا موزیک از پلتفرم‌های مجاز (اینستاگرام، یوتیوب، آپارات، تیک‌تاک و...) وارد کنید.'
+          ? 'این لینک پشتیبانی نمی‌شود! لطفاً لینک معتبر پست، ریلز، استوری یا فایل رسانه‌ای وارد کنید.'
           : isAr
-          ? 'هذه المنصة غير مدعومة! يرجى إدخال رابط من المنصات المدعومة.'
-          : 'This platform is not supported! Please enter a media URL from supported platforms.'
+          ? 'هذا الرابط غير مدعوم! يرجى إدخال رابط منشور أو ريلز أو ستوري صالح.'
+          : 'This link is not supported! Please enter a valid Post, Reels, Story, or media URL.'
       );
       return;
     }
@@ -427,21 +397,28 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
               )}
             </div>
 
-            {/* Paste Instruction & Full-Width Contained Analyze Button */}
+            {/* Explicit Manual Paste Button & Full-Width Contained Analyze Button */}
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 w-full min-w-0">
-              <div
-                onClick={() => inputRef.current?.focus()}
-                className="flex items-center justify-center sm:justify-start gap-2 px-3.5 py-2.5 rounded-2xl bg-indigo-50/80 dark:bg-indigo-950/40 border border-indigo-500/30 text-indigo-700 dark:text-indigo-300 text-xs font-black cursor-text select-none min-w-0"
+              <button
+                type="button"
+                onClick={handlePasteClipboard}
+                className="flex items-center justify-center sm:justify-start gap-2 px-3.5 py-2.5 rounded-2xl bg-indigo-50/80 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 border border-indigo-500/30 text-indigo-700 dark:text-indigo-300 text-xs font-black cursor-pointer select-none min-w-0 transition-colors"
               >
                 <Clipboard className="w-4 h-4 text-indigo-500 shrink-0" />
                 <span className="truncate">
-                  {isFa
-                    ? 'لینک را داخل کادر بالا بچسبانید (نگه دارید و Paste بزنید)'
+                  {pasteSuccess
+                    ? isFa
+                      ? 'لینک جای‌گذاری شد ✓'
+                      : isAr
+                      ? 'تم لصق الرابط ✓'
+                      : 'Link Pasted ✓'
+                    : isFa
+                    ? 'جای‌گذاری لینک از کلیپ‌بورد (Paste)'
                     : isAr
-                    ? 'الصق الرابط داخل المربع أعلاه'
-                    : 'Paste the link inside the box above'}
+                    ? 'لصق الرابط من الحافظة (Paste)'
+                    : 'Paste Link from Clipboard'}
                 </span>
-              </div>
+              </button>
 
               <button
                 type="button"
@@ -470,17 +447,17 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
             </div>
           </div>
 
-          {/* Minimal Single-Line Dismissible Speed & VPN Notice Bar */}
+          {/* Minimal Single-Line Dismissible Speed Notice Bar */}
           {!hideSpeedTip && (
             <div className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/30 text-[11px] font-bold text-amber-800 dark:text-amber-300">
               <div className="flex items-center gap-1.5 min-w-0 truncate">
                 <AlertCircle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                 <span className="truncate">
                   {isFa
-                    ? 'نکته: سرعت دانلود به پایداری اینترنت و فیلترشکن شما بستگی دارد.'
+                    ? 'نکته: سرعت دانلود به پایداری اینترنت شما بستگی دارد.'
                     : isAr
-                    ? 'ملاحظة: تعتمد سرعة التحميل على استقرار الإنترنت والـ VPN لديك.'
-                    : 'Tip: Download speed depends on your internet & VPN stability.'}
+                    ? 'ملاحظة: تعتمد سرعة التحميل على استقرار الإنترنت لديك.'
+                    : 'Tip: Download speed depends on your internet stability.'}
                 </span>
               </div>
               <button
@@ -672,7 +649,7 @@ export const UrlInputSection: React.FC<UrlInputSectionProps> = ({
               dir="ltr"
               value={batchText}
               onChange={(e) => setBatchText(e.target.value)}
-              placeholder={"https://www.youtube.com/watch?v=...\nhttps://www.tiktok.com/@user/video/...\nhttps://www.instagram.com/reel/..."}
+              placeholder={"https://www.instagram.com/reel/...\nhttps://www.instagram.com/p/...\nhttps://www.instagram.com/stories/..."}
               className="w-full p-3 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 input-3d"
             />
 

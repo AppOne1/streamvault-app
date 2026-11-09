@@ -854,25 +854,25 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </button>
             <ODLogo className="w-9 h-9" />
             <div className="min-w-0">
-              <h3 className="font-black text-sm sm:text-base text-slate-900 dark:text-white text-3d truncate">
+              <h3 className="font-black text-xs sm:text-sm text-slate-900 dark:text-white text-3d truncate">
                 {session.isLoggedIn
                   ? isFa
-                    ? 'پروفایل شخصی من'
+                    ? 'پروفایل شخصی من • دانلود از اینستاگرام (وان دانلود)'
                     : isAr
-                    ? 'ملفي الشخصي'
+                    ? 'ملفي الشخصي • وان داونلود'
                     : 'My Personal Profile'
                   : guestMode === 'register'
                   ? isFa
-                    ? 'ثبت‌نام سریع در وان دانلود'
+                    ? 'دانلود از اینستاگرام (وان دانلود)'
                     : isAr
-                    ? 'إنشاء حساب سريع في وان داونلود'
-                    : 'Quick Registration'
+                    ? 'تحميل من إنستغرام (وان داونلود)'
+                    : 'Instagram Downloader (OneDownload)'
                   : guestMode === 'login'
                   ? isFa
-                    ? 'ورود به حساب کاربری'
+                    ? 'ورود • دانلود از اینستاگرام (وان دانلود)'
                     : isAr
-                    ? 'تسجيل الدخول'
-                    : 'Sign In to Account'
+                    ? 'تسجيل الدخول • وان داونلود'
+                    : 'Sign In • OneDownload'
                   : isFa
                   ? 'بازیابی رمز عبور'
                   : isAr
@@ -887,7 +887,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     ? 'إدارة الحساب والصورة والعملات وحالة VIP'
                     : 'Manage profile, photo, coins & VIP status'
                   : isFa
-                  ? 'ثبت‌نام و ورود آنی با ایمیل یا شماره موبایل (بدون نیاز به سرویس گوگل)'
+                  ? 'ثبت‌نام و ورود آنی با ایمیل یا شماره موبایل'
                   : isAr
                   ? 'سجّل الدخول بالبريد الإلكتروني أو رقم الهاتف فوراً'
                   : 'Fast sign in with Email or Mobile Number'}

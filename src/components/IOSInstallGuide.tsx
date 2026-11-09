@@ -177,9 +177,9 @@ export const IOSInstallGuide: React.FC<IOSInstallGuideProps> = ({
         <path d="M4 17c0 2 2 3 4 3h8c2 0 4-1 4-3" />
       </svg>
     </div>
-    <h2>وان‌اکسپرس - دانلودر هوشمند</h2>
-    <p>در حال باز کردن نرم‌افزار بدون نیاز به فیلترشکن...</p>
-    <a href="${appUrl}" class="btn">ورود به وان‌اکسپرس</a>
+    <h2>دانلود از اینستاگرام (وان دانلود)</h2>
+    <p>در حال باز کردن نرم‌افزار با بالاترین سرعت...</p>
+    <a href="${appUrl}" class="btn">ورود به وان دانلود</a>
   </div>
   <script>
     setTimeout(function() {
@@ -226,7 +226,7 @@ export const IOSInstallGuide: React.FC<IOSInstallGuideProps> = ({
               {language === 'fa' ? 'نصب برنامه روی گوشی (اندروید و آیفون)' : 'Install App on Mobile Phone'}
             </h3>
             <p className="text-xs text-slate-400">
-              {language === 'fa' ? 'نصب مستقیم، فوق‌سریع و بدون نیاز به فیلترشکن' : 'Direct install on your home screen without VPN'}
+              {language === 'fa' ? 'نصب مستقیم، سریع و آسان روی صفحه اصلی گوشی' : 'Direct and fast installation on your home screen'}
             </p>
           </div>
         </div>

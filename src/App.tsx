@@ -478,15 +478,15 @@ export default function App() {
       setToastNotice({
         type: 'error',
         title: isFa
-          ? 'این پلتفرم پشتیبانی نمی‌شود'
+          ? 'این لینک پشتیبانی نمی‌شود'
           : isAr
-          ? 'هذه المنصة غير مدعومة'
-          : 'This platform is not supported',
+          ? 'هذا الرابط غير مدعوم'
+          : 'This link is not supported',
         message: isFa
-          ? 'لطفاً لینک ویدیو یا موزیک از پلتفرم‌های مجاز (اینستاگرام، یوتیوب، آپارات، تیک‌تاک و...) وارد نمایید.'
+          ? 'لطفاً لینک معتبر پست، ریلز، استوری یا رسانه اینستاگرام وارد نمایید.'
           : isAr
-          ? 'يرجى إدخال رابط فيديو أو موسيقى من المنصات المدعومة.'
-          : 'Please enter a video or audio link from supported platforms (YouTube, Instagram, TikTok, Aparat, etc.).'
+          ? 'يرجى إدخال رابط فيديو أو موسيقى صالح من إنستغرام.'
+          : 'Please enter a valid Instagram Post, Reels, Story, or media link.'
       });
       setTimeout(() => setToastNotice(null), 4500);
       return;
@@ -496,15 +496,15 @@ export default function App() {
       setToastNotice({
         type: 'error',
         title: isFa
-          ? 'خطای اتصال اینترنت یا فیلترشکن (VPN)'
+          ? 'خطای اتصال اینترنت'
           : isAr
-          ? 'خطأ في الاتصال بالإنترنت أو VPN'
-          : 'Network or VPN Connection Error',
+          ? 'خطأ في الاتصال بالإنترنت'
+          : 'Network Connection Error',
         message: isFa
-          ? 'اینترنت قطع است؛ لطفاً اتصال شبکه یا وضعیت فیلترشکن (VPN) خود را بررسی کنید.'
+          ? 'اینترنت قطع است؛ لطفاً وضعیت اتصال شبکه خود را بررسی کنید.'
           : isAr
-          ? 'يرجى التحقق من اتصال الإنترنت أو تفعيل VPN والمحاولة مجدداً.'
-          : 'Please check your internet connection or VPN status and try again.'
+          ? 'يرجى التحقق من اتصال الإنترنت والمحاولة مجدداً.'
+          : 'Please check your internet connection and try again.'
       });
       setTimeout(() => setToastNotice(null), 4500);
       return;
@@ -521,15 +521,15 @@ export default function App() {
       setToastNotice({
         type: 'error',
         title: isFa
-          ? 'کندی شبکه یا عدم اتصال VPN'
+          ? 'کندی یا اختلال در اتصال شبکه'
           : isAr
-          ? 'بطء الشبكة أو عدم اتصال VPN'
-          : 'Slow Network or VPN Disconnected',
+          ? 'بطء في اتصال الشبكة'
+          : 'Slow Network Connection',
         message: isFa
-          ? 'پاسخی از سرور دریافت نشد؛ برای پلتفرم‌های خارجی (یوتیوب/اینستاگرام) وضعیت فیلترشکن خود را بررسی نمایید.'
+          ? 'پاسخی از سرور دریافت نشد؛ لطفاً پایداری اینترنت خود را بررسی نمایید.'
           : isAr
-          ? 'تعذر الوصول للخادم؛ يرجى التحقق من سرعة الإنترنت أو VPN.'
-          : 'Could not reach media server; please check your internet speed or VPN connection.'
+          ? 'تعذر الوصول للخادم؛ يرجى التحقق من سرعة الإنترنت.'
+          : 'Could not reach media server; please check your internet stability.'
       });
       setTimeout(() => setToastNotice(null), 5000);
     } finally {
@@ -902,15 +902,19 @@ export default function App() {
             <ODLogo className="w-20 h-20 sm:w-24 sm:h-24" />
           </div>
           <div className="space-y-1.5">
-            <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-white text-3d" dir="ltr">
-              OneDownload
+            <h1 className="text-xl sm:text-2xl font-black tracking-tight text-white text-3d">
+              {isFa
+                ? 'دانلود از اینستاگرام (وان دانلود)'
+                : isAr
+                ? 'تحميل من إنستغرام (وان داونلود)'
+                : 'Instagram Downloader (OneDownload)'}
             </h1>
             <p className="text-xs sm:text-sm font-extrabold text-indigo-300">
               {isFa
-                ? 'وان دانلود • دانلودر فوق‌سریع ویدیو و موزیک 4K'
+                ? 'دانلود سریع پست، ریلز، استوری و صوت با کیفیت اصلی'
                 : isAr
-                ? 'وان داونلود • أسرع برنامج لتحميل الفيديو والموسيقى 4K'
-                : 'Ultra-Fast 4K Video & Music Downloader'}
+                ? 'تحميل سريع للمنشورات، ريلز، ستوري والصوتيات بجودة أصلية'
+                : 'Fast Instagram Post, Reels, Story & Audio Downloader'}
             </p>
           </div>
           <div className="w-44 h-1.5 rounded-full bg-slate-800 overflow-hidden border border-slate-700">

@@ -706,17 +706,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div>
               <h4 className="font-bold text-sm text-slate-900 dark:text-white">
                 {isFa
-                  ? 'رصد خودکار کلیپ‌بورد (Auto-Paste)'
+                  ? 'دکمه جای‌گذاری سریع کلیپ‌بورد (Paste)'
                   : isAr
-                  ? 'الكشف التلقائي للحافظة (Auto-Paste)'
-                  : 'Auto-Paste Clipboard Sniffer'}
+                  ? 'زر اللصق السريع من الحافظة (Paste)'
+                  : 'Quick Clipboard Paste Button'}
               </h4>
               <p className="text-xs text-slate-400">
                 {isFa
-                  ? 'تشخیص هوشمند لینک کپی‌شده به محض ورود به برنامه و نمایش خودکار پیش‌نمایش'
+                  ? 'جای‌گذاری مستقیم لینک پست، ریلز یا استوری تنها با زدن دکمه جای‌گذاری (Paste)'
                   : isAr
-                  ? 'اكتشاف الرابط المنسوخ تلقائياً فور فتح التطبيق وعرض المعاينة'
-                  : 'Automatically detect copied media URLs on app focus and trigger preview'}
+                  ? 'لصق رابط المنشور أو ريلز مباشرة عند الضغط على زر اللصق (Paste)'
+                  : 'Paste copied media URLs directly when you tap the Paste button'}
               </p>
             </div>
           </div>

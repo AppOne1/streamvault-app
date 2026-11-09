@@ -5,7 +5,6 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
-import android.content.pm.PackageManager;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
@@ -105,7 +104,6 @@ public class MainActivity extends BridgeActivity {
             try {
                 if (this.bridge != null && this.bridge.getWebView() != null) {
                     WebView wv = this.bridge.getWebView();
-                    wv.onResume();
                     wv.resumeTimers();
                 }
             } catch (Exception ignored) {}
@@ -479,18 +477,11 @@ public class MainActivity extends BridgeActivity {
                 upstreamConn.setRequestProperty("Accept", "*/*");
                 upstreamConn.setRequestProperty("Accept-Encoding", "identity");
 
-                if (lowerUrl.contains("savevideo.uz")) {
-                    upstreamConn.setRequestProperty("Referer", "https://savevideo.uz/");
-                } else if (isIg) {
+                if (isIg) {
                     upstreamConn.setRequestProperty("Referer", "https://www.instagram.com/");
-                } else if (lowerUrl.contains("tikwm.com")) {
-                    upstreamConn.setRequestProperty("Referer", "https://www.tikwm.com/");
-                } else if (lowerUrl.contains("tiktok")) {
-                    upstreamConn.setRequestProperty("Referer", "https://www.tiktok.com/");
-                } else if (lowerUrl.contains("googlevideo.com") || lowerUrl.contains("youtube.com")) {
-                    upstreamConn.setRequestProperty("Referer", "https://www.youtube.com/");
-                } else if (lowerUrl.contains("twimg.com") || lowerUrl.contains("twitter.com") || lowerUrl.contains("x.com")) {
-                    upstreamConn.setRequestProperty("Referer", "https://x.com/");
+                } else {
+                    String originRef = u.getProtocol() + "://" + u.getHost() + "/";
+                    upstreamConn.setRequestProperty("Referer", originRef);
                 }
 
                 if (effectiveRange != null && !effectiveRange.isEmpty()) {
@@ -607,65 +598,36 @@ public class MainActivity extends BridgeActivity {
         @JavascriptInterface
         public boolean shareInstalledApkToTarget(final String referralMessage, final String targetPackage) {
             try {
-                String sourceApkPath = getApplicationInfo().sourceDir;
-                File sourceApk = new File(sourceApkPath);
-                if (!sourceApk.exists()) {
-                    return false;
-                }
-
-                // Copy the installed APK into cache as OneDownload.apk for direct file sending
-                File cleanApkFile = new File(getCacheDir(), "OneDownload.apk");
-                if (!cleanApkFile.exists() || cleanApkFile.length() != sourceApk.length()) {
-                    try (InputStream in = new FileInputStream(sourceApk);
-                         OutputStream out = new FileOutputStream(cleanApkFile)) {
-                        byte[] buf = new byte[65536];
-                        int len;
-                        while ((len = in.read(buf)) > 0) {
-                            out.write(buf, 0, len);
-                        }
-                        out.flush();
-                    }
-                }
-
-                final Uri apkUri = FileProvider.getUriForFile(
-                    MainActivity.this,
-                    getPackageName() + ".fileprovider",
-                    cleanApkFile
-                );
+                final String safeMessage = (referralMessage != null && !referralMessage.isEmpty())
+                    ? referralMessage
+                    : "دانلود از اینستاگرام (وان دانلود)";
 
                 runOnUiThread(() -> {
                     try {
-                        // Also copy caption to clipboard as backup for Bluetooth/strict targets
-                        if (referralMessage != null && !referralMessage.isEmpty()) {
-                            ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                            if (clipboard != null) {
-                                clipboard.setPrimaryClip(ClipData.newPlainText("OneDownload Invite", referralMessage));
-                            }
+                        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                        if (clipboard != null) {
+                            clipboard.setPrimaryClip(ClipData.newPlainText("OneDownload Invite", safeMessage));
                         }
 
                         Intent shareIntent = new Intent(Intent.ACTION_SEND);
-                        shareIntent.setType("application/vnd.android.package-archive");
-                        shareIntent.putExtra(Intent.EXTRA_STREAM, apkUri);
-                        if (referralMessage != null && !referralMessage.isEmpty()) {
-                            shareIntent.putExtra(Intent.EXTRA_TEXT, referralMessage);
-                            shareIntent.putExtra(Intent.EXTRA_TITLE, referralMessage);
-                            shareIntent.putExtra(Intent.EXTRA_SUBJECT, "وان دانلود (OneDownload)");
-                        }
+                        shareIntent.setType("text/plain");
+                        shareIntent.putExtra(Intent.EXTRA_SUBJECT, "دانلود از اینستاگرام (وان دانلود)");
+                        shareIntent.putExtra(Intent.EXTRA_TEXT, safeMessage);
 
-                        // Required on Android 10+ so target apps (Telegram, Eitaa, WhatsApp, Rubika) can read the APK URI
-                        ClipData clipData = ClipData.newRawUri("OneDownload.apk", apkUri);
-                        shareIntent.setClipData(clipData);
-                        shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-
-                        if (targetPackage != null && !targetPackage.isEmpty() && isPackageInstalled(targetPackage)) {
+                        if (targetPackage != null && !targetPackage.isEmpty()) {
                             shareIntent.setPackage(targetPackage);
                             shareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                            startActivity(shareIntent);
-                        } else {
-                            Intent chooser = Intent.createChooser(shareIntent, "ارسال فایل APK وان دانلود به همراه کد معرف");
-                            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                            startActivity(chooser);
+                            try {
+                                startActivity(shareIntent);
+                                return;
+                            } catch (Exception ignored) {
+                                shareIntent.setPackage(null);
+                            }
                         }
+
+                        Intent chooser = Intent.createChooser(shareIntent, "معرفی برنامه به دوستان");
+                        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(chooser);
                     } catch (Exception uiErr) {
                         uiErr.printStackTrace();
                     }
@@ -863,16 +825,6 @@ public class MainActivity extends BridgeActivity {
             } catch (Exception e) {
                 e.printStackTrace();
                 return "";
-            }
-        }
-
-        private boolean isPackageInstalled(String packageName) {
-            try {
-                PackageManager pm = getPackageManager();
-                pm.getPackageInfo(packageName, 0);
-                return true;
-            } catch (Exception e) {
-                return false;
             }
         }
     }

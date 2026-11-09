@@ -86,16 +86,16 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="min-w-0 flex-1 overflow-hidden">
             <div className="flex items-center min-w-0 overflow-hidden">
               <span className="block font-black text-xs xs:text-sm sm:text-lg tracking-tight text-slate-900 dark:text-white drop-shadow-sm text-3d truncate max-w-full">
-                {isFa ? 'وان دانلود' : isAr ? 'وان داونلود' : 'OneDownload'}
+                {isFa ? 'دانلود از اینستاگرام (وان دانلود)' : isAr ? 'تحميل من إنستغرام (وان داونلود)' : 'Instagram Downloader (OneDownload)'}
               </span>
             </div>
             {/* Single Subtitle Kept Below Header */}
             <p className="block text-[9px] xs:text-[10px] sm:text-xs text-indigo-600 dark:text-indigo-300 truncate font-extrabold max-w-full mt-0.5">
               {isFa
-                ? 'دانلودر فوق‌سریع ویدیو، موزیک و زیرنویس • یوتیوب، تیک‌تاک، اینستاگرام'
+                ? 'دانلود سریع پست، ریلز، استوری و صوت با کیفیت اصلی'
                 : isAr
-                ? 'محمّل الفيديو والموسيقى والترجمة فائق السرعة • يوتيوب، تيك توك، إنستغرام'
-                : 'Ultra-Fast Video, Music & Subtitle Downloader • YouTube, TikTok, Instagram'}
+                ? 'تحميل سريع للمنشورات، ريلز، ستوري والصوتيات بجودة أصلية'
+                : 'Fast Post, Reels, Story & Audio Downloader'}
             </p>
           </div>
         </div>

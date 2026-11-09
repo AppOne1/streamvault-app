@@ -2,10 +2,10 @@ import { Language } from '../types';
 
 export const translations = {
   en: {
-    appName: 'OneDownload',
-    appTitle: 'OneDownload',
-    appSubtitle: 'Ultra-Fast Video, Music & Subtitle Downloader • YouTube, TikTok, Instagram',
-    tagline: 'Ultra-Fast Video, Music & Subtitle Downloader • YouTube, TikTok, Instagram',
+    appName: 'Instagram Downloader (OneDownload)',
+    appTitle: 'Instagram Downloader (OneDownload)',
+    appSubtitle: 'Fast Post, Reels, Story & Audio Downloader • Instagram',
+    tagline: 'Fast Post, Reels, Story & Audio Downloader • Instagram',
     invalidUrlError: 'Please enter a valid link',
 
     // App Security Lock
@@ -21,7 +21,7 @@ export const translations = {
     tabSettings: 'Settings',
 
     // URL input
-    inputPlaceholder: 'Paste video or audio link (YouTube, TikTok, Instagram, X...)',
+    inputPlaceholder: 'Paste Instagram Post, Reels, or Story URL here...',
     analyzeButton: 'Analyze Link',
     analyzing: 'Parsing Media Streams...',
     pasteClipboard: 'Paste',
@@ -30,11 +30,11 @@ export const translations = {
     urlDetectedFromShare: 'Link detected from external share!',
 
     // Platform badges
-    platformYouTube: 'YouTube',
-    platformTikTok: 'TikTok',
+    platformYouTube: 'Instagram (Reels)',
+    platformTikTok: 'Instagram (Post)',
     platformInstagram: 'Instagram',
-    platformTwitter: 'X / Twitter',
-    platformFacebook: 'Facebook',
+    platformTwitter: 'Instagram (Story)',
+    platformFacebook: 'Instagram',
     platformVimeo: 'Vimeo',
     platformSoundCloud: 'SoundCloud',
     platformPinterest: 'Pinterest',
@@ -61,7 +61,7 @@ export const translations = {
     // Download Manager
     downloadsHeader: 'Download Tasks',
     queueEmpty: 'No active or past downloads in queue',
-    startNewPrompt: 'Paste a media URL above to start your first download',
+    startNewPrompt: 'Paste an Instagram post, reels, or story link above to start downloading',
     filterAll: 'All',
     filterActive: 'Active',
     filterCompleted: 'Completed',
@@ -139,7 +139,7 @@ export const translations = {
     freePlan: 'Free Tier',
     storageQuota: 'Cloud Vault Quota',
     unlimitedSpeed: 'Unlimited 4K Streams Enabled',
-    authModalTitle: 'OneDownload VIP Account',
+    authModalTitle: 'Instagram Downloader (OneDownload)',
     authModalDesc: 'Sign in to sync your download history, unlock 4K 60FPS extraction, and access cloud storage.',
     emailLabel: 'Email Address',
     passwordLabel: 'Password',
@@ -166,10 +166,10 @@ export const translations = {
   },
 
   fa: {
-    appName: 'وان دانلود',
-    appTitle: 'وان دانلود (OneDownload)',
-    appSubtitle: 'دانلودر فوق‌سریع ویدیو، موزیک و زیرنویس • یوتیوب، تیک‌تاک، اینستاگرام',
-    tagline: 'دانلودر فوق‌سریع ویدیو، موزیک و زیرنویس • یوتیوب، تیک‌تاک، اینستاگرام',
+    appName: 'دانلود از اینستاگرام (وان دانلود)',
+    appTitle: 'دانلود از اینستاگرام (وان دانلود)',
+    appSubtitle: 'دانلود سریع پست، ریلز، استوری و صوت با کیفیت اصلی',
+    tagline: 'دانلود سریع پست، ریلز، استوری و صوت از اینستاگرام با کیفیت اصلی و پخش آفلاین',
     invalidUrlError: 'لطفاً یک لینک معتبر وارد کنید',
 
     // App Security Lock
@@ -185,7 +185,7 @@ export const translations = {
     tabSettings: 'تنظیمات',
 
     // URL input
-    inputPlaceholder: 'نشانی ویدیو یا صوت را جای‌گذاری کنید (یوتیوب، تیک‌تاک، اینستاگرام، توییتر...)',
+    inputPlaceholder: 'لینک پست، ریلز یا استوری اینستاگرام را وارد کنید...',
     analyzeButton: 'تحلیل پیوند',
     analyzing: 'در حال بررسی جریان‌های رسانه...',
     pasteClipboard: 'جای‌گذاری',
@@ -194,15 +194,15 @@ export const translations = {
     urlDetectedFromShare: 'پیوند اشتراک‌گذاری‌شده از برنامه دیگر شناسایی شد!',
 
     // Platform badges
-    platformYouTube: 'یوتیوب',
-    platformTikTok: 'تیک‌تاک',
+    platformYouTube: 'اینستاگرام (ریلز)',
+    platformTikTok: 'اینستاگرام (پست)',
     platformInstagram: 'اینستاگرام',
-    platformTwitter: 'ایکس / توییتر',
-    platformFacebook: 'فیس‌بوک',
+    platformTwitter: 'اینستاگرام (استوری)',
+    platformFacebook: 'اینستاگرام',
     platformVimeo: 'ویمیو',
     platformSoundCloud: 'ساوندکلاود',
     platformPinterest: 'پینترست',
-    platformGeneric: 'مدیای وب',
+    platformGeneric: 'پست / ریلز / استوری',
 
     // Media Result Modal / Card
     mediaFound: 'مشخصات رسانه با موفقیت دریافت شد',
@@ -225,7 +225,7 @@ export const translations = {
     // Download Manager
     downloadsHeader: 'فهرست دانلودها',
     queueEmpty: 'هیچ دانلودی در صف یا تاریخچه وجود ندارد',
-    startNewPrompt: 'برای شروع نخستین دانلود، پیوند یک مدیا را در بالا وارد کنید',
+    startNewPrompt: 'برای شروع نخستین دانلود، لینک پست، ریلز یا استوری اینستاگرام را در بالا وارد کنید',
     filterAll: 'همه',
     filterActive: 'در حال دانلود',
     filterCompleted: 'تکمیل‌شده',
@@ -303,7 +303,7 @@ export const translations = {
     freePlan: 'طرح پایه',
     storageQuota: 'فضای ذخیره‌سازی ابری',
     unlimitedSpeed: 'سرعت نامحدود 4K فعال است',
-    authModalTitle: 'ورود به سامانه وان دانلود',
+    authModalTitle: 'دانلود از اینستاگرام (وان دانلود)',
     authModalDesc: 'برای همگام‌سازی تاریخچه دانلودها و دسترسی به فایل‌ها وارد شوید.',
     emailLabel: 'نشانی ایمیل',
     passwordLabel: 'رمز عبور',
@@ -330,10 +330,10 @@ export const translations = {
   },
 
   ar: {
-    appName: 'وان داونلود',
-    appTitle: 'وان داونلود (OneDownload)',
-    appSubtitle: 'محمّل الفيديو والموسيقى والترجمة فائق السرعة • يوتيوب، تيك توك، إنستغرام',
-    tagline: 'محمّل الفيديو والموسيقى والترجمة فائق السرعة • يوتيوب، تيك توك، إنستغرام',
+    appName: 'تحميل من إنستغرام (وان داونلود)',
+    appTitle: 'تحميل من إنستغرام (وان داونلود)',
+    appSubtitle: 'تحميل سريع للمنشورات، ريلز، ستوري والصوتيات • إنستغرام',
+    tagline: 'تحميل سريع للمنشورات، ريلز، ستوري والصوتيات من إنستغرام بجودة أصلية',
     invalidUrlError: 'يرجى إدخال رابط صحيح',
 
     // App Security Lock
@@ -349,7 +349,7 @@ export const translations = {
     tabSettings: 'الإعدادات',
 
     // URL input
-    inputPlaceholder: 'الصق رابط الفيديو أو الصوت هنا (يوتيوب، تيك توك، إنستغرام، إكس...)',
+    inputPlaceholder: 'أدخل رابط منشور أو ريلز أو ستوري إنستغرام...',
     analyzeButton: 'تحليل الرابط',
     analyzing: 'جاري فحص وتحليل الوسائط...',
     pasteClipboard: 'لصق الرابط',
@@ -358,11 +358,11 @@ export const translations = {
     urlDetectedFromShare: 'تم اكتشاف رابط مشارك من تطبيق آخر!',
 
     // Platform badges
-    platformYouTube: 'يوتيوب',
-    platformTikTok: 'تيك توك',
+    platformYouTube: 'إنستغرام (ريلز)',
+    platformTikTok: 'إنستغرام (منشور)',
     platformInstagram: 'إنستغرام',
-    platformTwitter: 'إكس / تويتر',
-    platformFacebook: 'فيسبوك',
+    platformTwitter: 'إنستغرام (ستوري)',
+    platformFacebook: 'إنستغرام',
     platformVimeo: 'فيميو',
     platformSoundCloud: 'ساوند كلاود',
     platformPinterest: 'بينترست',
@@ -389,7 +389,7 @@ export const translations = {
     // Download Manager
     downloadsHeader: 'قائمة التنزيلات',
     queueEmpty: 'لا توجد تنزيلات نشطة أو سابقة في القائمة',
-    startNewPrompt: 'الصق رابط الفيديو أو الموسيقى في الأعلى لبدء التحميل فوراً',
+    startNewPrompt: 'الصق رابط منشور أو ريلز أو ستوري إنستغرام في الأعلى لبدء التحميل فوراً',
     filterAll: 'الكل',
     filterActive: 'جاري التحميل',
     filterCompleted: 'المكتملة',
@@ -444,7 +444,7 @@ export const translations = {
     playbackSpeed: 'سرعة التشغيل',
     loop: 'تكرار',
     volume: 'مستوى الصوت',
-    trackInfo: 'معلومات الملف',
+    trackInfo: 'مشخصات الملف',
     closePlayer: 'إغلاق المشغل',
 
     // PWA & Connectivity
@@ -467,7 +467,7 @@ export const translations = {
     freePlan: 'الباقة المجانية',
     storageQuota: 'مساحة التخزين السحابي',
     unlimitedSpeed: 'تحميل 4K غير محدود مفعل',
-    authModalTitle: 'حساب وان داونلود (OneDownload)',
+    authModalTitle: 'تحميل من إنستغرام (وان داونلود)',
     authModalDesc: 'سجّل الدخول لمزامنة تنزيلاتك وتفعيل التحميل الفوري بجودة 4K.',
     emailLabel: 'البريد الإلكتروني',
     passwordLabel: 'كلمة المرور',

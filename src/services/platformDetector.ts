@@ -10,24 +10,19 @@ export { extractAparatHash, isAparatUrl };
 
 export const SAMPLE_URLS: { label: string; platform: PlatformId; url: string }[] = [
   {
-    label: 'YouTube 4K Demo',
-    platform: 'youtube',
-    url: 'https://www.youtube.com/watch?v=aqz-KE-bpKQ'
+    label: 'Instagram Reel HD',
+    platform: 'instagram',
+    url: 'https://www.instagram.com/reel/DWwz7U6DcVx/'
+  },
+  {
+    label: 'Instagram Post Video',
+    platform: 'instagram',
+    url: 'https://www.instagram.com/p/DWwz7U6DcVx/'
   },
   {
     label: 'Aparat HD Video',
     platform: 'aparat',
     url: 'https://www.aparat.com/v/visdtjz'
-  },
-  {
-    label: 'TikTok Viral Clip',
-    platform: 'tiktok',
-    url: 'https://www.tiktok.com/@tiktok/video/7106594312292453675'
-  },
-  {
-    label: 'Instagram Reel',
-    platform: 'instagram',
-    url: 'https://www.instagram.com/reel/DWwz7U6DcVx/'
   }
 ];
 
@@ -396,12 +391,12 @@ function deriveTitleFromUrl(url: string, platform: PlatformId): string {
     }
     if (platform === 'twitter') {
       const id = extractTwitterStatusId(url);
-      if (id) return `ویدیو ایکس / توییتر (${id})`;
+      if (id) return `ویدیو رسانه (${id})`;
     }
     if (platform === 'youtube') {
       const ytId = extractYouTubeVideoId(url);
       if (ytId) {
-        return url.includes('/shorts/') ? `YouTube Shorts (${ytId})` : `YouTube Video (${ytId})`;
+        return `ویدیو HD (${ytId})`;
       }
     }
     const pathSegments = parsed.pathname.split('/').filter(Boolean);

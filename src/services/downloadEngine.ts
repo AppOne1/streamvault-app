@@ -990,7 +990,7 @@ export class DownloadEngine {
       }
 
       if (!downloadedBlob) {
-        throw new Error('خطا در دریافت فایل باینری مدیا — لطفاً اتصال اینترنت یا فیلترشکن خود را بررسی کرده و مجدداً تلاش کنید');
+        throw new Error('خطا در دریافت فایل باینری مدیا — لطفاً پایداری اتصال اینترنت خود را بررسی کرده و مجدداً تلاش کنید');
       }
 
       // 5. Persist binary Blob in internal app storage (IndexedDB) for 100% offline playback
